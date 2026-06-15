@@ -66,6 +66,38 @@ const json = try struple.toJson(allocator, key); // {"id":12345,"name":"alice"}
 defer allocator.free(json);
 ```
 
+## Navigation
+
+A packed buffer is a stream of elements; `View` slices and inspects it without
+decoding values — zero-copy, and every result is itself a valid struple buffer,
+so it composes and recurses.
+
+```zig
+const v = struple.view(key);
+try v.count();                     // number of elements
+(try v.at(2)).?;                   // 3rd element, a zero-copy sub-view
+(try v.head()).?;  try v.tail();   // first element / everything after it
+try v.nthRest(2);  try v.take(2);  // drop / keep a prefix
+v.headType();  v.isString();  v.isMap();  v.isContainer();  // predicates
+
+// descend into an array/map/set
+const inner = (try v.containedItems(allocator)).?;  // un-escaped inner stream
+defer allocator.free(inner);
+```
+
+Maps are canonical (key-sorted), so lookups are an ordered scan with early exit:
+
+```zig
+const m = struple.MapView.init(inner);
+(try m.get(encoded_key)).?;   // value bytes for an encoded key element
+var it = m.iterator();        // (key, value) views, in sorted order
+```
+
+The streaming `Reader` also gains a cursor surface: `peekType`, `nextView` (the
+next element's raw bytes), `skip`, and `rest`.
+
+*(Currently in the Zig reference; propagating to the other languages next.)*
+
 ## Conformance corpus
 
 `conformance/vectors.json` (regenerate with `zig build vectors`) is the

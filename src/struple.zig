@@ -440,6 +440,29 @@ pub const Reader = struct {
         }
     }
 
+    /// The type code of the next element without consuming it (null at end).
+    pub fn peekType(self: *const Reader) ?u8 {
+        return if (self.pos < self.buf.len) self.buf[self.pos] else null;
+    }
+
+    /// The remaining unread bytes, as a slice (a valid struple stream).
+    pub fn rest(self: *const Reader) []const u8 {
+        return self.buf[self.pos..];
+    }
+
+    /// The next element's raw bytes (a zero-copy view, itself a valid one-element
+    /// struple buffer), advancing the cursor. Null at end of stream.
+    pub fn nextView(self: *Reader) DecodeError!?[]const u8 {
+        const start = self.pos;
+        if ((try self.next()) == null) return null;
+        return self.buf[start..self.pos];
+    }
+
+    /// Advance past the next element; returns false at end of stream.
+    pub fn skip(self: *Reader) DecodeError!bool {
+        return (try self.nextView()) != null;
+    }
+
     fn take(self: *Reader, n: usize) DecodeError![]const u8 {
         if (self.pos + n > self.buf.len) return error.Truncated;
         const slice = self.buf[self.pos .. self.pos + n];
@@ -655,6 +678,14 @@ fn writeFramed(list: *std.ArrayList(u8), type_code: u8, content: []const u8) Enc
 
 pub const fromJson = @import("json.zig").fromJson;
 pub const toJson = @import("json.zig").toJson;
+
+// ---------------------------------------------------------------------------
+// Navigation / query (see navigate.zig)
+// ---------------------------------------------------------------------------
+
+pub const View = @import("navigate.zig").View;
+pub const MapView = @import("navigate.zig").MapView;
+pub const view = @import("navigate.zig").view;
 
 test {
     _ = @import("tests.zig");

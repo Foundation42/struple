@@ -535,3 +535,136 @@ test "json: floats round-trip by value" {
         try testing.expectEqual(try std.fmt.parseFloat(f64, s), try std.fmt.parseFloat(f64, back));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Navigation / query (View, MapView)
+// ---------------------------------------------------------------------------
+
+fn intOf(view_bytes: []const u8) !i128 {
+    var r = struple.reader(view_bytes);
+    return (try r.next()).?.int;
+}
+
+test "navigate: stream ops (count/at/head/tail/nthRest/take)" {
+    const a = testing.allocator;
+    var p = struple.Packer.init(a);
+    defer p.deinit();
+    try p.append("users");
+    try p.append(@as(i64, 12345));
+    try p.append(true);
+    var child = struple.Packer.init(a);
+    defer child.deinit();
+    try child.appendInt(1);
+    try child.appendInt(2);
+    try child.appendInt(3);
+    try p.appendArray(child.bytes());
+
+    const v = struple.view(p.bytes());
+    try testing.expectEqual(@as(usize, 4), try v.count());
+    try testing.expectEqual(@as(?u8, struple.tc.string), v.headType());
+
+    // at() yields decodable sub-views
+    var r0 = struple.reader((try v.at(0)).?);
+    try testing.expectEqualStrings("users", (try r0.next()).?.string);
+    try testing.expectEqual(@as(i128, 12345), try intOf((try v.at(1)).?));
+    try testing.expect(try v.at(4) == null);
+
+    // head == at(0)
+    try testing.expectEqualSlices(u8, (try v.at(0)).?, (try v.head()).?);
+
+    // tail = elements 1.. ; nthRest(2) = elements 2.. ; take(2) = prefix
+    try testing.expectEqual(@as(usize, 3), try struple.view(try v.tail()).count());
+    try testing.expectEqual(@as(usize, 2), try struple.view(try v.nthRest(2)).count());
+    const tk = try v.take(2);
+    try testing.expectEqual(@as(usize, 2), try struple.view(tk).count());
+    try testing.expectEqualSlices(u8, p.bytes()[0..tk.len], tk);
+}
+
+test "navigate: predicates and container descent" {
+    const a = testing.allocator;
+    {
+        const b = try packOne(a, "x");
+        defer a.free(b);
+        try testing.expect(struple.view(b).isString());
+    }
+    {
+        const b = try packOne(a, @as(i64, 5));
+        defer a.free(b);
+        const v = struple.view(b);
+        try testing.expect(v.isInt() and v.isNumber() and !v.isFloat());
+    }
+    {
+        const b = try packOne(a, @as(f64, 1.5));
+        defer a.free(b);
+        const v = struple.view(b);
+        try testing.expect(v.isFloat() and v.isNumber() and !v.isInt());
+    }
+    {
+        const b = try packOne(a, null);
+        defer a.free(b);
+        try testing.expect(struple.view(b).isNil());
+    }
+
+    // array: one top-level element that descends to its 2-element inner stream
+    var child = struple.Packer.init(a);
+    defer child.deinit();
+    try child.appendInt(10);
+    try child.appendInt(20);
+    var p = struple.Packer.init(a);
+    defer p.deinit();
+    try p.appendArray(child.bytes());
+
+    const v = struple.view(p.bytes());
+    try testing.expect(v.isArray() and v.isContainer());
+    try testing.expectEqual(@as(usize, 1), try v.count());
+    const inner = (try v.containedItems(a)).?;
+    defer a.free(inner);
+    const iv = struple.view(inner);
+    try testing.expectEqual(@as(usize, 2), try iv.count());
+    try testing.expectEqual(@as(i128, 10), try intOf((try iv.at(0)).?));
+    try testing.expectEqual(@as(i128, 20), try intOf((try iv.at(1)).?));
+}
+
+test "navigate: map lookup (get/iterator)" {
+    const a = testing.allocator;
+    const ka = try packOne(a, "a");
+    defer a.free(ka);
+    const kb = try packOne(a, "b");
+    defer a.free(kb);
+    const kc = try packOne(a, "c");
+    defer a.free(kc);
+    const kz = try packOne(a, "z");
+    defer a.free(kz);
+    const v1 = try packOne(a, @as(i64, 1));
+    defer a.free(v1);
+    const v2 = try packOne(a, @as(i64, 2));
+    defer a.free(v2);
+    const v3 = try packOne(a, @as(i64, 3));
+    defer a.free(v3);
+
+    var p = struple.Packer.init(a);
+    defer p.deinit();
+    try p.appendMap(&.{ .{ kc, v3 }, .{ ka, v1 }, .{ kb, v2 } }); // out of order -> canonical
+
+    const mv = struple.view(p.bytes());
+    try testing.expect(mv.isMap());
+    const inner = (try mv.containedItems(a)).?;
+    defer a.free(inner);
+    const m = struple.MapView.init(inner);
+    try testing.expectEqual(@as(usize, 3), try m.count());
+
+    // hit
+    try testing.expectEqualSlices(u8, v2, (try m.get(kb)).?);
+    // miss past the end (early exit) and in the middle
+    try testing.expect(try m.get(kz) == null);
+    const kaa = try packOne(a, "aa");
+    defer a.free(kaa);
+    try testing.expect(try m.get(kaa) == null);
+
+    // iterator yields keys in canonical (sorted) order
+    var it = m.iterator();
+    try testing.expectEqualSlices(u8, ka, (try it.next()).?.key);
+    try testing.expectEqualSlices(u8, kb, (try it.next()).?.key);
+    try testing.expectEqualSlices(u8, kc, (try it.next()).?.key);
+    try testing.expect(try it.next() == null);
+}
