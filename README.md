@@ -1,6 +1,9 @@
 # struple
 
-**Streaming, lexicographically-ordered tuple packing for Zig.**
+[![CI](https://github.com/Foundation42/struple/actions/workflows/ci.yml/badge.svg)](https://github.com/Foundation42/struple/actions/workflows/ci.yml)
+
+**Streaming, lexicographically-ordered tuple packing.** One wire format, six
+byte-identical implementations.
 
 A `struple` is a sequence of typed values packed into a byte buffer such that the
 **raw bytes are directly `memcmp`-comparable**:

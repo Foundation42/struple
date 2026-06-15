@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  zig:
+    name: Zig (reference + corpus)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+      - name: Unit tests
+        run: zig build test
+      - name: Corpus is up to date
+        run: |
+          zig build vectors
+          git diff --exit-code conformance/vectors.json
+
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm test
+        working-directory: js
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -t .
+        working-directory: py
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+        working-directory: rust
+
+  c:
+    name: C
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+        working-directory: c
+      - name: Sanitizers
+        run: |
+          cc -std=c11 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -o tc test_conformance.c struple.c struple_json.c -lm && ./tc
+        working-directory: c
+
+  cpp:
+    name: C++
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+        working-directory: cpp
+      - name: Sanitizers
+        run: |
+          g++ -std=c++17 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -Iinclude -o tc test/test_conformance.cpp && ./tc
+        working-directory: cpp
