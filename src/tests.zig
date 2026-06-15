@@ -751,3 +751,118 @@ test "navigate: map lookup (get/iterator)" {
     try testing.expectEqualSlices(u8, kc, (try it.next()).?.key);
     try testing.expect(try it.next() == null);
 }
+
+// ---------------------------------------------------------------------------
+// Semantic (value-based) ordering
+// ---------------------------------------------------------------------------
+
+fn semF64(a: std.mem.Allocator, v: f64) ![]u8 {
+    var p = struple.Packer.init(a);
+    try p.appendF64(v);
+    return p.toOwnedSlice();
+}
+fn semF32(a: std.mem.Allocator, v: f32) ![]u8 {
+    var p = struple.Packer.init(a);
+    try p.appendF32(v);
+    return p.toOwnedSlice();
+}
+fn semBig(a: std.mem.Allocator, neg: bool, mag: []const u8) ![]u8 {
+    var p = struple.Packer.init(a);
+    try p.appendBigInt(neg, mag);
+    return p.toOwnedSlice();
+}
+
+test "semantic: numbers compare by exact value across representations" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const lt = std.math.Order.lt;
+    const eq = std.math.Order.eq;
+    const gt = std.math.Order.gt;
+
+    // int <-> float by value (and -0.0 == 0 == 0.0)
+    try testing.expectEqual(eq, try struple.semanticOrder(a, try packOne(a, @as(i64, 5)), try semF64(a, 5.0)));
+    try testing.expectEqual(eq, try struple.semanticOrder(a, try packOne(a, @as(i64, 0)), try semF64(a, -0.0)));
+    try testing.expectEqual(lt, try struple.semanticOrder(a, try packOne(a, @as(i64, 3)), try semF64(a, 3.5)));
+    try testing.expectEqual(gt, try struple.semanticOrder(a, try packOne(a, @as(i64, 4)), try semF64(a, 3.5)));
+    try testing.expectEqual(lt, try struple.semanticOrder(a, try semF64(a, -2.5), try packOne(a, @as(i64, -2))));
+    try testing.expectEqual(eq, try struple.semanticOrder(a, try semF32(a, 1.5), try semF64(a, 1.5)));
+
+    // the 2^53 boundary — exact, where f64 loses integer precision
+    const two53: i64 = 1 << 53;
+    try testing.expectEqual(eq, try struple.semanticOrder(a, try packOne(a, two53), try semF64(a, @floatFromInt(two53))));
+    try testing.expectEqual(gt, try struple.semanticOrder(a, try packOne(a, two53 + 1), try semF64(a, @as(f64, @floatFromInt(two53)))));
+
+    // i128 vs large float (exact power of two)
+    const p100 = std.math.ldexp(@as(f64, 1.0), 100);
+    try testing.expectEqual(eq, try struple.semanticOrder(a, try packOne(a, @as(i128, 1) << 100), try semF64(a, p100)));
+    try testing.expectEqual(gt, try struple.semanticOrder(a, try packOne(a, (@as(i128, 1) << 100) + 1), try semF64(a, p100)));
+    try testing.expectEqual(lt, try struple.semanticOrder(a, try packOne(a, (@as(i128, 1) << 100) - 1), try semF64(a, p100)));
+
+    // big-int (> i128) vs float, exact
+    var m200 = [_]u8{0} ** 26;
+    m200[0] = 1; // 2^200
+    const p200 = std.math.ldexp(@as(f64, 1.0), 200);
+    try testing.expectEqual(eq, try struple.semanticOrder(a, try semBig(a, false, &m200), try semF64(a, p200)));
+    var m200p1 = [_]u8{0} ** 26;
+    m200p1[0] = 1;
+    m200p1[25] = 1; // 2^200 + 1
+    try testing.expectEqual(gt, try struple.semanticOrder(a, try semBig(a, false, &m200p1), try semF64(a, p200)));
+    try testing.expectEqual(lt, try struple.semanticOrder(a, try semBig(a, true, &m200p1), try semF64(a, -p200)));
+
+    // infinities and NaN
+    try testing.expectEqual(lt, try struple.semanticOrder(a, try packOne(a, @as(i128, 1) << 120), try semF64(a, std.math.inf(f64))));
+    try testing.expectEqual(gt, try struple.semanticOrder(a, try semF64(a, std.math.nan(f64)), try semF64(a, std.math.inf(f64))));
+    try testing.expectEqual(eq, try struple.semanticOrder(a, try semF64(a, std.math.nan(f64)), try semF32(a, std.math.nan(f32))));
+    try testing.expectEqual(lt, try struple.semanticOrder(a, try semF64(a, -std.math.inf(f64)), try packOne(a, @as(i64, -999999))));
+}
+
+test "semantic: cross-type classes and container recursion" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const lt = std.math.Order.lt;
+    const eq = std.math.Order.eq;
+
+    // nil < undefined < bool < number < timestamp < uuid < string < bytes
+    var chain = std.ArrayList([]const u8).init(a);
+    try chain.append(try packOne(a, null));
+    {
+        var p = struple.Packer.init(a);
+        try p.appendUndefined();
+        try chain.append(try p.toOwnedSlice());
+    }
+    try chain.append(try packOne(a, true));
+    try chain.append(try semF64(a, 1.0e300)); // a number (huge, but still < timestamp class)
+    {
+        var p = struple.Packer.init(a);
+        try p.appendTimestamp(0);
+        try chain.append(try p.toOwnedSlice());
+    }
+    {
+        var p = struple.Packer.init(a);
+        try p.appendUuid([_]u8{0} ** 16);
+        try chain.append(try p.toOwnedSlice());
+    }
+    try chain.append(try packOne(a, "z"));
+    {
+        var p = struple.Packer.init(a);
+        try p.appendBytes(&.{0x00});
+        try chain.append(try p.toOwnedSlice());
+    }
+    for (1..chain.items.len) |i| {
+        try testing.expectEqual(lt, try struple.semanticOrder(a, chain.items[i - 1], chain.items[i]));
+    }
+
+    // containers recurse by value: [5] == [5.0], and [1,2] < [1, 2.5]
+    const arr_i = try packArray(a, &.{try packOne(a, @as(i64, 5))});
+    const arr_f = try packArray(a, &.{try semF64(a, 5.0)});
+    try testing.expectEqual(eq, try struple.semanticOrder(a, arr_i, arr_f));
+
+    const arr_12 = try packArray(a, &.{ try packOne(a, @as(i64, 1)), try packOne(a, @as(i64, 2)) });
+    const arr_125 = try packArray(a, &.{ try packOne(a, @as(i64, 1)), try semF64(a, 2.5) });
+    try testing.expectEqual(lt, try struple.semanticOrder(a, arr_12, arr_125));
+
+    // a shorter tuple sorts before a longer one that extends it
+    try testing.expectEqual(lt, try struple.semanticOrder(a, try packOne(a, @as(i64, 1)), try concat(a, &.{ try packOne(a, @as(i64, 1)), try packOne(a, @as(i64, 0)) })));
+}

@@ -94,6 +94,149 @@ pub fn main() !void {
     try std.fs.cwd().makePath("conformance");
     try std.fs.cwd().writeFile(.{ .sub_path = "conformance/vectors.json", .data = out.items });
     std.debug.print("wrote conformance/vectors.json ({d} vectors: {d} json, {d} build)\n", .{ total, json_inputs.len, build_ops.len });
+
+    try emitSemantic(a);
+}
+
+// ---------------------------------------------------------------------------
+// Semantic-order corpus: `{a, b, order}` pairs (order = -1 | 0 | 1).
+// Each language compares its own semanticOrder(a, b) against `order`.
+// ---------------------------------------------------------------------------
+
+fn sp(a: std.mem.Allocator, value: anytype) []const u8 {
+    var p = struple.Packer.init(a);
+    p.append(value) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn sf64(a: std.mem.Allocator, v: f64) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendF64(v) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn sf32(a: std.mem.Allocator, v: f32) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendF32(v) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn sbig(a: std.mem.Allocator, neg: bool, mag: []const u8) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendBigInt(neg, mag) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn sts(a: std.mem.Allocator, micros: i64) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendTimestamp(micros) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn suuid(a: std.mem.Allocator, u: [16]u8) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendUuid(u) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn sundef(a: std.mem.Allocator) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendUndefined() catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn sarr(a: std.mem.Allocator, elems: []const []const u8) []const u8 {
+    var child = std.ArrayList(u8).init(a);
+    for (elems) |e| child.appendSlice(e) catch unreachable;
+    var p = struple.Packer.init(a);
+    p.appendArray(child.items) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+
+fn emitSemantic(a: std.mem.Allocator) !void {
+    const Pair = struct { x: []const u8, y: []const u8 };
+    var pairs = std.ArrayList(Pair).init(a);
+
+    // 2^53 / 2^100 / 2^200 as exact floats, plus a big-int magnitude for 2^200.
+    const f53 = std.math.ldexp(@as(f64, 1.0), 53);
+    const f100 = std.math.ldexp(@as(f64, 1.0), 100);
+    const f200 = std.math.ldexp(@as(f64, 1.0), 200);
+    var m200 = [_]u8{0} ** 26;
+    m200[0] = 1; // 2^200
+    var m200p1 = [_]u8{0} ** 26;
+    m200p1[0] = 1;
+    m200p1[25] = 1; // 2^200 + 1
+
+    const P = struct {
+        fn add(list: *std.ArrayList(Pair), x: []const u8, y: []const u8) void {
+            list.append(.{ .x = x, .y = y }) catch unreachable;
+        }
+    };
+
+    // int <-> float by value
+    P.add(&pairs, sp(a, @as(i64, 5)), sf64(a, 5.0)); // eq
+    P.add(&pairs, sp(a, @as(i64, 3)), sf64(a, 3.5)); // lt
+    P.add(&pairs, sp(a, @as(i64, 4)), sf64(a, 3.5)); // gt
+    P.add(&pairs, sf64(a, -2.5), sp(a, @as(i64, -2))); // lt
+    P.add(&pairs, sf32(a, 1.5), sf64(a, 1.5)); // eq
+    P.add(&pairs, sp(a, @as(i64, 0)), sf64(a, -0.0)); // eq
+    // the 2^53 boundary
+    P.add(&pairs, sp(a, @as(i64, 1) << 53), sf64(a, f53)); // eq
+    P.add(&pairs, sp(a, (@as(i64, 1) << 53) + 1), sf64(a, f53)); // gt
+    // i128 vs large float
+    P.add(&pairs, sp(a, @as(i128, 1) << 100), sf64(a, f100)); // eq
+    P.add(&pairs, sp(a, (@as(i128, 1) << 100) + 1), sf64(a, f100)); // gt
+    P.add(&pairs, sp(a, (@as(i128, 1) << 100) - 1), sf64(a, f100)); // lt
+    // big-int (> i128) vs float
+    P.add(&pairs, sbig(a, false, &m200), sf64(a, f200)); // eq
+    P.add(&pairs, sbig(a, false, &m200p1), sf64(a, f200)); // gt
+    P.add(&pairs, sbig(a, true, &m200p1), sf64(a, -f200)); // lt
+    // infinities / NaN
+    P.add(&pairs, sp(a, @as(i128, 1) << 120), sf64(a, std.math.inf(f64))); // lt
+    P.add(&pairs, sf64(a, std.math.nan(f64)), sf64(a, std.math.inf(f64))); // gt
+    P.add(&pairs, sf64(a, std.math.nan(f64)), sf32(a, std.math.nan(f32))); // eq
+    P.add(&pairs, sf64(a, -std.math.inf(f64)), sp(a, @as(i64, -999999))); // lt
+    // plain integer ordering (incl. big-int vs fixed)
+    P.add(&pairs, sp(a, @as(i64, -5)), sp(a, @as(i64, 5))); // lt
+    P.add(&pairs, sbig(a, false, &m200), sp(a, @as(i128, 1) << 120)); // gt (big > fixed)
+    // cross-type classes
+    P.add(&pairs, sp(a, null), sp(a, false)); // nil < bool
+    P.add(&pairs, sundef(a), sp(a, true)); // undefined < bool
+    P.add(&pairs, sp(a, true), sp(a, @as(i64, 0))); // bool < number
+    P.add(&pairs, sf64(a, 1.0e300), sts(a, 0)); // number < timestamp
+    P.add(&pairs, sts(a, 999), suuid(a, [_]u8{0} ** 16)); // timestamp < uuid
+    P.add(&pairs, suuid(a, [_]u8{0xff} ** 16), sp(a, "")); // uuid < string
+    P.add(&pairs, sp(a, "z"), blk: {
+        var p = struple.Packer.init(a);
+        p.appendBytes(&.{0}) catch unreachable;
+        break :blk p.toOwnedSlice() catch unreachable;
+    }); // string < bytes
+    // containers recurse by value
+    P.add(&pairs, sarr(a, &.{sp(a, @as(i64, 5))}), sarr(a, &.{sf64(a, 5.0)})); // eq
+    P.add(&pairs, sarr(a, &.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 2)) }), sarr(a, &.{ sp(a, @as(i64, 1)), sf64(a, 2.5) })); // lt
+    // prefix: shorter tuple sorts first
+    P.add(&pairs, sp(a, @as(i64, 1)), blk: {
+        var p = struple.Packer.init(a);
+        p.appendInt(1) catch unreachable;
+        p.appendInt(0) catch unreachable;
+        break :blk p.toOwnedSlice() catch unreachable;
+    }); // lt
+
+    var out = std.ArrayList(u8).init(a);
+    const w = out.writer();
+    try w.writeAll("[\n");
+    for (pairs.items, 0..) |pr, i| {
+        const ord = try struple.semanticOrder(a, pr.x, pr.y);
+        const n: i8 = switch (ord) {
+            .lt => -1,
+            .eq => 0,
+            .gt => 1,
+        };
+        try w.writeAll("  { \"a\": \"");
+        for (pr.x) |byte| try w.print("{x:0>2}", .{byte});
+        try w.writeAll("\", \"b\": \"");
+        for (pr.y) |byte| try w.print("{x:0>2}", .{byte});
+        try w.print("\", \"order\": {d} }}", .{n});
+        if (i + 1 < pairs.items.len) try w.writeByte(',');
+        try w.writeByte('\n');
+    }
+    try w.writeAll("]\n");
+
+    try std.fs.cwd().writeFile(.{ .sub_path = "conformance/semantic_vectors.json", .data = out.items });
+    std.debug.print("wrote conformance/semantic_vectors.json ({d} pairs)\n", .{pairs.items.len});
 }
 
 fn emitBytes(w: anytype, encoded: []const u8) !void {

@@ -713,6 +713,14 @@ pub const View = @import("navigate.zig").View;
 pub const MapView = @import("navigate.zig").MapView;
 pub const view = @import("navigate.zig").view;
 
+// ---------------------------------------------------------------------------
+// Semantic (value-based) ordering (see semantic.zig)
+// ---------------------------------------------------------------------------
+
+pub const semanticOrder = @import("semantic.zig").semanticOrder;
+pub const semanticEql = @import("semantic.zig").semanticEql;
+pub const SemanticError = @import("semantic.zig").SemanticError;
+
 test {
     _ = @import("tests.zig");
 }
