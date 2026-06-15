@@ -1,22 +1,22 @@
 //! Generates conformance/vectors.json — the language-neutral cross-language
-//! contract. Each entry is {"value": <canonical JSON value>, "bytes": "<hex>"}.
+//! contract. Each entry is {"json": "<canonical JSON text>", "bytes": "<hex>"}.
 //!
 //! A conforming implementation must satisfy, for every vector:
-//!     fromJson(value) == bytes        (encode is canonical)
-//!     toJson(bytes)   == value        (decode is canonical)
+//!     fromJson(json) == bytes        (encode is canonical, byte-exact)
+//!     toJson(bytes)  == json         (decode is canonical; floats compare by value)
 //!
-//! Run with `zig build vectors`.
+//! `json` is stored as a string (the exact canonical text) so the contract is
+//! unambiguous regardless of a consumer's number parsing. Run `zig build vectors`.
 
 const std = @import("std");
 const struple = @import("struple");
 
 /// Canonical JSON inputs spanning the JSON-expressible type space.
+/// Floats are non-integer-valued so their canonical text keeps a decimal point.
 const inputs = [_][]const u8{
-    // null / bool
     "null",
     "true",
     "false",
-    // integers across width bands and signs
     "0",
     "1",
     "-1",
@@ -27,24 +27,19 @@ const inputs = [_][]const u8{
     "-42",
     "9223372036854775807",
     "-9223372036854775808",
-    // arbitrary-precision integers (a JS f64 round-trip would corrupt these)
     "100000000000000000000000000000",
     "-99999999999999999999999999999999",
-    // floats
     "1.5",
     "-3.14159",
-    "1e10",
-    // strings (incl. prefixes that exercise lexicographic ordering, and escapes)
+    "0.5",
     "\"\"",
     "\"app\"",
     "\"apple\"",
     "\"hello world\"",
     "\"tab\\tnewline\\n\"",
-    // arrays
     "[]",
     "[1,2,3]",
     "[null,true,\"x\",[1,2]]",
-    // objects (canonical = keys sorted)
     "{}",
     "{\"a\":1,\"b\":2}",
     "{\"active\":true,\"id\":12345,\"name\":\"alice\",\"score\":87.5,\"tags\":[\"x\",\"y\"]}",
@@ -63,8 +58,8 @@ pub fn main() !void {
         const encoded = try struple.fromJson(a, input);
         const canonical = try struple.toJson(a, encoded);
 
-        try w.writeAll("  { \"value\": ");
-        try w.writeAll(canonical); // already valid JSON
+        try w.writeAll("  { \"json\": ");
+        try writeJsonStringLiteral(w, canonical);
         try w.writeAll(", \"bytes\": \"");
         for (encoded) |b| try w.print("{x:0>2}", .{b});
         try w.writeAll("\" }");
@@ -76,4 +71,19 @@ pub fn main() !void {
     try std.fs.cwd().makePath("conformance");
     try std.fs.cwd().writeFile(.{ .sub_path = "conformance/vectors.json", .data = out.items });
     std.debug.print("wrote conformance/vectors.json ({d} vectors)\n", .{inputs.len});
+}
+
+/// Emit `s` as a JSON string literal (escaping it a second time, since `s` is
+/// itself canonical JSON text).
+fn writeJsonStringLiteral(w: anytype, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
+    };
+    try w.writeByte('"');
 }

@@ -66,9 +66,16 @@ defer allocator.free(json);
 ## Conformance corpus
 
 `conformance/vectors.json` (regenerate with `zig build vectors`) is the
-language-neutral contract — `{value, bytes}` pairs that every implementation
-(Zig, Python, JavaScript, …) must reproduce in both directions. See
-[conformance/README.md](conformance/README.md).
+language-neutral contract — `{json, bytes}` pairs that every implementation must
+reproduce in both directions. See [conformance/README.md](conformance/README.md).
+
+## Implementations
+
+- **Zig** (this directory) — the reference implementation + corpus generator.
+- **TypeScript** ([`js/`](js/README.md)) — pure, zero-dependency port, verified
+  byte-identical against the corpus.
+
+Both are driven by the same `vectors.json`, so they agree on every byte.
 
 ## Type coverage (Python + JavaScript)
 

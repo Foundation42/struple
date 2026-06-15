@@ -1,0 +1,16 @@
+{
+  "name": "struple",
+  "version": "0.0.0",
+  "description": "Streaming, lexicographically-ordered tuple packing — memcmp-orderable, JSON-compatible (TypeScript)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
+  "license": "MIT"
+}

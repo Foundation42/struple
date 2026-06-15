@@ -2,5 +2,9 @@
 .zig-cache/
 zig-out/
 
+# Node
+node_modules/
+package-lock.json
+
 # Local Claude Code settings
 .claude/settings.local.json
