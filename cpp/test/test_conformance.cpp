@@ -122,7 +122,23 @@ int main() {
         }
     }
 
-    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d | %d failures\n",
-                je, jd, be, bt, fails);
+    // semantic-order corpus: each pair's semanticOrder(a, b) == order
+    int sem = 0;
+    Json sroot = json_parse(read_file("../conformance/semantic_vectors.json"));
+    for (auto& pr : sroot.items) {
+        const std::string& ah = obj_get(pr, "a")->text;
+        const std::string& bh = obj_get(pr, "b")->text;
+        int want = std::stoi(obj_get(pr, "order")->text);
+        int got = semanticOrder(from_hex(ah), from_hex(bh));
+        if (got != want) {
+            std::fprintf(stderr, "SEMANTIC FAIL %s <=> %s: got %d want %d\n", ah.c_str(), bh.c_str(), got, want);
+            fails++;
+        } else {
+            sem++;
+        }
+    }
+
+    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | %d failures\n",
+                je, jd, be, bt, sem, fails);
     return fails ? 1 : 0;
 }

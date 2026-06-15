@@ -214,11 +214,28 @@ compare correctly — at the cost of not preserving insertion order. If you need
 exact key order (e.g. byte-faithful JSON object round-trips), represent it as an
 **array of `[key, value]` pairs** instead.
 
-## A note on numbers across representations
+## Numbers across representations — the semantic comparator
 
-Because type codes dominate `memcmp`, an integer and a float never interleave by
-magnitude — `int 1000000` sorts below `float 0.5`. Comparing numbers across
-representations is the job of a **semantic comparator**, planned as a follow-on.
+Because type codes dominate `memcmp`, the raw byte order keeps an integer and a
+float from interleaving by magnitude — `int 1000000` sorts below `float 0.5`.
+When you want the **value** order instead, use `semanticOrder`:
+
+```zig
+struple.order(a, b);                  // raw byte order: int 5 < float 5.0
+try struple.semanticOrder(alloc, a, b); // value order:    int 5 == float 5.0
+```
+
+`semanticOrder` compares two encoded streams by mathematical value: `int`,
+big-integers, `float32` and `float64` all compare by their **exact** value, with
+no precision loss even where a `double` can't represent the integer (`int 2^53+1
+> float 2^53`, `big-int 2^200 == float 2^200`). `NaN` sorts as the greatest
+number; `-0.0 == 0.0 == int 0`. Non-numbers keep the wire family order (`nil <
+bool < number < timestamp < uuid < string < bytes < array < map < set`, with all
+numbers unified into one class); containers recurse element-wise.
+
+Available in all six languages (`semanticOrder` / `semantic_order` /
+`struple_semantic_order`) and pinned by `conformance/semantic_vectors.json` — a
+language-neutral set of `{a, b, order}` pairs every implementation must agree on.
 
 ## License
 

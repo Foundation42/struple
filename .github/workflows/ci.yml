@@ -18,7 +18,7 @@ jobs:
       - name: Corpus is up to date
         run: |
           zig build vectors
-          git diff --exit-code conformance/vectors.json
+          git diff --exit-code conformance/vectors.json conformance/semantic_vectors.json
 
   typescript:
     name: TypeScript

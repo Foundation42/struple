@@ -79,6 +79,31 @@
     </div>
   </section>
 
+  <section id="semantic">
+    <div class="wrap io">
+      <h2>Two orders, one format <span class="sub">bytes vs. value</span></h2>
+      <p class="lead">The raw byte order keeps types from interleaving — an int always sorts before a
+        float. When you want to compare by <strong>value</strong> instead, <code>semanticOrder</code>
+        does it exactly, across every numeric representation.</p>
+      <div class="cmp-grid">
+        <div>
+          <div class="label">Value A</div>
+          <input id="sem-a" value="[5]" />
+        </div>
+        <div>
+          <div class="label">Value B</div>
+          <input id="sem-b" value="[2.5]" />
+        </div>
+      </div>
+      <div class="verdict"><span id="sem-byte"></span> &nbsp;·&nbsp; <span id="sem-val"></span></div>
+      <p class="note" id="sem-note"></p>
+      <p class="note" style="margin-top:14px">The byte order always puts the int <code>5</code> before the
+        float <code>2.5</code> (type code first); the value order sees <code>5 &gt; 2.5</code>. The real
+        thing is exact even past <code>2<sup>53</sup></code>, where a <code>double</code> can't represent
+        the integer — try <code>[5]</code> vs <code>[5.5]</code> for a case where they agree.</p>
+    </div>
+  </section>
+
   <section id="streaming">
     <div class="wrap">
       <h2>Read it as it streams <span class="sub">a stream of fields, not a message</span></h2>
@@ -201,7 +226,7 @@
   </footer>
 
   <script type="module">
-    import { analyze, parseTuple, pack, compareBytes, typeName } from "./struple.js";
+    import { analyze, parseTuple, pack, compareBytes, typeName, semanticCompareTuple } from "./struple.js";
 
     const PALETTE = ["#6ee7b7", "#38bdf8", "#f6c177", "#c4b5fd", "#fda4af", "#86efac", "#fca5a5", "#93c5fd"];
     const hex2 = (b) => b.toString(16).padStart(2, "0");
@@ -262,11 +287,34 @@
       else note.innerHTML = "One is a prefix of the other — the shorter sorts first.";
     }
 
+    function renderSemantic() {
+      const byteEl = document.getElementById("sem-byte");
+      const valEl = document.getElementById("sem-val");
+      const note = document.getElementById("sem-note");
+      let av, bv, ab, bb;
+      try {
+        av = parseTuple(document.getElementById("sem-a").value);
+        bv = parseTuple(document.getElementById("sem-b").value);
+        ab = pack(av);
+        bb = pack(bv);
+      } catch (e) { byteEl.textContent = "⚠ " + e.message; valEl.textContent = ""; note.textContent = ""; return; }
+      const op = (c) => (c < 0 ? "&lt;" : c > 0 ? "&gt;" : "=");
+      const bc = Math.sign(compareBytes(ab, bb));
+      const sc = semanticCompareTuple(av, bv);
+      byteEl.innerHTML = `byte: A <span class="op">${op(bc)}</span> B`;
+      valEl.innerHTML = `value: A <span class="op">${op(sc)}</span> B`;
+      if (bc !== sc) note.innerHTML = "The two orders <strong>disagree</strong> — the bytes separate the types, the value order compares the numbers.";
+      else note.textContent = "Here both orders agree.";
+    }
+
     document.getElementById("enc-input").addEventListener("input", renderEncoder);
     document.getElementById("cmp-a").addEventListener("input", renderCompare);
     document.getElementById("cmp-b").addEventListener("input", renderCompare);
+    document.getElementById("sem-a").addEventListener("input", renderSemantic);
+    document.getElementById("sem-b").addEventListener("input", renderSemantic);
     renderEncoder();
     renderCompare();
+    renderSemantic();
   </script>
 </body>
 </html>

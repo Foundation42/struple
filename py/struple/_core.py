@@ -9,8 +9,10 @@ languages.
 from __future__ import annotations
 
 import datetime as _dt
+import math as _math
 import struct
 import uuid as _uuid
+from fractions import Fraction as _Fraction
 from typing import Any, Iterable, Optional
 
 # Type codes. Their order is the cross-type sort order.
@@ -645,3 +647,94 @@ class MapView:
             if k > key:
                 return None
         return None
+
+
+# ---------------------------------------------------------------------------
+# Semantic (value-based) ordering
+# ---------------------------------------------------------------------------
+
+_CLASS_RANK = {
+    "nil": 0, "undef": 1, "bool": 2, "int": 3, "float32": 3, "float64": 3,
+    "timestamp": 4, "uuid": 5, "string": 6, "bytes": 7, "array": 8, "map": 9, "set": 10,
+}
+
+
+def _sign(x) -> int:
+    return (x > 0) - (x < 0)
+
+
+def semantic_order(a: bytes, b: bytes) -> int:
+    """Compare two encoded streams by *value* (not bytes): int, float32 and
+    float64 compare by exact mathematical value, so ``int 5 == float 5.0``.
+    Returns -1, 0 or 1. NaN sorts greatest; -0.0 == 0; containers recurse."""
+    ra, rb = Reader(a), Reader(b)
+    while True:
+        ea, eb = ra.next(), rb.next()
+        if ea is None and eb is None:
+            return 0
+        if ea is None:
+            return -1
+        if eb is None:
+            return 1
+        c = _compare_elements(ea, eb)
+        if c:
+            return c
+
+
+def semantic_eq(a: bytes, b: bytes) -> bool:
+    return semantic_order(a, b) == 0
+
+
+def _compare_elements(ea: tuple, eb: tuple) -> int:
+    ka, va = ea
+    kb, vb = eb
+    ra, rb = _CLASS_RANK[ka], _CLASS_RANK[kb]
+    if ra != rb:
+        return _sign(ra - rb)
+    if ka in ("nil", "undef"):
+        return 0
+    if ka == "bool":
+        return _sign(int(va) - int(vb))
+    if ka in ("int", "float32", "float64"):
+        return _compare_numbers(ea, eb)
+    if ka == "timestamp":
+        return _sign(va - vb)
+    if ka == "uuid" or ka == "bytes":
+        return (va > vb) - (va < vb)
+    if ka == "string":
+        ba, bb = va.encode("utf-8"), vb.encode("utf-8")  # UTF-8 byte order
+        return (ba > bb) - (ba < bb)
+    if ka in ("array", "set", "map"):
+        return semantic_order(va, vb)  # va/vb are the (un-escaped) inner streams
+    raise ValueError(f"struple: unknown element kind {ka!r}")
+
+
+def _num_class(e: tuple) -> int:
+    k, v = e
+    if k == "int":
+        return 1
+    if _math.isnan(v):
+        return 3
+    if v == _math.inf:
+        return 2
+    if v == -_math.inf:
+        return 0
+    return 1
+
+
+def _compare_numbers(ea: tuple, eb: tuple) -> int:
+    ca, cb = _num_class(ea), _num_class(eb)
+    if ca != cb:
+        return _sign(ca - cb)
+    if ca != 1:
+        return 0  # both -inf, both +inf, or both NaN
+    ka, va = ea
+    kb, vb = eb
+    ai, bi = ka == "int", kb == "int"
+    if ai and bi:
+        return _sign(va - vb)
+    if not ai and not bi:
+        return (va > vb) - (va < vb)
+    # one int, one finite float — compare exactly via rationals (Fraction(float)
+    # is exact, so no precision is lost even for huge integers)
+    return _sign(_Fraction(va) - _Fraction(vb))

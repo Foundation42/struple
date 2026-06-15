@@ -172,8 +172,14 @@ int struple_map_next(struple_map_iter *it, struple_view *key, struple_view *valu
 
 /* ---- ordering / round-trip ---- */
 
-/* Lexicographic comparison: -1, 0, or 1. Matches semantic order. */
+/* Lexicographic byte comparison: -1, 0, or 1. */
 int struple_compare(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen);
+
+/* Semantic (value-based) comparison: numbers compare by exact mathematical
+ * value, so int 5 == float 5.0 (and large integers compare against floats with
+ * no precision loss). Sets *order to -1/0/1; returns 0 on success, -1 on
+ * malformed input or out-of-memory. */
+int struple_semantic_order(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int *order);
 
 /* Decode every element and re-encode it into `out` (validates the decoder).
  * Returns 0 on success, -1 on error. */

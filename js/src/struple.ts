@@ -520,6 +520,115 @@ export class MapView {
 }
 
 // ---------------------------------------------------------------------------
+// Semantic (value-based) ordering
+// ---------------------------------------------------------------------------
+
+/** Compare two encoded streams by *value* (not bytes): int, big-int, float32 and
+ *  float64 compare by exact mathematical value, so `int 5 === float 5.0`. Returns
+ *  <0, 0, or >0. NaN sorts greatest; -0 === 0; containers recurse. */
+export function semanticOrder(a: Uint8Array, b: Uint8Array): number {
+  const ra = new Reader(a);
+  const rb = new Reader(b);
+  for (;;) {
+    const ea = ra.next();
+    const eb = rb.next();
+    if (ea === null && eb === null) return 0;
+    if (ea === null) return -1;
+    if (eb === null) return 1;
+    const c = compareElements(ea, eb);
+    if (c !== 0) return c;
+  }
+}
+
+export function semanticEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return semanticOrder(a, b) === 0;
+}
+
+const CLASS_RANK: Record<Element["kind"], number> = {
+  nil: 0, undef: 1, bool: 2, int: 3, float32: 3, float64: 3,
+  timestamp: 4, uuid: 5, string: 6, bytes: 7, array: 8, map: 9, set: 10,
+};
+
+function cmp3(a: number | bigint, b: number | bigint): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareElements(a: Element, b: Element): number {
+  const ra = CLASS_RANK[a.kind];
+  const rb = CLASS_RANK[b.kind];
+  if (ra !== rb) return cmp3(ra, rb);
+  switch (a.kind) {
+    case "nil":
+    case "undef":
+      return 0;
+    case "bool":
+      return cmp3(a.value ? 1 : 0, (b as { value: boolean }).value ? 1 : 0);
+    case "int":
+    case "float32":
+    case "float64":
+      return compareNumbers(a, b);
+    case "timestamp":
+      return cmp3(a.micros, (b as { micros: bigint }).micros);
+    case "uuid":
+    case "bytes":
+      return compare(a.value, (b as { value: Uint8Array }).value);
+    case "string":
+      // Order by UTF-8 bytes (matches the wire order and every other language).
+      return compare(utf8Encode.encode(a.value), utf8Encode.encode((b as { value: string }).value));
+    case "array":
+    case "map":
+    case "set":
+      return semanticOrder(a.body, (b as { body: Uint8Array }).body);
+  }
+}
+
+// Rank within the number class: -inf < finite < +inf < NaN.
+function numClass(e: Element): number {
+  if (e.kind === "int") return 1;
+  const f = (e as { value: number }).value;
+  if (Number.isNaN(f)) return 3;
+  if (f === Infinity) return 2;
+  if (f === -Infinity) return 0;
+  return 1;
+}
+
+function compareNumbers(a: Element, b: Element): number {
+  const ca = numClass(a);
+  const cb = numClass(b);
+  if (ca !== cb) return cmp3(ca, cb);
+  if (ca !== 1) return 0; // both -inf, both +inf, or both NaN
+  const ai = a.kind === "int";
+  const bi = b.kind === "int";
+  if (ai && bi) return cmp3((a as { value: bigint }).value, (b as { value: bigint }).value);
+  if (!ai && !bi) return cmp3((a as { value: number }).value, (b as { value: number }).value);
+  if (ai) return compareIntFloat((a as { value: bigint }).value, (b as { value: number }).value);
+  return -compareIntFloat((b as { value: bigint }).value, (a as { value: number }).value);
+}
+
+// Exact comparison of a big integer to a finite double, via BigInt arithmetic.
+function compareIntFloat(I: bigint, f: number): number {
+  if (f === 0) return I > 0n ? 1 : I < 0n ? -1 : 0;
+  const signI = I > 0n ? 1 : I < 0n ? -1 : 0;
+  const signF = f > 0 ? 1 : -1;
+  if (signI !== signF) return cmp3(signI, signF);
+  const N = I < 0n ? -I : I;
+  const { mant, exp } = decomposeDouble(Math.abs(f));
+  const c = exp >= 0 ? cmp3(N, mant << BigInt(exp)) : cmp3(N << BigInt(-exp), mant);
+  return signI < 0 ? -c : c;
+}
+
+// Decompose a finite, nonzero magnitude into `mant * 2^exp` (mant a BigInt).
+function decomposeDouble(g: number): { mant: bigint; exp: number } {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, g, false);
+  const bits = dv.getBigUint64(0, false);
+  const rawExp = Number((bits >> 52n) & 0x7ffn);
+  const frac = bits & 0xfffffffffffffn;
+  if (rawExp === 0) return { mant: frac, exp: -1074 }; // subnormal
+  return { mant: (1n << 52n) | frac, exp: rawExp - 1075 };
+}
+
+// ---------------------------------------------------------------------------
 // Encoding internals
 // ---------------------------------------------------------------------------
 

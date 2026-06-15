@@ -17,8 +17,10 @@
 
 mod codec;
 pub mod json;
+mod semantic;
 
 pub use codec::{
     compare, encode, pack, transcode, unpack, view, Element, EntryIter, Error, MapView, Reader,
     Value, View, Writer,
 };
+pub use semantic::{semantic_eq, semantic_order};

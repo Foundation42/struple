@@ -11,11 +11,15 @@ import json
 import os
 import unittest
 
-from struple import Writer, from_json, to_json, transcode
+from struple import Writer, from_json, semantic_order, to_json, transcode
 
 _CORPUS = os.path.join(os.path.dirname(__file__), "..", "..", "conformance", "vectors.json")
 with open(_CORPUS, encoding="utf-8") as _f:
     VECTORS = json.load(_f)
+
+_SEMANTIC = os.path.join(os.path.dirname(__file__), "..", "..", "conformance", "semantic_vectors.json")
+with open(_SEMANTIC, encoding="utf-8") as _f:
+    SEM_VECTORS = json.load(_f)
 
 
 def build_bytes(op):
@@ -96,6 +100,12 @@ class Conformance(unittest.TestCase):
                 continue
             with self.subTest(build=v["build"]):
                 self.assertEqual(transcode(bytes.fromhex(v["bytes"])).hex(), v["bytes"])
+
+    def test_semantic_order(self):
+        for sv in SEM_VECTORS:
+            a, b = bytes.fromhex(sv["a"]), bytes.fromhex(sv["b"])
+            with self.subTest(a=sv["a"], b=sv["b"]):
+                self.assertEqual(semantic_order(a, b), sv["order"])
 
 
 if __name__ == "__main__":

@@ -11,12 +11,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { Writer, transcode, fromJson, toJson } from "../src/index.ts";
+import { Writer, transcode, fromJson, toJson, semanticOrder } from "../src/index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const corpusPath = join(here, "..", "..", "conformance", "vectors.json");
 type Vector = { json?: string; build?: any; bytes: string };
 const vectors = JSON.parse(readFileSync(corpusPath, "utf8")) as Vector[];
+
+const semanticPath = join(here, "..", "..", "conformance", "semantic_vectors.json");
+type SemVector = { a: string; b: string; order: number };
+const semVectors = JSON.parse(readFileSync(semanticPath, "utf8")) as SemVector[];
 
 function toHex(bytes: Uint8Array): string {
   let s = "";
@@ -81,4 +85,10 @@ for (const v of vectors) {
     test(`build   ${label}`, () => assert.equal(toHex(buildBytes(v.build)), v.bytes));
     test(`transcode ${label}`, () => assert.equal(toHex(transcode(fromHex(v.bytes))), v.bytes));
   }
+}
+
+const sgn = (n: number) => (n < 0 ? -1 : n > 0 ? 1 : 0);
+for (const [i, sv] of semVectors.entries()) {
+  test(`semantic ${i}: ${sv.a} <=> ${sv.b}`, () =>
+    assert.equal(sgn(semanticOrder(fromHex(sv.a), fromHex(sv.b))), sv.order));
 }

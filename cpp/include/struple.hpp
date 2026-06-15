@@ -12,6 +12,7 @@
 #define STRUPLE_HPP
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -689,6 +690,214 @@ public:
     }
     std::optional<Slice> get(const Bytes& key) const { return get(key.data(), key.size()); }
 };
+
+// --------------------------------------------------------- semantic ordering
+
+inline int semanticOrder(const uint8_t* a, size_t alen, const uint8_t* b, size_t blen);
+
+namespace detail {
+
+inline int sem_class_rank(Kind k) {
+    switch (k) {
+        case Kind::Nil: return 0;
+        case Kind::Undefined: return 1;
+        case Kind::Bool: return 2;
+        case Kind::Int:
+        case Kind::BigInt:
+        case Kind::F32:
+        case Kind::F64: return 3;
+        case Kind::Timestamp: return 4;
+        case Kind::Uuid: return 5;
+        case Kind::String: return 6;
+        case Kind::Bytes: return 7;
+        case Kind::Array: return 8;
+        case Kind::Map: return 9;
+        case Kind::Set: return 10;
+    }
+    return 0;
+}
+
+inline int sem_dcmp(double x, double y) { return (x > y) - (x < y); }
+inline int sem_sign(double f) { return (f > 0) - (f < 0); }
+
+inline int sem_cmp_lex(const uint8_t* a, size_t al, const uint8_t* b, size_t bl) {
+    size_t n = al < bl ? al : bl;
+    int c = n ? std::memcmp(a, b, n) : 0;
+    if (c) return c < 0 ? -1 : 1;
+    return (al > bl) - (al < bl);
+}
+
+inline int sem_cmp_mag(const uint8_t* a, size_t al, const uint8_t* b, size_t bl) {
+    while (al && a[0] == 0) { a++; al--; }
+    while (bl && b[0] == 0) { b++; bl--; }
+    if (al != bl) return al < bl ? -1 : 1;
+    int c = al ? std::memcmp(a, b, al) : 0;
+    return c < 0 ? -1 : (c > 0 ? 1 : 0);
+}
+
+inline void sem_decompose(double g, uint64_t& mant, int& exp) {
+    uint64_t bits;
+    std::memcpy(&bits, &g, 8);
+    int raw = int((bits >> 52) & 0x7ff);
+    uint64_t frac = bits & 0xfffffffffffffull;
+    if (raw == 0) {
+        mant = frac;
+        exp = -1074;
+    } else {
+        mant = (1ull << 52) | frac;
+        exp = raw - 1075;
+    }
+}
+
+inline Bytes sem_shl(const uint8_t* src, size_t slen, size_t bits) {
+    size_t byte_shift = bits / 8;
+    int bit_shift = int(bits % 8);
+    Bytes out(slen + 1 + byte_shift, 0);
+    unsigned carry = 0;
+    for (size_t i = slen; i-- > 0;) {
+        unsigned cur = (unsigned(src[i]) << bit_shift) | carry;
+        out[i + 1] = uint8_t(cur & 0xff);
+        carry = cur >> 8;
+    }
+    out[0] = uint8_t(carry);
+    return out;
+}
+
+inline int sem_u64_scaled(uint64_t N, uint64_t mant, int exp) {
+    if (exp >= 0) {
+        if (exp >= 64 || mant > (UINT64_MAX >> exp)) return -1; // mant<<exp > N
+        uint64_t B = mant << exp;
+        return (N > B) - (N < B);
+    }
+    int s = -exp;
+    if (s >= 64 || N > (UINT64_MAX >> s)) return 1; // N<<s > mant
+    uint64_t A = N << s;
+    return (A > mant) - (A < mant);
+}
+
+inline int sem_mag_scaled(const uint8_t* mag, size_t mlen, uint64_t mant, int exp) {
+    uint8_t mb[8];
+    for (int i = 0; i < 8; i++) mb[i] = uint8_t(mant >> (8 * (7 - i)));
+    if (exp >= 0) {
+        Bytes s = sem_shl(mb, 8, size_t(exp));
+        return sem_cmp_mag(mag, mlen, s.data(), s.size());
+    }
+    Bytes s = sem_shl(mag, mlen, size_t(-exp));
+    return sem_cmp_mag(s.data(), s.size(), mb, 8);
+}
+
+inline int sem_i64_float(int64_t value, double f) {
+    if (value == 0) return -sem_sign(f);
+    if (value >= -(1ll << 53) && value <= (1ll << 53)) return sem_dcmp(double(value), f);
+    int si = value > 0 ? 1 : -1;
+    int sf = sem_sign(f);
+    if (si != sf) return (si > sf) - (si < sf);
+    uint64_t N = value < 0 ? (~uint64_t(value) + 1) : uint64_t(value);
+    uint64_t mant;
+    int exp;
+    sem_decompose(std::fabs(f), mant, exp);
+    int c = sem_u64_scaled(N, mant, exp);
+    return si < 0 ? -c : c;
+}
+
+inline int sem_bigint_float(bool neg, const uint8_t* mag, size_t mlen, double f) {
+    int si = neg ? -1 : 1;
+    int sf = sem_sign(f);
+    if (si != sf) return (si > sf) - (si < sf);
+    uint64_t mant;
+    int exp;
+    sem_decompose(std::fabs(f), mant, exp);
+    int c = sem_mag_scaled(mag, mlen, mant, exp);
+    return si < 0 ? -c : c;
+}
+
+inline bool sem_is_int(const Element& e) { return e.kind == Kind::Int || e.kind == Kind::BigInt; }
+inline double sem_float(const Element& e) { return e.kind == Kind::F32 ? double(e.f32) : e.f64; }
+inline int sem_int_sign(const Element& e) {
+    if (e.kind == Kind::Int) return (e.integer > 0) - (e.integer < 0);
+    return e.big_negative ? -1 : 1;
+}
+inline int sem_num_class(const Element& e) {
+    if (sem_is_int(e)) return 1;
+    double f = sem_float(e);
+    if (std::isnan(f)) return 3;
+    if (std::isinf(f)) return f > 0 ? 2 : 0;
+    return 1;
+}
+
+inline int sem_int_finite(const Element& e, double f) {
+    if (e.kind == Kind::Int) return sem_i64_float(e.integer, f);
+    return sem_bigint_float(e.big_negative, e.data.data(), e.data.size(), f);
+}
+
+inline int sem_int_int(const Element& a, const Element& b) {
+    if (a.kind == Kind::Int && b.kind == Kind::Int) return (a.integer > b.integer) - (a.integer < b.integer);
+    int sa = sem_int_sign(a), sb = sem_int_sign(b);
+    if (sa != sb) return (sa > sb) - (sa < sb);
+    bool ab = a.kind == Kind::BigInt, bb = b.kind == Kind::BigInt;
+    if (ab != bb) {
+        if (sa > 0) return ab ? 1 : -1;
+        return ab ? -1 : 1;
+    }
+    int c = sem_cmp_mag(a.data.data(), a.data.size(), b.data.data(), b.data.size());
+    return sa < 0 ? -c : c;
+}
+
+inline int sem_numbers(const Element& a, const Element& b) {
+    int ca = sem_num_class(a), cb = sem_num_class(b);
+    if (ca != cb) return (ca > cb) - (ca < cb);
+    if (ca != 1) return 0;
+    bool ai = sem_is_int(a), bi = sem_is_int(b);
+    if (ai && bi) return sem_int_int(a, b);
+    if (!ai && !bi) return sem_dcmp(sem_float(a), sem_float(b));
+    if (ai) return sem_int_finite(a, sem_float(b));
+    return -sem_int_finite(b, sem_float(a));
+}
+
+inline int sem_elements(const Element& a, const Element& b) {
+    int ra = sem_class_rank(a.kind), rb = sem_class_rank(b.kind);
+    if (ra != rb) return (ra > rb) - (ra < rb);
+    switch (a.kind) {
+        case Kind::Nil:
+        case Kind::Undefined: return 0;
+        case Kind::Bool: return int(a.boolean) - int(b.boolean);
+        case Kind::Int:
+        case Kind::BigInt:
+        case Kind::F32:
+        case Kind::F64: return sem_numbers(a, b);
+        case Kind::Timestamp: return (a.integer > b.integer) - (a.integer < b.integer);
+        case Kind::Uuid:
+        case Kind::String:
+        case Kind::Bytes: return sem_cmp_lex(a.data.data(), a.data.size(), b.data.data(), b.data.size());
+        case Kind::Array:
+        case Kind::Map:
+        case Kind::Set:
+            return struple::semanticOrder(a.data.data(), a.data.size(), b.data.data(), b.data.size());
+    }
+    return 0;
+}
+
+}  // namespace detail
+
+/// Compare two encoded streams by *value*: int 5 == float 5.0, exact across all
+/// representations. Returns -1/0/1. NaN sorts greatest; -0.0 == 0; containers
+/// recurse. Throws struple::Error on malformed input.
+inline int semanticOrder(const uint8_t* a, size_t alen, const uint8_t* b, size_t blen) {
+    Reader ra(a, alen), rb(b, blen);
+    for (;;) {
+        auto ea = ra.next();
+        auto eb = rb.next();
+        if (!ea && !eb) return 0;
+        if (!ea) return -1;
+        if (!eb) return 1;
+        int c = detail::sem_elements(*ea, *eb);
+        if (c != 0) return c;
+    }
+}
+inline int semanticOrder(const Bytes& a, const Bytes& b) {
+    return semanticOrder(a.data(), a.size(), b.data(), b.size());
+}
+inline bool semanticEqual(const Bytes& a, const Bytes& b) { return semanticOrder(a, b) == 0; }
 
 }  // namespace struple
 

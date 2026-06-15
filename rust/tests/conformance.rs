@@ -175,3 +175,27 @@ fn build_transcode() {
         }
     }
 }
+
+#[test]
+fn semantic_corpus() {
+    use std::cmp::Ordering;
+    let path = format!("{}/../conformance/semantic_vectors.json", env!("CARGO_MANIFEST_DIR"));
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let pairs = match parse(&text).expect("parse semantic corpus") {
+        Json::Array(v) => v,
+        _ => panic!("semantic corpus is not an array"),
+    };
+    for pr in pairs {
+        let (a_hex, b_hex) = (as_str(field(&pr, "a").unwrap()), as_str(field(&pr, "b").unwrap()));
+        let want = match field(&pr, "order").unwrap() {
+            Json::Int(i) => *i,
+            _ => panic!("order is not an integer"),
+        };
+        let got: i128 = match struple::semantic_order(&from_hex(a_hex), &from_hex(b_hex)).unwrap() {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        };
+        assert_eq!(got, want, "semantic {a_hex} <=> {b_hex}");
+    }
+}

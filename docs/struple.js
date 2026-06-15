@@ -88,6 +88,95 @@ export function compareBytes(a, b) {
   return a.length - b.length;
 }
 
+// ---- semantic (value) ordering: numbers compare by value, so int 5 == float 5.0 ----
+const sign3 = (n) => (n < 0 ? -1 : n > 0 ? 1 : 0);
+const cmpBig = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+function valueClass(v) {
+  if (v === null) return 0;
+  if (v === undefined) return 1;
+  if (typeof v === "boolean") return 2;
+  if (typeof v === "bigint" || typeof v === "number") return 3;
+  if (typeof v === "string") return 6;
+  if (Array.isArray(v)) return 8;
+  return 9; // object -> map
+}
+
+function numClassV(v) {
+  if (typeof v === "bigint") return 1;
+  if (Number.isNaN(v)) return 3;
+  if (v === Infinity) return 2;
+  if (v === -Infinity) return 0;
+  return 1;
+}
+
+function decomposeD(g) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, g, false);
+  const bits = dv.getBigUint64(0, false);
+  const rawExp = Number((bits >> 52n) & 0x7ffn);
+  const frac = bits & 0xfffffffffffffn;
+  if (rawExp === 0) return { mant: frac, exp: -1074 };
+  return { mant: (1n << 52n) | frac, exp: rawExp - 1075 };
+}
+
+// Exact comparison of a big integer to a finite double (no precision loss).
+function cmpIntFloat(I, f) {
+  if (f === 0) return cmpBig(I, 0n);
+  const sI = I > 0n ? 1 : -1;
+  const sF = f > 0 ? 1 : -1;
+  if (sI !== sF) return sign3(sI - sF);
+  const N = I < 0n ? -I : I;
+  const { mant, exp } = decomposeD(Math.abs(f));
+  const c = exp >= 0 ? cmpBig(N, mant << BigInt(exp)) : cmpBig(N << BigInt(-exp), mant);
+  return sI < 0 ? -c : c;
+}
+
+function compareNumberValues(a, b) {
+  const ca = numClassV(a);
+  const cb = numClassV(b);
+  if (ca !== cb) return sign3(ca - cb);
+  if (ca !== 1) return 0; // both -inf / +inf / NaN
+  const ai = typeof a === "bigint";
+  const bi = typeof b === "bigint";
+  if (ai && bi) return cmpBig(a, b);
+  if (!ai && !bi) return a < b ? -1 : a > b ? 1 : 0;
+  if (ai) return cmpIntFloat(a, b);
+  return -cmpIntFloat(b, a);
+}
+
+/** Compare two parsed JSON values by struple's semantic (value) order. */
+export function semanticCompareValue(a, b) {
+  const ra = valueClass(a);
+  const rb = valueClass(b);
+  if (ra !== rb) return sign3(ra - rb);
+  if (ra <= 1) return 0; // nil / undefined
+  if (ra === 2) return sign3((a ? 1 : 0) - (b ? 1 : 0));
+  if (ra === 3) return compareNumberValues(a, b);
+  if (ra === 6) return sign3(compareBytes(utf8(a), utf8(b)));
+  if (ra === 8) return semanticCompareTuple(a, b);
+  // object -> map: compare the canonical (key-sorted) key/value sequence
+  const ea = Object.keys(a).sort().map((k) => [k, a[k]]);
+  const eb = Object.keys(b).sort().map((k) => [k, b[k]]);
+  for (let i = 0; i < Math.min(ea.length, eb.length); i++) {
+    const kc = sign3(compareBytes(utf8(ea[i][0]), utf8(eb[i][0])));
+    if (kc) return kc;
+    const vc = semanticCompareValue(ea[i][1], eb[i][1]);
+    if (vc) return vc;
+  }
+  return sign3(ea.length - eb.length);
+}
+
+/** Compare two tuples (arrays of values) element-wise by semantic order. */
+export function semanticCompareTuple(av, bv) {
+  const n = Math.min(av.length, bv.length);
+  for (let i = 0; i < n; i++) {
+    const c = semanticCompareValue(av[i], bv[i]);
+    if (c) return c;
+  }
+  return sign3(av.length - bv.length);
+}
+
 function appendValue(buf, v) {
   if (v === null || v === undefined) { buf.push(v === undefined ? T.undef : T.nil); return; }
   switch (typeof v) {

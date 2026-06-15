@@ -207,7 +207,41 @@ int main(void) {
 
     struple_json_free(root);
     free(text);
-    printf("test_conformance: json encode %d decode %d | build %d transcode %d | %d failures\n",
-           json_enc, json_dec, build_enc, build_trc, failures);
+
+    /* semantic-order corpus: each pair's struple_semantic_order(a, b) == order */
+    int sem_ok = 0;
+    size_t slen;
+    char *stext = read_file("../conformance/semantic_vectors.json", &slen);
+    sj_value *sroot = struple_json_parse(stext, slen);
+    if (sroot && sroot->kind == SJ_ARRAY) {
+        for (size_t i = 0; i < sroot->count; i++) {
+            const sj_value *pr = &sroot->items[i];
+            const char *ahex = obj_get(pr, "a")->str;
+            const char *bhex = obj_get(pr, "b")->str;
+            int want = atoi(obj_get(pr, "order")->str);
+            uint8_t *ab, *bb;
+            size_t al, bl;
+            hexdec(ahex, &ab, &al);
+            hexdec(bhex, &bb, &bl);
+            int ord = 0;
+            int rc = struple_semantic_order(ab, al, bb, bl, &ord);
+            if (rc != 0 || ord != want) {
+                fprintf(stderr, "SEMANTIC FAIL %s <=> %s: got %d want %d (rc %d)\n", ahex, bhex, ord, want, rc);
+                failures++;
+            } else {
+                sem_ok++;
+            }
+            free(ab);
+            free(bb);
+        }
+    } else {
+        fprintf(stderr, "could not parse semantic corpus\n");
+        failures++;
+    }
+    struple_json_free(sroot);
+    free(stext);
+
+    printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | %d failures\n",
+           json_enc, json_dec, build_enc, build_trc, sem_ok, failures);
     return failures ? 1 : 0;
 }
