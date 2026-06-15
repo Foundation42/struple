@@ -649,6 +649,13 @@ fn writeFramed(list: *std.ArrayList(u8), type_code: u8, content: []const u8) Enc
     try list.append(tc.terminator);
 }
 
+// ---------------------------------------------------------------------------
+// JSON convenience (see json.zig)
+// ---------------------------------------------------------------------------
+
+pub const fromJson = @import("json.zig").fromJson;
+pub const toJson = @import("json.zig").toJson;
+
 test {
     _ = @import("tests.zig");
 }

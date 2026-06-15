@@ -79,6 +79,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "conformance",
         "README.md",
     },
 }

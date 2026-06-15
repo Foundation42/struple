@@ -48,7 +48,27 @@ methods: `appendNil`, `appendUndefined`, `appendBool`, `appendInt`/`appendUint`/
 `appendI128`/`appendBigInt`, `appendF32`/`appendF64`, `appendTimestamp`,
 `appendString`, `appendBytes`, `appendArray`, `appendMap`, `appendSet`.
 
-Build: `zig build test` · `zig build run`.
+Build: `zig build test` · `zig build run` · `zig build vectors`.
+
+## JSON
+
+`fromJson` / `toJson` convert between JSON text and struple encodings. JSON
+integers are kept at **arbitrary precision** (a big integer that a JS `f64` would
+corrupt round-trips losslessly); objects encode to canonical (key-sorted) maps.
+
+```zig
+const key = try struple.fromJson(allocator, "{\"id\":12345,\"name\":\"alice\"}");
+defer allocator.free(key);                       // memcmp-orderable bytes
+const json = try struple.toJson(allocator, key); // {"id":12345,"name":"alice"}
+defer allocator.free(json);
+```
+
+## Conformance corpus
+
+`conformance/vectors.json` (regenerate with `zig build vectors`) is the
+language-neutral contract — `{value, bytes}` pairs that every implementation
+(Zig, Python, JavaScript, …) must reproduce in both directions. See
+[conformance/README.md](conformance/README.md).
 
 ## Type coverage (Python + JavaScript)
 

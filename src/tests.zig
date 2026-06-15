@@ -459,3 +459,79 @@ test "decode: truncated and invalid input" {
         try testing.expectError(error.UnsupportedType, r.next());
     }
 }
+
+// ---------------------------------------------------------------------------
+// JSON <-> struple
+// ---------------------------------------------------------------------------
+
+fn expectJsonRoundtrip(canonical: []const u8) !void {
+    const a = testing.allocator;
+    const encoded = try struple.fromJson(a, canonical);
+    defer a.free(encoded);
+    const back = try struple.toJson(a, encoded);
+    defer a.free(back);
+    try testing.expectEqualStrings(canonical, back);
+}
+
+test "json: fromJson matches manual packing" {
+    const a = testing.allocator;
+    {
+        const j = try struple.fromJson(a, "12345");
+        defer a.free(j);
+        const m = try packOne(a, @as(i64, 12345));
+        defer a.free(m);
+        try testing.expectEqualSlices(u8, m, j);
+    }
+    {
+        const j = try struple.fromJson(a, "\"users\"");
+        defer a.free(j);
+        const m = try packOne(a, "users");
+        defer a.free(m);
+        try testing.expectEqualSlices(u8, m, j);
+    }
+    {
+        const j = try struple.fromJson(a, "true");
+        defer a.free(j);
+        try testing.expectEqualSlices(u8, &.{0x06}, j);
+    }
+}
+
+test "json: round-trips (canonical form is byte-stable)" {
+    try expectJsonRoundtrip("null");
+    try expectJsonRoundtrip("true");
+    try expectJsonRoundtrip("false");
+    try expectJsonRoundtrip("0");
+    try expectJsonRoundtrip("12345");
+    try expectJsonRoundtrip("-42");
+    try expectJsonRoundtrip("\"hello world\"");
+    try expectJsonRoundtrip("\"quote\\\"and\\\\slash\"");
+    try expectJsonRoundtrip("[]");
+    try expectJsonRoundtrip("{}");
+    try expectJsonRoundtrip("[1,2,3]");
+    try expectJsonRoundtrip("{\"a\":1,\"b\":2}");
+    try expectJsonRoundtrip("[null,true,\"x\",[1,2],{\"k\":\"v\"}]");
+    // arbitrary-precision integers survive (a JS f64 round-trip would not)
+    try expectJsonRoundtrip("100000000000000000000000000000");
+    try expectJsonRoundtrip("-99999999999999999999999999999999");
+}
+
+test "json: object keys are canonicalized (sorted)" {
+    const a = testing.allocator;
+    const encoded = try struple.fromJson(a, "{\"b\":1,\"a\":2,\"c\":3}");
+    defer a.free(encoded);
+    const back = try struple.toJson(a, encoded);
+    defer a.free(back);
+    try testing.expectEqualStrings("{\"a\":2,\"b\":1,\"c\":3}", back);
+}
+
+test "json: floats round-trip by value" {
+    const a = testing.allocator;
+    const inputs = [_][]const u8{ "1.5", "-3.14159", "0.1", "1e10", "2.5e-3" };
+    for (inputs) |s| {
+        const encoded = try struple.fromJson(a, s);
+        defer a.free(encoded);
+        const back = try struple.toJson(a, encoded);
+        defer a.free(back);
+        try testing.expectEqual(try std.fmt.parseFloat(f64, s), try std.fmt.parseFloat(f64, back));
+    }
+}

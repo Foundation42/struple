@@ -40,4 +40,17 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // Conformance vector generator: writes conformance/vectors.json.
+    const gen_mod = b.createModule(.{
+        .root_source_file = b.path("src/gen_vectors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gen_mod.addImport("struple", struple_mod);
+    const gen_exe = b.addExecutable(.{ .name = "gen-vectors", .root_module = gen_mod });
+    const gen_run = b.addRunArtifact(gen_exe);
+    gen_run.setCwd(b.path("."));
+    const vectors_step = b.step("vectors", "Generate conformance/vectors.json");
+    vectors_step.dependOn(&gen_run.step);
 }
