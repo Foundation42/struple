@@ -72,10 +72,11 @@ reproduce in both directions. See [conformance/README.md](conformance/README.md)
 ## Implementations
 
 - **Zig** (this directory) — the reference implementation + corpus generator.
-- **TypeScript** ([`js/`](js/README.md)) — pure, zero-dependency port, verified
-  byte-identical against the corpus.
+- **TypeScript** ([`js/`](js/README.md)) — pure, zero-dependency port.
+- **Python** ([`py/`](py/README.md)) — pure stdlib port.
 
-Both are driven by the same `vectors.json`, so they agree on every byte.
+All three are driven by the same `vectors.json` and are verified byte-identical,
+so they agree on every byte in both directions.
 
 ## Type coverage (Python + JavaScript)
 

@@ -6,5 +6,12 @@ zig-out/
 node_modules/
 package-lock.json
 
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
 # Local Claude Code settings
 .claude/settings.local.json
