@@ -173,3 +173,7 @@ exact key order (e.g. byte-faithful JSON object round-trips), represent it as an
 Because type codes dominate `memcmp`, an integer and a float never interleave by
 magnitude — `int 1000000` sorts below `float 0.5`. Comparing numbers across
 representations is the job of a **semantic comparator**, planned as a follow-on.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). Copyright 2026 Christian Beaumont.

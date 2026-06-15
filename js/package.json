@@ -12,5 +12,5 @@
   "scripts": {
     "test": "node --test test/*.test.ts"
   },
-  "license": "MIT"
+  "license": "Apache-2.0"
 }

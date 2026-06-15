@@ -81,5 +81,6 @@
         "src",
         "conformance",
         "README.md",
+        "LICENSE",
     },
 }
