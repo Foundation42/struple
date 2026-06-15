@@ -274,6 +274,13 @@ struct Element {
     Bytes data;                // Bytes; BigInt magnitude; Array/Map/Set body
 };
 
+/// A non-owning byte span — a sub-view of a buffer.
+struct Slice {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    bool empty() const { return size == 0; }
+};
+
 class Reader {
     const uint8_t* buf_;
     size_t len_;
@@ -314,6 +321,25 @@ public:
         }
     }
 
+    /// The next element's type code without consuming it.
+    std::optional<uint8_t> peekType() const {
+        return pos_ < len_ ? std::optional<uint8_t>(buf_[pos_]) : std::nullopt;
+    }
+    /// The remaining unread bytes.
+    Slice rest() const {
+        return Slice{buf_ + pos_, len_ - pos_};
+    }
+    /// The next element's raw bytes (a zero-copy view), advancing the cursor.
+    std::optional<Slice> nextView() {
+        size_t start = pos_;
+        if (!consume()) return std::nullopt;
+        return Slice{buf_ + start, pos_ - start};
+    }
+    /// Advance past the next element; false at end of stream.
+    bool skip() {
+        return nextView().has_value();
+    }
+
 private:
     const uint8_t* take(size_t n) {
         if (pos_ + n > len_) throw Error("struple: truncated");
@@ -334,6 +360,61 @@ private:
             i++;
         }
         throw Error("struple: truncated (unterminated framed value)");
+    }
+
+    void skip_framed() {
+        size_t i = pos_;
+        while (i < len_) {
+            if (buf_[i] == 0) {
+                if (i + 1 < len_ && buf_[i + 1] == 0xff) { i += 2; continue; }
+                pos_ = i + 1;
+                return;
+            }
+            i++;
+        }
+        throw Error("struple: truncated (unterminated framed value)");
+    }
+
+    // Advance past one element without decoding (no allocation). False at end.
+    bool consume() {
+        if (pos_ >= len_) return false;
+        uint8_t t = buf_[pos_++];
+        switch (t) {
+            case tc::NIL:
+            case tc::UNDEF:
+            case tc::BOOL_FALSE:
+            case tc::BOOL_TRUE:
+            case tc::INT_ZERO:
+                break;
+            case tc::INT_NEG_BIG:
+            case tc::INT_POS_BIG: {
+                bool neg = (t == tc::INT_NEG_BIG);
+                auto comp = [neg](uint8_t b) { return neg ? uint8_t(~b) : b; };
+                size_t m = comp(take(1)[0]);
+                const uint8_t* nb = take(m);
+                size_t n = 0;
+                for (size_t i = 0; i < m; i++) n = (n << 8) | comp(nb[i]);
+                take(n);
+                break;
+            }
+            case tc::FLOAT32: take(4); break;
+            case tc::FLOAT64:
+            case tc::TIMESTAMP: take(8); break;
+            case tc::STRING:
+            case tc::BYTES:
+            case tc::ARRAY:
+            case tc::MAP:
+            case tc::SET: skip_framed(); break;
+            default:
+                if ((t >= 0x10 && t <= 0x1f) || (t >= 0x21 && t <= 0x30)) {
+                    size_t n = (t < tc::INT_ZERO) ? size_t(tc::INT_ZERO - t) : size_t(t - tc::INT_ZERO);
+                    if (n > 8) throw Error("struple: unsupported integer width");
+                    take(n);
+                } else {
+                    throw Error("struple: invalid type code");
+                }
+        }
+        return true;
     }
 
     void read_fixed_int(uint8_t t, Element& e) {
@@ -424,6 +505,147 @@ inline int compare(const uint8_t* a, size_t alen, const uint8_t* b, size_t blen)
     return 0;
 }
 inline int compare(const Bytes& a, const Bytes& b) { return compare(a.data(), a.size(), b.data(), b.size()); }
+
+// --------------------------------------------------------------- navigation
+
+/// Zero-copy navigation over a struple buffer (a stream of elements). Every
+/// result is a sub-view that is itself a valid struple buffer.
+class View {
+    const uint8_t* bytes_;
+    size_t len_;
+
+public:
+    View(const uint8_t* bytes, size_t len) : bytes_(bytes), len_(len) {}
+    View(const Bytes& b) : bytes_(b.data()), len_(b.size()) {}
+    View(Slice s) : bytes_(s.data), len_(s.size) {}
+
+    const uint8_t* data() const { return bytes_; }
+    size_t size() const { return len_; }
+    Reader reader() const { return Reader(bytes_, len_); }
+
+    size_t count() const {
+        Reader r = reader();
+        size_t n = 0;
+        while (r.skip()) n++;
+        return n;
+    }
+    std::optional<View> at(size_t index) const {
+        Reader r = reader();
+        size_t i = 0;
+        while (auto v = r.nextView()) {
+            if (i == index) return View(*v);
+            i++;
+        }
+        return std::nullopt;
+    }
+    std::optional<View> head() const { return at(0); }
+    View tail() const {
+        Reader r = reader();
+        r.nextView();
+        return View(r.rest());
+    }
+    View nthRest(size_t n) const {
+        Reader r = reader();
+        for (size_t i = 0; i < n; i++)
+            if (!r.skip()) break;
+        return View(r.rest());
+    }
+    View take(size_t n) const {
+        Reader r = reader();
+        for (size_t i = 0; i < n; i++)
+            if (!r.skip()) break;
+        return View(bytes_, len_ - r.rest().size);
+    }
+    std::optional<uint8_t> headType() const {
+        return len_ > 0 ? std::optional<uint8_t>(bytes_[0]) : std::nullopt;
+    }
+
+    bool isNil() const { return headType() == tc::NIL; }
+    bool isUndefined() const { return headType() == tc::UNDEF; }
+    bool isBool() const {
+        auto t = headType();
+        return t == tc::BOOL_FALSE || t == tc::BOOL_TRUE;
+    }
+    bool isInt() const {
+        auto t = headType();
+        if (!t) return false;
+        uint8_t x = *t;
+        return x == tc::INT_ZERO || x == tc::INT_NEG_BIG || x == tc::INT_POS_BIG || (x >= 0x10 && x <= 0x1f) || (x >= 0x21 && x <= 0x30);
+    }
+    bool isFloat() const {
+        auto t = headType();
+        return t == tc::FLOAT32 || t == tc::FLOAT64;
+    }
+    bool isNumber() const { return isInt() || isFloat(); }
+    bool isTimestamp() const { return headType() == tc::TIMESTAMP; }
+    bool isString() const { return headType() == tc::STRING; }
+    bool isBytes() const { return headType() == tc::BYTES; }
+    bool isArray() const { return headType() == tc::ARRAY; }
+    bool isMap() const { return headType() == tc::MAP; }
+    bool isSet() const { return headType() == tc::SET; }
+    bool isContainer() const {
+        auto t = headType();
+        return t == tc::ARRAY || t == tc::MAP || t == tc::SET;
+    }
+
+    /// The container's inner element stream (un-escaped, owned), or nullopt.
+    std::optional<Bytes> containedItems() const {
+        if (!isContainer()) return std::nullopt;
+        Reader r = reader();
+        auto e = r.next();
+        if (!e) return std::nullopt;
+        if (e->kind == Kind::Array || e->kind == Kind::Map || e->kind == Kind::Set) return e->data;
+        return std::nullopt;
+    }
+};
+
+inline View view(const Bytes& b) { return View(b); }
+inline View view(const uint8_t* bytes, size_t len) { return View(bytes, len); }
+
+/// Reads key/value pairs from a map's inner stream (from View::containedItems).
+/// Keys are canonical (sorted), so `get` early-exits.
+class MapView {
+    const uint8_t* inner_;
+    size_t len_;
+
+public:
+    MapView(const uint8_t* inner, size_t len) : inner_(inner), len_(len) {}
+    MapView(const Bytes& b) : inner_(b.data()), len_(b.size()) {}
+    MapView(Slice s) : inner_(s.data), len_(s.size) {}
+
+    size_t count() const { return View(inner_, len_).count() / 2; }
+
+    struct Entry {
+        Slice key;
+        Slice value;
+    };
+    class Iterator {
+        Reader r;
+
+    public:
+        Iterator(const uint8_t* b, size_t l) : r(b, l) {}
+        std::optional<Entry> next() {
+            auto k = r.nextView();
+            if (!k) return std::nullopt;
+            auto v = r.nextView();
+            if (!v) throw Error("struple: malformed map");
+            return Entry{*k, *v};
+        }
+    };
+    Iterator iterator() const { return Iterator(inner_, len_); }
+
+    /// Look up the value bytes for an encoded key (e.g. `encode_string`).
+    std::optional<Slice> get(const uint8_t* key, size_t keylen) const {
+        Iterator it(inner_, len_);
+        while (auto e = it.next()) {
+            int c = compare(e->key.data, e->key.size, key, keylen);
+            if (c == 0) return e->value;
+            if (c > 0) return std::nullopt;
+        }
+        return std::nullopt;
+    }
+    std::optional<Slice> get(const Bytes& key) const { return get(key.data(), key.size()); }
+};
 
 }  // namespace struple
 

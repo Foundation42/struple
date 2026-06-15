@@ -18,4 +18,7 @@
 mod codec;
 pub mod json;
 
-pub use codec::{compare, encode, pack, transcode, unpack, Element, Error, Reader, Value, Writer};
+pub use codec::{
+    compare, encode, pack, transcode, unpack, view, Element, EntryIter, Error, MapView, Reader,
+    Value, View, Writer,
+};

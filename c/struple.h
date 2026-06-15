@@ -108,6 +108,64 @@ void struple_reader_free(struple_reader *r);
 /* Returns 1 and fills *out for the next element, 0 at end of stream, -1 on error. */
 int struple_reader_next(struple_reader *r, struple_element *out);
 
+/* Cursor extensions (the TupleStreamReader surface). */
+int struple_reader_peek_type(const struple_reader *r); /* type byte, or -1 at end */
+const uint8_t *struple_reader_rest(const struple_reader *r, size_t *out_len);
+/* The next element's raw bytes (a view into the buffer); 1/0/-1 like next(). */
+int struple_reader_next_view(struple_reader *r, const uint8_t **out_ptr, size_t *out_len);
+int struple_reader_skip(struple_reader *r); /* 1 advanced, 0 at end, -1 error */
+
+/* ---- Navigation: a zero-copy view over a buffer (a stream of elements) ---- */
+
+typedef struct {
+    const uint8_t *bytes;
+    size_t len;
+} struple_view;
+
+long struple_view_count(struple_view v); /* element count, or -1 on error */
+int struple_view_at(struple_view v, size_t index, struple_view *out);  /* 1 found, 0 out of range, -1 error */
+int struple_view_head(struple_view v, struple_view *out);              /* = at(0) */
+struple_view struple_view_tail(struple_view v);                        /* everything after the first element */
+struple_view struple_view_nth_rest(struple_view v, size_t n);          /* drop n elements */
+struple_view struple_view_take(struple_view v, size_t n);              /* first n elements */
+int struple_view_head_type(struple_view v);                            /* type byte, or -1 if empty */
+
+bool struple_view_is_nil(struple_view v);
+bool struple_view_is_undefined(struple_view v);
+bool struple_view_is_bool(struple_view v);
+bool struple_view_is_int(struple_view v);
+bool struple_view_is_float(struple_view v);
+bool struple_view_is_number(struple_view v);
+bool struple_view_is_timestamp(struple_view v);
+bool struple_view_is_string(struple_view v);
+bool struple_view_is_bytes(struple_view v);
+bool struple_view_is_array(struple_view v);
+bool struple_view_is_map(struple_view v);
+bool struple_view_is_set(struple_view v);
+bool struple_view_is_container(struple_view v);
+
+/* Append the container's inner element stream (un-escaped) to `out`.
+ * 1 if the head is a container, 0 if not, -1 on error. */
+int struple_view_contained_items(struple_view v, struple_writer *out);
+
+/* ---- Map navigation (over a map's inner stream, from contained_items) ---- */
+
+typedef struct {
+    const uint8_t *inner;
+    size_t len;
+} struple_map;
+
+long struple_map_count(struple_map m);
+/* Look up an encoded key; 1 found (fills *out), 0 not found, -1 error. */
+int struple_map_get(struple_map m, const uint8_t *key, size_t keylen, struple_view *out);
+
+typedef struct {
+    struple_reader r;
+} struple_map_iter;
+
+struple_map_iter struple_map_iterator(struple_map m);
+int struple_map_next(struple_map_iter *it, struple_view *key, struple_view *value); /* 1/0/-1 */
+
 /* ---- ordering / round-trip ---- */
 
 /* Lexicographic comparison: -1, 0, or 1. Matches semantic order. */

@@ -28,6 +28,14 @@ static char *hexenc(const uint8_t *data, size_t len) {
         struple_writer_free(&w);                                               \
     } while (0)
 
+#define CHECK(cond, msg)                            \
+    do {                                            \
+        if (!(cond)) {                              \
+            fprintf(stderr, "FAIL %s\n", msg);      \
+            failures++;                              \
+        }                                           \
+    } while (0)
+
 static void enc(struple_writer *w, int64_t v) {
     struple_writer_init(w);
     struple_append_int(w, v);
@@ -156,6 +164,93 @@ int main(void) {
         }
         struple_reader_free(&r);
         struple_writer_free(&w);
+    }
+
+    /* navigation */
+    {
+        struple_writer p, child;
+        struple_writer_init(&p);
+        struple_append_string(&p, "users", 5);
+        struple_append_int(&p, 12345);
+        struple_append_bool(&p, true);
+        struple_writer_init(&child);
+        struple_append_int(&child, 1);
+        struple_append_int(&child, 2);
+        struple_append_int(&child, 3);
+        struple_append_array(&p, child.data, child.len);
+
+        struple_view v = {p.data, p.len};
+        CHECK(struple_view_count(v) == 4, "nav count");
+        CHECK(struple_view_is_string(v), "nav is_string");
+
+        struple_view e1;
+        struple_view_at(v, 1, &e1);
+        struple_reader r1;
+        struple_reader_init(&r1, e1.bytes, e1.len);
+        struple_element ev;
+        struple_reader_next(&r1, &ev);
+        CHECK(ev.kind == STRUPLE_INT && ev.int_val == 12345, "nav at(1)");
+        struple_reader_free(&r1);
+
+        CHECK(struple_view_count(struple_view_tail(v)) == 3, "nav tail");
+        CHECK(struple_view_count(struple_view_take(v, 2)) == 2, "nav take");
+
+        struple_view arr;
+        struple_view_at(v, 3, &arr);
+        CHECK(struple_view_is_array(arr) && struple_view_is_container(arr), "nav is_array");
+        struple_writer inner;
+        struple_writer_init(&inner);
+        struple_view_contained_items(arr, &inner);
+        struple_view iv = {inner.data, inner.len};
+        CHECK(struple_view_count(iv) == 3, "nav contained_items");
+
+        struple_writer_free(&inner);
+        struple_writer_free(&child);
+        struple_writer_free(&p);
+    }
+
+    /* map navigation */
+    {
+        struple_writer ka, va, kb, vb, kc, vc, kz, mp, minner;
+        struple_writer_init(&ka); struple_append_string(&ka, "a", 1);
+        struple_writer_init(&va); struple_append_int(&va, 1);
+        struple_writer_init(&kb); struple_append_string(&kb, "b", 1);
+        struple_writer_init(&vb); struple_append_int(&vb, 2);
+        struple_writer_init(&kc); struple_append_string(&kc, "c", 1);
+        struple_writer_init(&vc); struple_append_int(&vc, 3);
+        struple_kv entries[3] = {
+            {{kc.data, kc.len}, {vc.data, vc.len}},
+            {{ka.data, ka.len}, {va.data, va.len}},
+            {{kb.data, kb.len}, {vb.data, vb.len}},
+        };
+        struple_writer_init(&mp);
+        struple_append_map(&mp, entries, 3);
+        struple_view mv = {mp.data, mp.len};
+        CHECK(struple_view_is_map(mv), "nav is_map");
+        struple_writer_init(&minner);
+        struple_view_contained_items(mv, &minner);
+        struple_map m = {minner.data, minner.len};
+        CHECK(struple_map_count(m) == 3, "map count");
+
+        struple_view got;
+        if (struple_map_get(m, kb.data, kb.len, &got) == 1) {
+            struple_reader r;
+            struple_reader_init(&r, got.bytes, got.len);
+            struple_element e;
+            struple_reader_next(&r, &e);
+            CHECK(e.int_val == 2, "map get value");
+            struple_reader_free(&r);
+        } else {
+            CHECK(0, "map get hit");
+        }
+        struple_writer_init(&kz); struple_append_string(&kz, "z", 1);
+        struple_view dummy;
+        CHECK(struple_map_get(m, kz.data, kz.len, &dummy) == 0, "map get miss");
+
+        struple_writer_free(&ka); struple_writer_free(&va);
+        struple_writer_free(&kb); struple_writer_free(&vb);
+        struple_writer_free(&kc); struple_writer_free(&vc);
+        struple_writer_free(&kz); struple_writer_free(&mp); struple_writer_free(&minner);
     }
 
     if (failures == 0)

@@ -527,3 +527,230 @@ int struple_compare(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen
     if (alen > blen) return 1;
     return 0;
 }
+
+/* ------------------------------------------------------------ navigation */
+
+/* Compute the byte length of the element at `pos` without decoding (no scratch).
+ * Returns 1 and sets *out, 0 at end, -1 on malformed input. */
+static int element_span(const uint8_t *buf, size_t len, size_t pos, size_t *out) {
+    if (pos >= len) return 0;
+    uint8_t t = buf[pos];
+    size_t p = pos + 1;
+    if (t == NIL || t == UNDEF || t == BOOL_FALSE || t == BOOL_TRUE || t == INT_ZERO) {
+        /* no payload */
+    } else if ((t >= 0x10 && t <= 0x1f) || (t >= 0x21 && t <= 0x30)) {
+        size_t n = (t < INT_ZERO) ? (size_t)(INT_ZERO - t) : (size_t)(t - INT_ZERO);
+        if (n > 8) return -1;
+        p += n;
+    } else if (t == INT_NEG_BIG || t == INT_POS_BIG) {
+        bool neg = (t == INT_NEG_BIG);
+        if (p >= len) return -1;
+        size_t m = neg ? (uint8_t)~buf[p] : buf[p];
+        p++;
+        if (p + m > len) return -1;
+        size_t n = 0;
+        for (size_t i = 0; i < m; i++) {
+            uint8_t b = neg ? (uint8_t)~buf[p + i] : buf[p + i];
+            n = (n << 8) | b;
+        }
+        p += m + n;
+    } else if (t == FLOAT32) {
+        p += 4;
+    } else if (t == FLOAT64 || t == TIMESTAMP) {
+        p += 8;
+    } else if (t == STRING || t == BYTES || t == ARRAY || t == MAP || t == SET) {
+        size_t i = p;
+        for (;;) {
+            if (i >= len) return -1;
+            if (buf[i] == 0x00) {
+                if (i + 1 < len && buf[i + 1] == 0xff) {
+                    i += 2;
+                    continue;
+                }
+                p = i + 1;
+                break;
+            }
+            i++;
+        }
+    } else {
+        return -1;
+    }
+    if (p > len) return -1;
+    *out = p - pos;
+    return 1;
+}
+
+int struple_reader_peek_type(const struple_reader *r) {
+    return r->pos < r->len ? r->buf[r->pos] : -1;
+}
+
+const uint8_t *struple_reader_rest(const struple_reader *r, size_t *out_len) {
+    *out_len = r->len - r->pos;
+    return r->buf + r->pos;
+}
+
+int struple_reader_next_view(struple_reader *r, const uint8_t **out_ptr, size_t *out_len) {
+    size_t span;
+    int rc = element_span(r->buf, r->len, r->pos, &span);
+    if (rc != 1) return rc;
+    *out_ptr = r->buf + r->pos;
+    *out_len = span;
+    r->pos += span;
+    return 1;
+}
+
+int struple_reader_skip(struple_reader *r) {
+    const uint8_t *p;
+    size_t l;
+    return struple_reader_next_view(r, &p, &l);
+}
+
+long struple_view_count(struple_view v) {
+    struple_reader r;
+    struple_reader_init(&r, v.bytes, v.len);
+    long n = 0;
+    int rc;
+    while ((rc = struple_reader_skip(&r)) == 1) n++;
+    return rc == 0 ? n : -1;
+}
+
+int struple_view_at(struple_view v, size_t index, struple_view *out) {
+    struple_reader r;
+    struple_reader_init(&r, v.bytes, v.len);
+    size_t i = 0;
+    const uint8_t *p;
+    size_t l;
+    int rc;
+    while ((rc = struple_reader_next_view(&r, &p, &l)) == 1) {
+        if (i == index) {
+            out->bytes = p;
+            out->len = l;
+            return 1;
+        }
+        i++;
+    }
+    return rc;
+}
+
+int struple_view_head(struple_view v, struple_view *out) {
+    return struple_view_at(v, 0, out);
+}
+
+struple_view struple_view_tail(struple_view v) {
+    struple_reader r;
+    struple_reader_init(&r, v.bytes, v.len);
+    const uint8_t *p;
+    size_t l;
+    struple_reader_next_view(&r, &p, &l);
+    struple_view out = {r.buf + r.pos, r.len - r.pos};
+    return out;
+}
+
+struple_view struple_view_nth_rest(struple_view v, size_t n) {
+    struple_reader r;
+    struple_reader_init(&r, v.bytes, v.len);
+    for (size_t i = 0; i < n; i++) {
+        if (struple_reader_skip(&r) != 1) break;
+    }
+    struple_view out = {r.buf + r.pos, r.len - r.pos};
+    return out;
+}
+
+struple_view struple_view_take(struple_view v, size_t n) {
+    struple_reader r;
+    struple_reader_init(&r, v.bytes, v.len);
+    for (size_t i = 0; i < n; i++) {
+        if (struple_reader_skip(&r) != 1) break;
+    }
+    struple_view out = {v.bytes, r.pos};
+    return out;
+}
+
+int struple_view_head_type(struple_view v) {
+    return v.len > 0 ? v.bytes[0] : -1;
+}
+
+bool struple_view_is_nil(struple_view v) { return struple_view_head_type(v) == NIL; }
+bool struple_view_is_undefined(struple_view v) { return struple_view_head_type(v) == UNDEF; }
+bool struple_view_is_bool(struple_view v) {
+    int t = struple_view_head_type(v);
+    return t == BOOL_FALSE || t == BOOL_TRUE;
+}
+bool struple_view_is_int(struple_view v) {
+    int t = struple_view_head_type(v);
+    return t == INT_ZERO || t == INT_NEG_BIG || t == INT_POS_BIG || (t >= 0x10 && t <= 0x1f) || (t >= 0x21 && t <= 0x30);
+}
+bool struple_view_is_float(struple_view v) {
+    int t = struple_view_head_type(v);
+    return t == FLOAT32 || t == FLOAT64;
+}
+bool struple_view_is_number(struple_view v) { return struple_view_is_int(v) || struple_view_is_float(v); }
+bool struple_view_is_timestamp(struple_view v) { return struple_view_head_type(v) == TIMESTAMP; }
+bool struple_view_is_string(struple_view v) { return struple_view_head_type(v) == STRING; }
+bool struple_view_is_bytes(struple_view v) { return struple_view_head_type(v) == BYTES; }
+bool struple_view_is_array(struple_view v) { return struple_view_head_type(v) == ARRAY; }
+bool struple_view_is_map(struple_view v) { return struple_view_head_type(v) == MAP; }
+bool struple_view_is_set(struple_view v) { return struple_view_head_type(v) == SET; }
+bool struple_view_is_container(struple_view v) {
+    int t = struple_view_head_type(v);
+    return t == ARRAY || t == MAP || t == SET;
+}
+
+int struple_view_contained_items(struple_view v, struple_writer *out) {
+    struple_reader r;
+    struple_reader_init(&r, v.bytes, v.len);
+    struple_element e;
+    int rc = struple_reader_next(&r, &e);
+    int result;
+    if (rc != 1) {
+        result = rc == 0 ? 0 : -1;
+    } else if (e.kind == STRUPLE_ARRAY || e.kind == STRUPLE_MAP || e.kind == STRUPLE_SET) {
+        struple_writer_append(out, e.data, e.data_len);
+        result = 1;
+    } else {
+        result = 0;
+    }
+    struple_reader_free(&r);
+    return result;
+}
+
+long struple_map_count(struple_map m) {
+    struple_view v = {m.inner, m.len};
+    long c = struple_view_count(v);
+    return c < 0 ? -1 : c / 2;
+}
+
+struple_map_iter struple_map_iterator(struple_map m) {
+    struple_map_iter it;
+    struple_reader_init(&it.r, m.inner, m.len);
+    return it;
+}
+
+int struple_map_next(struple_map_iter *it, struple_view *key, struple_view *value) {
+    const uint8_t *kp;
+    size_t kl;
+    int rc = struple_reader_next_view(&it->r, &kp, &kl);
+    if (rc != 1) return rc;
+    const uint8_t *vp;
+    size_t vl;
+    if (struple_reader_next_view(&it->r, &vp, &vl) != 1) return -1;
+    key->bytes = kp;
+    key->len = kl;
+    value->bytes = vp;
+    value->len = vl;
+    return 1;
+}
+
+int struple_map_get(struple_map m, const uint8_t *key, size_t keylen, struple_view *out) {
+    struple_map_iter it = struple_map_iterator(m);
+    struple_view k, val;
+    while (struple_map_next(&it, &k, &val) == 1) {
+        int c = struple_compare(k.bytes, k.len, key, keylen);
+        if (c == 0) {
+            *out = val;
+            return 1;
+        }
+        if (c > 0) return 0;
+    }
+    return 0;
+}

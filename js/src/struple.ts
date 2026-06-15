@@ -198,6 +198,28 @@ export class Reader {
     }
   }
 
+  /** The next element's type code without consuming it (null at end). */
+  peekType(): number | null {
+    return this.pos < this.buf.length ? this.buf[this.pos] : null;
+  }
+
+  /** The remaining unread bytes (a valid struple stream). */
+  rest(): Uint8Array {
+    return this.buf.subarray(this.pos);
+  }
+
+  /** The next element's raw bytes (a zero-copy view), advancing the cursor. */
+  nextView(): Uint8Array | null {
+    const start = this.pos;
+    if (this.next() === null) return null;
+    return this.buf.subarray(start, this.pos);
+  }
+
+  /** Advance past the next element; false at end of stream. */
+  skip(): boolean {
+    return this.nextView() !== null;
+  }
+
   take(n: number): Uint8Array {
     if (this.pos + n > this.buf.length) throw new Error("struple: truncated");
     const s = this.buf.subarray(this.pos, this.pos + n);
@@ -360,6 +382,120 @@ export function compare(a: Uint8Array, b: Uint8Array): number {
     if (a[i] !== b[i]) return a[i] - b[i];
   }
   return a.length - b.length;
+}
+
+// ---------------------------------------------------------------------------
+// Navigation / query
+// ---------------------------------------------------------------------------
+
+/** Zero-copy navigation over a struple buffer (a stream of elements). Every
+ *  result is a sub-view that is itself a valid struple buffer. */
+export class View {
+  readonly bytes: Uint8Array;
+  constructor(bytes: Uint8Array) {
+    this.bytes = bytes;
+  }
+  reader(): Reader {
+    return new Reader(this.bytes);
+  }
+
+  count(): number {
+    const r = this.reader();
+    let n = 0;
+    while (r.skip()) n++;
+    return n;
+  }
+  at(index: number): Uint8Array | null {
+    const r = this.reader();
+    let i = 0;
+    let v: Uint8Array | null;
+    while ((v = r.nextView()) !== null) {
+      if (i === index) return v;
+      i++;
+    }
+    return null;
+  }
+  head(): Uint8Array | null {
+    return this.at(0);
+  }
+  tail(): Uint8Array {
+    const r = this.reader();
+    r.nextView();
+    return r.rest();
+  }
+  nthRest(n: number): Uint8Array {
+    const r = this.reader();
+    for (let i = 0; i < n; i++) if (!r.skip()) break;
+    return r.rest();
+  }
+  take(n: number): Uint8Array {
+    const r = this.reader();
+    for (let i = 0; i < n; i++) if (!r.skip()) break;
+    return this.bytes.subarray(0, this.bytes.length - r.rest().length);
+  }
+  headType(): number | null {
+    return this.bytes.length > 0 ? this.bytes[0] : null;
+  }
+
+  isNil(): boolean { return this.headType() === T.nil; }
+  isUndefined(): boolean { return this.headType() === T.undef; }
+  isBool(): boolean { const t = this.headType(); return t === T.boolFalse || t === T.boolTrue; }
+  isInt(): boolean {
+    const t = this.headType();
+    return t !== null && (t === T.intZero || t === T.intNegBig || t === T.intPosBig || (t >= 0x10 && t <= 0x1f) || (t >= 0x21 && t <= 0x30));
+  }
+  isFloat(): boolean { const t = this.headType(); return t === T.float32 || t === T.float64; }
+  isNumber(): boolean { return this.isInt() || this.isFloat(); }
+  isTimestamp(): boolean { return this.headType() === T.timestamp; }
+  isString(): boolean { return this.headType() === T.string; }
+  isBytes(): boolean { return this.headType() === T.bytes; }
+  isArray(): boolean { return this.headType() === T.array; }
+  isMap(): boolean { return this.headType() === T.map; }
+  isSet(): boolean { return this.headType() === T.set; }
+  isContainer(): boolean { const t = this.headType(); return t === T.array || t === T.map || t === T.set; }
+
+  /** The container's inner element stream (un-escaped), or null if the head
+   *  isn't an array/map/set. View it, or wrap a map with MapView. */
+  containedItems(): Uint8Array | null {
+    if (!this.isContainer()) return null;
+    const e = this.reader().next();
+    if (e === null) return null;
+    return e.kind === "array" || e.kind === "map" || e.kind === "set" ? e.body : null;
+  }
+}
+
+export function view(bytes: Uint8Array): View {
+  return new View(bytes);
+}
+
+/** Reads key/value pairs from a map's inner stream (from View.containedItems).
+ *  Keys are canonical (sorted), so `get` early-exits. */
+export class MapView {
+  readonly inner: Uint8Array;
+  constructor(inner: Uint8Array) {
+    this.inner = inner;
+  }
+  count(): number {
+    return new View(this.inner).count() / 2;
+  }
+  *entries(): Generator<[Uint8Array, Uint8Array]> {
+    const r = new Reader(this.inner);
+    let k: Uint8Array | null;
+    while ((k = r.nextView()) !== null) {
+      const v = r.nextView();
+      if (v === null) throw new Error("struple: malformed map");
+      yield [k, v];
+    }
+  }
+  /** Look up the value bytes for an encoded key (e.g. `encode("name")`). */
+  get(key: Uint8Array): Uint8Array | null {
+    for (const [k, v] of this.entries()) {
+      const c = compare(k, key);
+      if (c === 0) return v;
+      if (c > 0) return null;
+    }
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

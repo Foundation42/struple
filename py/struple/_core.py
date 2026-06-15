@@ -297,6 +297,25 @@ class Reader:
             return self._read_fixed_int(t)
         raise ValueError(f"struple: invalid type code {t:#x}")
 
+    def peek_type(self):
+        """The next element's type code without consuming it (None at end)."""
+        return self.buf[self.pos] if self.pos < len(self.buf) else None
+
+    def rest(self) -> bytes:
+        """The remaining unread bytes (a valid struple stream)."""
+        return self.buf[self.pos :]
+
+    def next_view(self):
+        """The next element's raw bytes, advancing the cursor (None at end)."""
+        start = self.pos
+        if self.next() is None:
+            return None
+        return self.buf[start : self.pos]
+
+    def skip(self) -> bool:
+        """Advance past the next element; False at end of stream."""
+        return self.next_view() is not None
+
     def _take(self, n: int) -> bytes:
         if self.pos + n > len(self.buf):
             raise ValueError("struple: truncated")
@@ -450,3 +469,149 @@ def compare(a: bytes, b: bytes) -> int:
     """Lexicographic byte comparison (-1/0/1). Plain ``bytes`` comparison and
     ``sorted`` work too — they are already memcmp on the encoded keys."""
     return (a > b) - (a < b)
+
+
+# ---------------------------------------------------------------------------
+# Navigation / query
+# ---------------------------------------------------------------------------
+
+
+class View:
+    """Navigation over a struple buffer (a stream of elements). Every result is
+    a sub-buffer that is itself a valid struple buffer, so it composes."""
+
+    def __init__(self, buf: bytes) -> None:
+        self.buf = buf
+
+    def reader(self) -> Reader:
+        return Reader(self.buf)
+
+    def count(self) -> int:
+        r = self.reader()
+        n = 0
+        while r.skip():
+            n += 1
+        return n
+
+    def at(self, index: int):
+        r = self.reader()
+        i = 0
+        while True:
+            v = r.next_view()
+            if v is None:
+                return None
+            if i == index:
+                return v
+            i += 1
+
+    def head(self):
+        return self.at(0)
+
+    def tail(self) -> bytes:
+        r = self.reader()
+        r.next_view()
+        return r.rest()
+
+    def nth_rest(self, n: int) -> bytes:
+        r = self.reader()
+        for _ in range(n):
+            if not r.skip():
+                break
+        return r.rest()
+
+    def take(self, n: int) -> bytes:
+        r = self.reader()
+        for _ in range(n):
+            if not r.skip():
+                break
+        return self.buf[: len(self.buf) - len(r.rest())]
+
+    def head_type(self):
+        return self.buf[0] if len(self.buf) > 0 else None
+
+    def is_nil(self) -> bool:
+        return self.head_type() == NIL
+
+    def is_undefined(self) -> bool:
+        return self.head_type() == UNDEF
+
+    def is_bool(self) -> bool:
+        return self.head_type() in (BOOL_FALSE, BOOL_TRUE)
+
+    def is_int(self) -> bool:
+        t = self.head_type()
+        return t is not None and (
+            t == INT_ZERO or t == INT_NEG_BIG or t == INT_POS_BIG or 0x10 <= t <= 0x1F or 0x21 <= t <= 0x30
+        )
+
+    def is_float(self) -> bool:
+        return self.head_type() in (FLOAT32, FLOAT64)
+
+    def is_number(self) -> bool:
+        return self.is_int() or self.is_float()
+
+    def is_timestamp(self) -> bool:
+        return self.head_type() == TIMESTAMP
+
+    def is_string(self) -> bool:
+        return self.head_type() == STRING
+
+    def is_bytes(self) -> bool:
+        return self.head_type() == BYTES
+
+    def is_array(self) -> bool:
+        return self.head_type() == ARRAY
+
+    def is_map(self) -> bool:
+        return self.head_type() == MAP
+
+    def is_set(self) -> bool:
+        return self.head_type() == SET
+
+    def is_container(self) -> bool:
+        return self.head_type() in (ARRAY, MAP, SET)
+
+    def contained_items(self):
+        """The container's inner element stream (un-escaped), or None."""
+        if not self.is_container():
+            return None
+        e = self.reader().next()
+        if e is None:
+            return None
+        kind, val = e
+        return val if kind in ("array", "map", "set") else None
+
+
+def view(buf: bytes) -> View:
+    return View(buf)
+
+
+class MapView:
+    """Key/value pairs from a map's inner stream (from ``View.contained_items``).
+    Keys are canonical (sorted), so ``get`` early-exits."""
+
+    def __init__(self, inner: bytes) -> None:
+        self.inner = inner
+
+    def count(self) -> int:
+        return View(self.inner).count() // 2
+
+    def entries(self):
+        r = Reader(self.inner)
+        while True:
+            k = r.next_view()
+            if k is None:
+                return
+            v = r.next_view()
+            if v is None:
+                raise ValueError("struple: malformed map")
+            yield (k, v)
+
+    def get(self, key: bytes):
+        """Look up the value bytes for an encoded key (e.g. ``encode("name")``)."""
+        for k, v in self.entries():
+            if k == key:
+                return v
+            if k > key:
+                return None
+        return None

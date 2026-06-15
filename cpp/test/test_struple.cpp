@@ -91,6 +91,68 @@ int main() {
         CHECK(e && e->kind == Kind::F64 && e->f64 == 0.1, "float round-trip");
     }
 
+    // navigation
+    {
+        Writer child;
+        child.append_int(1).append_int(2).append_int(3);
+        Writer p;
+        p.append_string("users").append_int(12345).append_bool(true).append_array(child.bytes());
+        Bytes buf = p.take();
+
+        View v(buf);
+        CHECK(v.count() == 4, "nav count");
+        CHECK(v.isString(), "nav is_string");
+
+        auto e1 = v.at(1);
+        CHECK(e1.has_value(), "nav at exists");
+        if (e1) {
+            Reader r(e1->data(), e1->size());
+            auto el = r.next();
+            CHECK(el && el->kind == Kind::Int && el->integer == 12345, "nav at(1)");
+        }
+        CHECK(View(v.tail()).count() == 3, "nav tail");
+        CHECK(View(v.take(2)).count() == 2, "nav take");
+
+        auto arr = v.at(3);
+        CHECK(arr && arr->isArray() && arr->isContainer(), "nav is_array");
+        auto inner = arr->containedItems();
+        CHECK(inner.has_value(), "nav contained exists");
+        if (inner) CHECK(View(*inner).count() == 3, "nav contained_items");
+    }
+
+    // map navigation
+    {
+        Bytes ka = pack("a"), va = pack(int64_t(1)), kb = pack("b"), vb = pack(int64_t(2)), kc = pack("c"), vc = pack(int64_t(3));
+        Writer mp;
+        mp.append_map({{kc, vc}, {ka, va}, {kb, vb}});
+        Bytes mapbuf = mp.take();
+
+        View mv(mapbuf);
+        CHECK(mv.isMap(), "nav is_map");
+        auto inner = mv.containedItems();
+        CHECK(inner.has_value(), "map inner");
+        if (inner) {
+            MapView m(*inner);
+            CHECK(m.count() == 3, "map count");
+            auto got = m.get(kb);
+            CHECK(got.has_value(), "map get hit");
+            if (got) {
+                Reader r(got->data, got->size);
+                auto e = r.next();
+                CHECK(e && e->integer == 2, "map get value");
+            }
+            CHECK(!m.get(pack("z")).has_value(), "map get miss");
+
+            auto it = m.iterator();
+            std::vector<std::string> keys;
+            while (auto e = it.next()) {
+                Reader r(e->key.data, e->key.size);
+                keys.push_back(r.next()->str);
+            }
+            CHECK(keys.size() == 3 && keys[0] == "a" && keys[2] == "c", "map iterator order");
+        }
+    }
+
     if (fails == 0)
         std::printf("test_struple: all checks passed\n");
     else

@@ -96,7 +96,8 @@ var it = m.iterator();        // (key, value) views, in sorted order
 The streaming `Reader` also gains a cursor surface: `peekType`, `nextView` (the
 next element's raw bytes), `skip`, and `rest`.
 
-*(Currently in the Zig reference; propagating to the other languages next.)*
+*(Available in all six implementations, with idiomatic names per language —
+`is_string`/`isString`, `nth_rest`/`nthRest`, etc.)*
 
 ## Conformance corpus
 

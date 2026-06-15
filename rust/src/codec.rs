@@ -375,6 +375,31 @@ impl<'a> Reader<'a> {
         Ok(Some(el))
     }
 
+    /// The next element's type code without consuming it (None at end).
+    pub fn peek_type(&self) -> Option<u8> {
+        self.buf.get(self.pos).copied()
+    }
+
+    /// The remaining unread bytes (a valid struple stream).
+    pub fn rest(&self) -> &'a [u8] {
+        &self.buf[self.pos..]
+    }
+
+    /// The next element's raw bytes (a zero-copy view), advancing the cursor.
+    pub fn next_view(&mut self) -> Result<Option<&'a [u8]>, Error> {
+        let start = self.pos;
+        if self.next()?.is_none() {
+            return Ok(None);
+        }
+        let end = self.pos;
+        Ok(Some(&self.buf[start..end]))
+    }
+
+    /// Advance past the next element; false at end of stream.
+    pub fn skip(&mut self) -> Result<bool, Error> {
+        Ok(self.next_view()?.is_some())
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         if self.pos + n > self.buf.len() {
             return Err(Error::Truncated);
@@ -514,6 +539,185 @@ fn append_element(out: &mut Vec<u8>, e: &Element) {
 /// `Ord` this way — `a.cmp(b)` and `slice::sort` work directly.)
 pub fn compare(a: &[u8], b: &[u8]) -> Ordering {
     a.cmp(b)
+}
+
+// ---------------------------------------------------------------------------
+// Navigation / query
+// ---------------------------------------------------------------------------
+
+/// Zero-copy navigation over a struple buffer (a stream of elements). Every
+/// result is a sub-slice that is itself a valid struple buffer.
+#[derive(Clone, Copy)]
+pub struct View<'a> {
+    pub bytes: &'a [u8],
+}
+
+pub fn view(bytes: &[u8]) -> View<'_> {
+    View::new(bytes)
+}
+
+impl<'a> View<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        View { bytes }
+    }
+    pub fn reader(&self) -> Reader<'a> {
+        Reader::new(self.bytes)
+    }
+
+    pub fn count(&self) -> Result<usize, Error> {
+        let mut r = self.reader();
+        let mut n = 0;
+        while r.skip()? {
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    pub fn at(&self, index: usize) -> Result<Option<&'a [u8]>, Error> {
+        let mut r = self.reader();
+        let mut i = 0;
+        while let Some(v) = r.next_view()? {
+            if i == index {
+                return Ok(Some(v));
+            }
+            i += 1;
+        }
+        Ok(None)
+    }
+
+    pub fn head(&self) -> Result<Option<&'a [u8]>, Error> {
+        self.at(0)
+    }
+
+    pub fn tail(&self) -> Result<&'a [u8], Error> {
+        let mut r = self.reader();
+        r.next_view()?;
+        Ok(r.rest())
+    }
+
+    pub fn nth_rest(&self, n: usize) -> Result<&'a [u8], Error> {
+        let mut r = self.reader();
+        for _ in 0..n {
+            if !r.skip()? {
+                break;
+            }
+        }
+        Ok(r.rest())
+    }
+
+    pub fn take(&self, n: usize) -> Result<&'a [u8], Error> {
+        let mut r = self.reader();
+        for _ in 0..n {
+            if !r.skip()? {
+                break;
+            }
+        }
+        Ok(&self.bytes[..self.bytes.len() - r.rest().len()])
+    }
+
+    pub fn head_type(&self) -> Option<u8> {
+        self.bytes.first().copied()
+    }
+
+    pub fn is_nil(&self) -> bool {
+        self.head_type() == Some(NIL)
+    }
+    pub fn is_undefined(&self) -> bool {
+        self.head_type() == Some(UNDEF)
+    }
+    pub fn is_bool(&self) -> bool {
+        matches!(self.head_type(), Some(BOOL_FALSE) | Some(BOOL_TRUE))
+    }
+    pub fn is_int(&self) -> bool {
+        match self.head_type() {
+            Some(t) => t == INT_ZERO || t == INT_NEG_BIG || t == INT_POS_BIG || (0x10..=0x1f).contains(&t) || (0x21..=0x30).contains(&t),
+            None => false,
+        }
+    }
+    pub fn is_float(&self) -> bool {
+        matches!(self.head_type(), Some(FLOAT32) | Some(FLOAT64))
+    }
+    pub fn is_number(&self) -> bool {
+        self.is_int() || self.is_float()
+    }
+    pub fn is_timestamp(&self) -> bool {
+        self.head_type() == Some(TIMESTAMP)
+    }
+    pub fn is_string(&self) -> bool {
+        self.head_type() == Some(STRING)
+    }
+    pub fn is_bytes(&self) -> bool {
+        self.head_type() == Some(BYTES)
+    }
+    pub fn is_array(&self) -> bool {
+        self.head_type() == Some(ARRAY)
+    }
+    pub fn is_map(&self) -> bool {
+        self.head_type() == Some(MAP)
+    }
+    pub fn is_set(&self) -> bool {
+        self.head_type() == Some(SET)
+    }
+    pub fn is_container(&self) -> bool {
+        matches!(self.head_type(), Some(ARRAY) | Some(MAP) | Some(SET))
+    }
+
+    /// The container's inner element stream (un-escaped, owned), or None.
+    pub fn contained_items(&self) -> Result<Option<Vec<u8>>, Error> {
+        if !self.is_container() {
+            return Ok(None);
+        }
+        let mut r = self.reader();
+        Ok(match r.next()? {
+            Some(Element::Array(b)) | Some(Element::Map(b)) | Some(Element::Set(b)) => Some(b),
+            _ => None,
+        })
+    }
+}
+
+/// Reads key/value pairs from a map's inner stream (from `View::contained_items`).
+/// Keys are canonical (sorted), so `get` early-exits.
+pub struct MapView<'a> {
+    pub inner: &'a [u8],
+}
+
+impl<'a> MapView<'a> {
+    pub fn new(inner: &'a [u8]) -> Self {
+        MapView { inner }
+    }
+    pub fn count(&self) -> Result<usize, Error> {
+        Ok(View::new(self.inner).count()? / 2)
+    }
+    pub fn entries(&self) -> EntryIter<'a> {
+        EntryIter { r: Reader::new(self.inner) }
+    }
+    /// Look up the value bytes for an encoded key (e.g. `encode(&Value::Str(...))`).
+    pub fn get(&self, key: &[u8]) -> Result<Option<&'a [u8]>, Error> {
+        let mut it = self.entries();
+        while let Some((k, v)) = it.next_entry()? {
+            match k.cmp(key) {
+                Ordering::Equal => return Ok(Some(v)),
+                Ordering::Greater => return Ok(None),
+                Ordering::Less => {}
+            }
+        }
+        Ok(None)
+    }
+}
+
+pub struct EntryIter<'a> {
+    r: Reader<'a>,
+}
+
+impl<'a> EntryIter<'a> {
+    pub fn next_entry(&mut self) -> Result<Option<(&'a [u8], &'a [u8])>, Error> {
+        let k = match self.r.next_view()? {
+            Some(k) => k,
+            None => return Ok(None),
+        };
+        let v = self.r.next_view()?.ok_or(Error::Truncated)?;
+        Ok(Some((k, v)))
+    }
 }
 
 // ---------------------------------------------------------------------------
