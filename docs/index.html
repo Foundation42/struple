@@ -161,17 +161,18 @@
     <div class="wrap">
       <h2>The wire format</h2>
       <p class="lead">Order falls straight out of the type byte:</p>
-      <p class="order-line">nil &lt; undefined &lt; false &lt; true &lt; −int &lt; 0 &lt; +int &lt; float32 &lt; float64 &lt; string &lt; bytes &lt; array &lt; map &lt; set</p>
+      <p class="order-line">nil &lt; undefined &lt; false &lt; true &lt; −int &lt; 0 &lt; +int &lt; float32 &lt; float64 &lt; timestamp &lt; uuid &lt; string &lt; bytes &lt; array &lt; map &lt; set</p>
       <div class="codes">
         <div><span class="hexcode">0x01</span> nil</div>
         <div><span class="hexcode">0x02</span> undefined</div>
         <div><span class="hexcode">0x05/06</span> false / true</div>
-        <div><span class="hexcode">0x10–1F</span> negative int</div>
+        <div><span class="hexcode">0x10–1F</span> −int (1–16 bytes)</div>
         <div><span class="hexcode">0x20</span> zero</div>
-        <div><span class="hexcode">0x21–30</span> positive int</div>
-        <div><span class="hexcode">0x0F / 31</span> big −/+ int</div>
+        <div><span class="hexcode">0x21–30</span> +int (1–16 bytes)</div>
+        <div><span class="hexcode">0x0F / 31</span> big −/+ int (&gt; i128)</div>
         <div><span class="hexcode">0x34 / 35</span> float32 / 64</div>
         <div><span class="hexcode">0x40</span> timestamp</div>
+        <div><span class="hexcode">0x44</span> uuid</div>
         <div><span class="hexcode">0x48 / 49</span> string / bytes</div>
         <div><span class="hexcode">0x50</span> array</div>
         <div><span class="hexcode">0x52 / 54</span> map / set</div>

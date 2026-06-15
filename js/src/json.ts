@@ -88,6 +88,8 @@ function renderElement(e: Element): string {
       return Number.isFinite(e.value) ? e.value.toString() : "null";
     case "timestamp":
       return e.micros.toString();
+    case "uuid":
+      return JSON.stringify(toUuidString(e.value));
     case "string":
       return JSON.stringify(e.value);
     case "bytes":
@@ -119,6 +121,15 @@ function renderMap(body: Uint8Array): string {
     parts.push(key + ":" + renderElement(v));
   }
   return "{" + parts.join(",") + "}";
+}
+
+function toUuidString(u: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < u.length; i++) {
+    if (i === 4 || i === 6 || i === 8 || i === 10) s += "-";
+    s += u[i].toString(16).padStart(2, "0");
+  }
+  return s;
 }
 
 function toBase64(bytes: Uint8Array): string {

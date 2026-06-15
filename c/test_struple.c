@@ -62,8 +62,18 @@ int main(void) {
     ENC_CHECK(struple_append_int(&w, -100), "1f9c");
     ENC_CHECK(struple_append_string(&w, "app", 3), "4861707000");
     {
-        uint8_t mag[9] = {1, 0, 0, 0, 0, 0, 0, 0, 0}; /* 2^64 */
-        ENC_CHECK(struple_append_big_int(&w, false, mag, 9), "310109010000000000000000");
+        /* wide integers now use the fixed slots (the i128 range) */
+        uint8_t p64[9] = {1, 0, 0, 0, 0, 0, 0, 0, 0}; /* 2^64 */
+        ENC_CHECK(struple_append_big_int(&w, false, p64, 9), "29010000000000000000");
+        uint8_t imax[16] = {0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        ENC_CHECK(struple_append_big_int(&w, false, imax, 16), "307fffffffffffffffffffffffffffffff"); /* i128 max */
+        uint8_t p127[16] = {0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; /* 2^127 */
+        ENC_CHECK(struple_append_big_int(&w, true, p127, 16), "1080000000000000000000000000000000");   /* i128 min */
+        ENC_CHECK(struple_append_big_int(&w, false, p127, 16), "31011080000000000000000000000000000000"); /* first big-int */
+    }
+    {
+        uint8_t u[16] = {0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00};
+        ENC_CHECK(struple_append_uuid(&w, u), "44550e8400e29b41d4a716446655440000");
     }
 
     /* int round-trip */

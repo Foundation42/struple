@@ -32,8 +32,8 @@ struct Error : std::runtime_error {
 namespace tc {
 constexpr uint8_t TERMINATOR = 0x00, NIL = 0x01, UNDEF = 0x02, BOOL_FALSE = 0x05, BOOL_TRUE = 0x06,
                   INT_NEG_BIG = 0x0f, INT_ZERO = 0x20, INT_POS_BIG = 0x31, FLOAT32 = 0x34,
-                  FLOAT64 = 0x35, TIMESTAMP = 0x40, STRING = 0x48, BYTES = 0x49, ARRAY = 0x50,
-                  MAP = 0x52, SET = 0x54;
+                  FLOAT64 = 0x35, TIMESTAMP = 0x40, UUID = 0x44, STRING = 0x48, BYTES = 0x49,
+                  ARRAY = 0x50, MAP = 0x52, SET = 0x54;
 }
 
 namespace detail {
@@ -78,21 +78,40 @@ inline void write_framed(Bytes& b, uint8_t type_code, const uint8_t* c, size_t n
     b.push_back(tc::TERMINATOR);
 }
 
+// Does this value (sign + trimmed big-endian magnitude) fit the i128 range
+// [-2^127, 2^127-1]? Below 16 bytes always; at 16 bytes the top byte decides.
+inline bool fits_fixed(bool neg, const uint8_t* mag, size_t mlen) {
+    if (mlen < 16) return true;
+    if (mlen > 16) return false;
+    if (mag[0] < 0x80) return true;  // |value| < 2^127
+    if (!neg) return false;          // positive >= 2^127 -> big-int
+    if (mag[0] != 0x80) return false;
+    for (size_t i = 1; i < 16; i++)
+        if (mag[i] != 0) return false;  // only exactly -2^127 still fits
+    return true;
+}
+
 // mag: normalized big-endian magnitude (non-empty, no leading zeros).
 inline void append_magnitude(Bytes& b, bool neg, const uint8_t* mag, size_t mlen) {
-    if (mlen <= 8) {
-        if (neg) {
-            uint64_t m = be_to_u64(mag, mlen);
-            uint64_t pos_val = m - 1;
-            size_t n = byte_len(pos_val);
-            if (n == 0) n = 1;
-            b.push_back(uint8_t(tc::INT_ZERO - n));
-            uint64_t payload = (n == 8) ? (uint64_t(0) - m) : ((1ull << (8 * n)) - m);
-            push_be(b, payload, n);
-        } else {
+    // The fixed slots span the whole i128 range (1–16 byte magnitudes).
+    if (fits_fixed(neg, mag, mlen)) {
+        if (!neg) {
             b.push_back(uint8_t(tc::INT_ZERO + mlen));
             b.insert(b.end(), mag, mag + mlen);
+            return;
         }
+        // Negative excess form = ~(magnitude - 1) over n bytes, where n is the
+        // byte length of (magnitude - 1). Pure byte math — no 128-bit type.
+        uint8_t pv[16];
+        std::memcpy(pv, mag, mlen);
+        for (size_t i = mlen; i-- > 0;) {
+            if (pv[i]-- != 0) break;  // borrow only while a byte was 0x00
+        }
+        size_t start = 0;
+        while (start + 1 < mlen && pv[start] == 0) start++;  // trim pos_val
+        size_t n = mlen - start;
+        b.push_back(uint8_t(tc::INT_ZERO - n));
+        for (size_t i = start; i < mlen; i++) b.push_back(uint8_t(~pv[i]));
         return;
     }
     b.push_back(neg ? tc::INT_NEG_BIG : tc::INT_POS_BIG);
@@ -194,6 +213,13 @@ public:
         detail::push_be(buf_, u, 8);
         return *this;
     }
+    // `uuid16` points to 16 raw bytes (network/big-endian order).
+    Writer& append_uuid(const uint8_t* uuid16) {
+        buf_.push_back(tc::UUID);
+        buf_.insert(buf_.end(), uuid16, uuid16 + 16);
+        return *this;
+    }
+    Writer& append_uuid(const Bytes& u) { return append_uuid(u.data()); }
     Writer& append_string(std::string_view s) {
         detail::write_framed(buf_, tc::STRING, reinterpret_cast<const uint8_t*>(s.data()), s.size());
         return *this;
@@ -261,7 +287,7 @@ inline Bytes pack(Ts&&... vs) {
 
 // ----------------------------------------------------------------- Reader
 
-enum class Kind { Nil, Undefined, Bool, Int, BigInt, F32, F64, Timestamp, String, Bytes, Array, Map, Set };
+enum class Kind { Nil, Undefined, Bool, Int, BigInt, F32, F64, Timestamp, Uuid, String, Bytes, Array, Map, Set };
 
 struct Element {
     Kind kind{};
@@ -307,6 +333,7 @@ public:
             case tc::FLOAT32: { uint32_t b = uint32_t(detail::be_to_u64(take(4), 4)); b = (b & detail::SIGN32) ? (b ^ detail::SIGN32) : ~b; std::memcpy(&e.f32, &b, 4); e.kind = Kind::F32; return e; }
             case tc::FLOAT64: { uint64_t b = detail::be_to_u64(take(8), 8); b = (b & detail::SIGN64) ? (b ^ detail::SIGN64) : ~b; std::memcpy(&e.f64, &b, 8); e.kind = Kind::F64; return e; }
             case tc::TIMESTAMP: { uint64_t b = detail::be_to_u64(take(8), 8) ^ detail::SIGN64; e.kind = Kind::Timestamp; e.integer = int64_t(b); return e; }
+            case tc::UUID: { const uint8_t* p = take(16); e.kind = Kind::Uuid; e.data.assign(p, p + 16); return e; }
             case tc::STRING: { Bytes u = take_framed(); e.kind = Kind::String; e.str.assign(reinterpret_cast<const char*>(u.data()), u.size()); return e; }
             case tc::BYTES: e.kind = Kind::Bytes; e.data = take_framed(); return e;
             case tc::ARRAY: e.kind = Kind::Array; e.data = take_framed(); return e;
@@ -400,6 +427,7 @@ private:
             case tc::FLOAT32: take(4); break;
             case tc::FLOAT64:
             case tc::TIMESTAMP: take(8); break;
+            case tc::UUID: take(16); break;
             case tc::STRING:
             case tc::BYTES:
             case tc::ARRAY:
@@ -408,7 +436,6 @@ private:
             default:
                 if ((t >= 0x10 && t <= 0x1f) || (t >= 0x21 && t <= 0x30)) {
                     size_t n = (t < tc::INT_ZERO) ? size_t(tc::INT_ZERO - t) : size_t(t - tc::INT_ZERO);
-                    if (n > 8) throw Error("struple: unsupported integer width");
                     take(n);
                 } else {
                     throw Error("struple: invalid type code");
@@ -418,38 +445,52 @@ private:
     }
 
     void read_fixed_int(uint8_t t, Element& e) {
-        size_t n = (t < tc::INT_ZERO) ? size_t(tc::INT_ZERO - t) : size_t(t - tc::INT_ZERO);
-        if (n > 8) throw Error("struple: unsupported integer width");
+        bool positive = t > tc::INT_ZERO;
+        size_t n = positive ? size_t(t - tc::INT_ZERO) : size_t(tc::INT_ZERO - t);
         const uint8_t* p = take(n);
-        uint64_t raw = detail::be_to_u64(p, n);
-        if (t > tc::INT_ZERO) {
-            if (raw <= uint64_t(INT64_MAX)) { e.kind = Kind::Int; e.integer = int64_t(raw); }
-            else { e.kind = Kind::BigInt; e.big_negative = false; e.data.assign(p, p + n); }
+        // The widest (16-byte) slots can address values outside i128; a canonical
+        // encoder uses the big-int codes for those, so reject them here.
+        if (n == 16 && ((positive && p[0] >= 0x80) || (!positive && p[0] < 0x80)))
+            throw Error("struple: non-canonical 16-byte integer");
+
+        if (n <= 8) {
+            uint64_t raw = detail::be_to_u64(p, n);
+            if (positive) {
+                if (raw <= uint64_t(INT64_MAX)) { e.kind = Kind::Int; e.integer = int64_t(raw); }
+                else { e.kind = Kind::BigInt; e.big_negative = false; e.data.assign(p, p + n); }
+                return;
+            }
+            if (n < 8) { e.kind = Kind::Int; e.integer = -int64_t((1ull << (8 * n)) - raw); return; }
+            if (raw == 0) { e.kind = Kind::BigInt; e.big_negative = true; e.data = {1, 0, 0, 0, 0, 0, 0, 0, 0}; return; }
+            uint64_t m = uint64_t(0) - raw;
+            if (m <= uint64_t(INT64_MAX) + 1) {
+                e.kind = Kind::Int;
+                e.integer = (m == uint64_t(INT64_MAX) + 1) ? INT64_MIN : -int64_t(m);
+            } else {
+                uint8_t buf[8];
+                size_t mn = detail::u64_to_be(m, buf);
+                e.kind = Kind::BigInt;
+                e.big_negative = true;
+                e.data.assign(buf, buf + mn);
+            }
             return;
         }
-        if (n < 8) {
-            uint64_t m = (1ull << (8 * n)) - raw;
-            e.kind = Kind::Int;
-            e.integer = -int64_t(m);
-            return;
+
+        // n in 9..16: the value exceeds int64, so it is always a big-int element.
+        e.kind = Kind::BigInt;
+        if (positive) { e.big_negative = false; e.data.assign(p, p + n); return; }
+        // negative: magnitude = 2^(8n) - excess = (~excess) + 1, computed in bytes
+        e.big_negative = true;
+        e.data.resize(n);
+        unsigned carry = 1;
+        for (size_t i = n; i-- > 0;) {
+            unsigned v = unsigned(uint8_t(~p[i])) + carry;
+            e.data[i] = uint8_t(v & 0xff);
+            carry = v >> 8;
         }
-        if (raw == 0) {
-            e.kind = Kind::BigInt;
-            e.big_negative = true;
-            e.data = {1, 0, 0, 0, 0, 0, 0, 0, 0};
-            return;
-        }
-        uint64_t m = uint64_t(0) - raw;
-        if (m <= uint64_t(INT64_MAX) + 1) {
-            e.kind = Kind::Int;
-            e.integer = (m == uint64_t(INT64_MAX) + 1) ? INT64_MIN : -int64_t(m);
-        } else {
-            uint8_t buf[8];
-            size_t mn = detail::u64_to_be(m, buf);
-            e.kind = Kind::BigInt;
-            e.big_negative = true;
-            e.data.assign(buf, buf + mn);
-        }
+        size_t start = 0;
+        while (start + 1 < n && e.data[start] == 0) start++;  // trim leading zeros
+        if (start) e.data.erase(e.data.begin(), e.data.begin() + long(start));
     }
 
     void read_big_int(uint8_t t, Element& e) {
@@ -479,6 +520,7 @@ inline void append_element(Writer& w, const Element& e) {
         case Kind::F32: w.append_f32(e.f32); break;
         case Kind::F64: w.append_f64(e.f64); break;
         case Kind::Timestamp: w.append_timestamp(e.integer); break;
+        case Kind::Uuid: w.append_uuid(e.data.data()); break;
         case Kind::String: w.append_string(e.str); break;
         case Kind::Bytes: w.append_bytes(e.data); break;
         case Kind::Array: w.append_array(e.data); break;
@@ -578,6 +620,7 @@ public:
     }
     bool isNumber() const { return isInt() || isFloat(); }
     bool isTimestamp() const { return headType() == tc::TIMESTAMP; }
+    bool isUuid() const { return headType() == tc::UUID; }
     bool isString() const { return headType() == tc::STRING; }
     bool isBytes() const { return headType() == tc::BYTES; }
     bool isArray() const { return headType() == tc::ARRAY; }

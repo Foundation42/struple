@@ -3,9 +3,10 @@
 //!   from_json: JSON text  -> struple encoding (one element for the root value)
 //!   to_json:   struple bytes -> canonical JSON text
 //!
-//! Integer JSON numbers are parsed as `i128` (covering arbitrary-precision values
-//! a JS f64 round-trip would corrupt, up to i128's range); fractional/exponent
-//! numbers become f64. Objects encode to canonical (key-sorted) maps.
+//! Integer JSON numbers are parsed as `i128`, falling back to an arbitrary-
+//! precision decimal string (encoded via the big-int codes) when they exceed
+//! i128; fractional/exponent numbers become f64. Objects encode to canonical
+//! (key-sorted) maps.
 
 use crate::codec::{Element, Error, Reader, Writer};
 
@@ -15,6 +16,8 @@ pub enum Json {
     Null,
     Bool(bool),
     Int(i128),
+    /// An integer too large for i128, kept as its raw decimal text (sign + digits).
+    BigInt(String),
     Float(f64),
     Str(String),
     Array(Vec<Json>),
@@ -51,6 +54,13 @@ fn encode_json(w: &mut Writer, v: &Json) {
         }
         Json::Int(i) => {
             w.append_int(*i);
+        }
+        Json::BigInt(s) => {
+            let (negative, digits) = match s.strip_prefix('-') {
+                Some(rest) => (true, rest),
+                None => (false, s.as_str()),
+            };
+            w.append_big_int(negative, &decimal_to_magnitude(digits));
         }
         Json::Float(f) => {
             w.append_f64(*f);
@@ -95,12 +105,24 @@ fn render(out: &mut String, e: &Element) -> Result<(), Error> {
         Element::F32(f) => render_float(out, *f as f64),
         Element::F64(f) => render_float(out, *f),
         Element::Timestamp(t) => out.push_str(&t.to_string()),
+        Element::Uuid(u) => render_string(out, &render_uuid(u)),
         Element::Str(s) => render_string(out, s),
         Element::Bytes(b) => render_string(out, &base64(b)),
         Element::Array(body) | Element::Set(body) => render_array(out, body)?,
         Element::Map(body) => render_map(out, body)?,
     }
     Ok(())
+}
+
+fn render_uuid(u: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(36);
+    for (i, b) in u.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            s.push('-');
+        }
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 fn render_float(out: &mut String, f: f64) {
@@ -167,6 +189,25 @@ fn render_string(out: &mut String, s: &str) {
         }
     }
     out.push('"');
+}
+
+/// Decimal ASCII digits -> normalized big-endian magnitude bytes.
+fn decimal_to_magnitude(digits: &str) -> Vec<u8> {
+    let mut bytes: Vec<u8> = Vec::new(); // big-endian, no leading zeros
+    for ch in digits.bytes() {
+        // bytes = bytes * 10 + digit
+        let mut carry = (ch - b'0') as u16;
+        for b in bytes.iter_mut().rev() {
+            let v = *b as u16 * 10 + carry;
+            *b = (v & 0xff) as u8;
+            carry = v >> 8;
+        }
+        while carry > 0 {
+            bytes.insert(0, (carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    bytes
 }
 
 fn magnitude_to_decimal(mag: &[u8]) -> String {
@@ -353,7 +394,8 @@ impl Parser<'_> {
         if is_float {
             tok.parse::<f64>().map(Json::Float).map_err(|_| "bad float".to_string())
         } else {
-            tok.parse::<i128>().map(Json::Int).map_err(|_| format!("integer out of i128 range: {tok}"))
+            // Fall back to arbitrary precision when the value exceeds i128.
+            Ok(tok.parse::<i128>().map(Json::Int).unwrap_or_else(|_| Json::BigInt(tok.to_string())))
         }
     }
 

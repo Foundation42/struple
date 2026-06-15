@@ -85,6 +85,12 @@ static void build_into(struple_writer *w, const sj_value *op) {
         hexdec(val->str, &b, &bl);
         struple_append_bytes(w, b, bl);
         free(b);
+    } else if (strcmp(key, "uuid") == 0) {
+        uint8_t *b;
+        size_t bl;
+        hexdec(val->str, &b, &bl);
+        struple_append_uuid(w, b);
+        free(b);
     } else if (strcmp(key, "array") == 0) {
         struple_writer child;
         struple_writer_init(&child);

@@ -1,5 +1,6 @@
 import math
 import unittest
+import uuid
 
 from struple import Writer, compare, encode, pack, unpack
 
@@ -14,7 +15,16 @@ class Codec(unittest.TestCase):
         self.assertEqual(encode(-1).hex(), "1fff")
         self.assertEqual(encode(-100).hex(), "1f9c")
         self.assertEqual(encode("app").hex(), "4861707000")
-        self.assertEqual(encode(1 << 64).hex(), "310109010000000000000000")
+        # wide integers now use the fixed slots (the i128 range)
+        self.assertEqual(encode(1 << 64).hex(), "29010000000000000000")  # 9-byte fixed positive
+        self.assertEqual(encode((1 << 127) - 1).hex(), "307fffffffffffffffffffffffffffffff")  # i128 max
+        self.assertEqual(encode(-(1 << 127)).hex(), "1080000000000000000000000000000000")  # i128 min
+        self.assertEqual(encode(1 << 127).hex(), "31011080000000000000000000000000000000")  # first big-int
+
+    def test_uuid(self):
+        u = uuid.UUID("550e8400-e29b-41d4-a716-446655440000")
+        self.assertEqual(encode(u).hex(), "44550e8400e29b41d4a716446655440000")
+        self.assertEqual(unpack(encode(u))[0], u)  # round-trips as a uuid.UUID
 
     def test_int_roundtrip(self):
         cases = [0, 1, -1, 255, 256, -256, -257, 2**63 - 1, -(2**63), 1 << 64, -(1 << 64), 10**40, -(10**50)]

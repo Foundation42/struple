@@ -12,8 +12,8 @@
   { "json": "-42", "bytes": "1fd6" },
   { "json": "9223372036854775807", "bytes": "287fffffffffffffff" },
   { "json": "-9223372036854775808", "bytes": "188000000000000000" },
-  { "json": "100000000000000000000000000000", "bytes": "31010d01431e0fae6d7217caa0000000" },
-  { "json": "-99999999999999999999999999999999", "bytes": "0ffef1fb11d292bea47a53107f00000000" },
+  { "json": "100000000000000000000000000000", "bytes": "2d01431e0fae6d7217caa0000000" },
+  { "json": "-99999999999999999999999999999999", "bytes": "12fb11d292bea47a53107f00000001" },
   { "json": "1.5", "bytes": "35bff8000000000000" },
   { "json": "-3.14159", "bytes": "353ff6de060fe47991" },
   { "json": "0.5", "bytes": "35bfe0000000000000" },
@@ -28,6 +28,12 @@
   { "json": "{}", "bytes": "5200" },
   { "json": "{\"a\":1,\"b\":2}", "bytes": "52486100ff2101486200ff210200" },
   { "json": "{\"active\":true,\"id\":12345,\"name\":\"alice\",\"score\":87.5,\"tags\":[\"x\",\"y\"]}", "bytes": "524861637469766500ff0648696400ff223039486e616d6500ff48616c69636500ff4873636f726500ff35c055e000ff00ff00ff00ff00ff487461677300ff50487800ffff487900ffff00ff00" },
+  { "json": "18446744073709551616", "bytes": "29010000000000000000" },
+  { "json": "170141183460469231731687303715884105727", "bytes": "307fffffffffffffffffffffffffffffff" },
+  { "json": "170141183460469231731687303715884105728", "bytes": "31011080000000000000000000000000000000" },
+  { "json": "-170141183460469231731687303715884105728", "bytes": "1080000000000000000000000000000000" },
+  { "json": "-170141183460469231731687303715884105729", "bytes": "0ffeef7ffffffffffffffffffffffffffffffe" },
+  { "json": "[1,18446744073709551616,-18446744073709551616]", "bytes": "502101290100ff00ff00ff00ff00ff00ff00ff00ff1800ff00ff00ff00ff00ff00ff00ff00ff00" },
   { "build": {"undef":null}, "bytes": "02" },
   { "build": {"float32":1.5}, "bytes": "34bfc00000" },
   { "build": {"timestamp":"0"}, "bytes": "408000000000000000" },
@@ -39,5 +45,8 @@
   { "build": {"set":[{"string":"b"},{"string":"a"},{"string":"a"}]}, "bytes": "54486100ff486200ff00" },
   { "build": {"map":[[{"int":"1"},{"string":"one"}],[{"int":"2"},{"string":"two"}]]}, "bytes": "522101486f6e6500ff21024874776f00ff00" },
   { "build": {"map":[[{"string":"data"},{"bytes":"00ff"}]]}, "bytes": "52486461746100ff4900ffffff00ff00" },
-  { "build": {"array":[{"timestamp":"1000000"},{"bytes":"01"},{"undef":null}]}, "bytes": "50408000ff00ff00ff00ff0f4240490100ff0200" }
+  { "build": {"array":[{"timestamp":"1000000"},{"bytes":"01"},{"undef":null}]}, "bytes": "50408000ff00ff00ff00ff0f4240490100ff0200" },
+  { "build": {"uuid":"550e8400e29b41d4a716446655440000"}, "bytes": "44550e8400e29b41d4a716446655440000" },
+  { "build": {"uuid":"ffffffffffffffffffffffffffffffff"}, "bytes": "44ffffffffffffffffffffffffffffffff" },
+  { "build": {"array":[{"uuid":"00112233445566778899aabbccddeeff"},{"string":"x"}]}, "bytes": "504400ff112233445566778899aabbccddeeff487800ff00" }
 ]

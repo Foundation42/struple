@@ -19,7 +19,26 @@ fn golden_bytes() {
     assert_eq!(hex(&encode(&Value::Int(-1))), "1fff");
     assert_eq!(hex(&encode(&Value::Int(-100))), "1f9c");
     assert_eq!(hex(&encode(&Value::Str("app".into()))), "4861707000");
-    assert_eq!(hex(&encode(&Value::Int(1i128 << 64))), "310109010000000000000000");
+    // wide integers now use the fixed slots (the i128 range)
+    assert_eq!(hex(&encode(&Value::Int(1i128 << 64))), "29010000000000000000"); // 9-byte fixed positive
+    assert_eq!(hex(&encode(&Value::Int(i128::MAX))), "307fffffffffffffffffffffffffffffff"); // i128 max
+    assert_eq!(hex(&encode(&Value::Int(i128::MIN))), "1080000000000000000000000000000000"); // i128 min
+    // 2^127 (one past i128 max) falls back to the big-int code
+    assert_eq!(
+        hex(&encode(&Value::BigInt { negative: false, magnitude: {
+            let mut m = vec![0x80u8];
+            m.extend(std::iter::repeat(0).take(15));
+            m
+        } })),
+        "31011080000000000000000000000000000000"
+    );
+}
+
+#[test]
+fn uuid_bytes() {
+    let u: [u8; 16] = [0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00];
+    assert_eq!(hex(&encode(&Value::Uuid(u))), "44550e8400e29b41d4a716446655440000");
+    assert_eq!(unpack(&encode(&Value::Uuid(u))).unwrap()[0], Value::Uuid(u));
 }
 
 #[test]

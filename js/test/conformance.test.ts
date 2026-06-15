@@ -49,6 +49,7 @@ function buildInto(w: Writer, op: any): void {
     case "float64": w.appendFloat64(val); break;
     case "float32": w.appendFloat32(val); break;
     case "timestamp": w.appendTimestamp(BigInt(val)); break;
+    case "uuid": w.appendUuid(fromHex(val)); break;
     case "string": w.appendString(val); break;
     case "bytes": w.appendBytes(fromHex(val)); break;
     case "array": {

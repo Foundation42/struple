@@ -114,6 +114,9 @@ pub const View = struct {
     pub fn isTimestamp(self: View) bool {
         return self.headType() == tc.timestamp;
     }
+    pub fn isUuid(self: View) bool {
+        return self.headType() == tc.uuid;
+    }
     pub fn isString(self: View) bool {
         return self.headType() == tc.string;
     }

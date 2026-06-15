@@ -72,6 +72,7 @@ static void build_into(Writer& w, const Json& op) {
     else if (key == "timestamp") w.append_timestamp(std::stoll(val.text));
     else if (key == "string") w.append_string(val.text);
     else if (key == "bytes") w.append_bytes(from_hex(val.text));
+    else if (key == "uuid") w.append_uuid(from_hex(val.text));
     else if (key == "array") {
         Writer c;
         for (auto& it : val.items) build_into(c, it);

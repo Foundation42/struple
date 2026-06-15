@@ -8,6 +8,12 @@ function hex(bytes: Uint8Array): string {
   return s;
 }
 
+function fromHex(s: string): Uint8Array {
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 test("golden bytes match the wire format", () => {
   assert.equal(hex(encode(null)), "01");
   assert.equal(hex(encode(true)), "06");
@@ -17,7 +23,20 @@ test("golden bytes match the wire format", () => {
   assert.equal(hex(encode(-1n)), "1fff");
   assert.equal(hex(encode(-100n)), "1f9c");
   assert.equal(hex(encode("app")), "4861707000");
-  assert.equal(hex(encode(1n << 64n)), "310109010000000000000000");
+  // wide integers now use the fixed slots (the i128 range)
+  assert.equal(hex(encode(1n << 64n)), "29010000000000000000"); // 9-byte fixed positive
+  assert.equal(hex(encode((1n << 127n) - 1n)), "307fffffffffffffffffffffffffffffff"); // i128 max
+  assert.equal(hex(encode(-(1n << 127n))), "1080000000000000000000000000000000"); // i128 min
+  assert.equal(hex(encode(1n << 127n)), "31011080000000000000000000000000000000"); // first big-int
+});
+
+test("uuid: golden bytes and round-trip", () => {
+  const u = fromHex("550e8400e29b41d4a716446655440000");
+  const w = new Writer();
+  w.appendUuid(u);
+  assert.equal(hex(w.bytes()), "44550e8400e29b41d4a716446655440000");
+  const [e] = unpack(w.bytes());
+  assert.deepEqual(e, u);
 });
 
 test("integer round-trips incl. arbitrary precision", () => {

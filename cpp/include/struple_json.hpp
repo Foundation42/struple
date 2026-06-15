@@ -366,6 +366,18 @@ inline void render(std::string& out, const Element& e) {
             break;
         case Kind::F32: render_float(out, double(e.f32)); break;
         case Kind::F64: render_float(out, e.f64); break;
+        case Kind::Uuid: {
+            static const char* hexd = "0123456789abcdef";
+            std::string u;
+            u.reserve(36);
+            for (size_t i = 0; i < e.data.size(); i++) {
+                if (i == 4 || i == 6 || i == 8 || i == 10) u += '-';
+                u += hexd[e.data[i] >> 4];
+                u += hexd[e.data[i] & 0xf];
+            }
+            render_string(out, u);
+            break;
+        }
         case Kind::String: render_string(out, e.str); break;
         case Kind::Bytes: render_string(out, base64(e.data)); break;
         case Kind::Array:

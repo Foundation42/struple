@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import struct
+import uuid as _uuid
 from typing import Any, Iterable, Optional
 
 # Type codes. Their order is the cross-type sort order.
@@ -25,6 +26,7 @@ FLOAT32 = 0x34
 FLOAT64 = 0x35
 DECIMAL = 0x38
 TIMESTAMP = 0x40
+UUID = 0x44
 STRING = 0x48
 BYTES = 0x49
 ARRAY = 0x50
@@ -33,6 +35,9 @@ SET = 0x54
 
 _MASK64 = (1 << 64) - 1
 _SIGN64 = 1 << 63
+# The fixed integer slots span the i128 range; values beyond use the big-int codes.
+_I128_MAX = (1 << 127) - 1
+_I128_MIN = -(1 << 127)
 _EPOCH = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
 
 # Element kinds yielded by Reader.next() as (kind, payload) tuples.
@@ -93,6 +98,10 @@ class Writer:
         _append_timestamp(self.buf, micros)
         return self
 
+    def append_uuid(self, u) -> "Writer":
+        _append_uuid(self.buf, u.bytes if isinstance(u, _uuid.UUID) else bytes(u))
+        return self
+
     def append_string(self, s: str) -> "Writer":
         _write_framed(self.buf, STRING, s.encode("utf-8"))
         return self
@@ -140,6 +149,8 @@ def _append_value(out: bytearray, value: Any) -> None:
         _append_map(out, ((encode(k), encode(v)) for k, v in value.items()))
     elif isinstance(value, (set, frozenset)):
         _append_set(out, (encode(e) for e in value))
+    elif isinstance(value, _uuid.UUID):
+        _append_uuid(out, value.bytes)
     elif isinstance(value, _dt.datetime):
         _append_timestamp(out, _datetime_to_micros(value))
     else:
@@ -152,20 +163,21 @@ def _append_integer(out: bytearray, value: int) -> None:
         return
     negative = value < 0
     mag = -value if negative else value
-    mag_len = (mag.bit_length() + 7) // 8
-    if mag_len <= 8:
+    # The fixed slots span the whole i128 range (1–16 byte magnitudes).
+    if _I128_MIN <= value <= _I128_MAX:
         if negative:
             pos_val = mag - 1
             n = (pos_val.bit_length() + 7) // 8 or 1
             out.append(INT_ZERO - n)
             out += ((1 << (8 * n)) - mag).to_bytes(n, "big")
         else:
+            mag_len = (mag.bit_length() + 7) // 8
             out.append(INT_ZERO + mag_len)
             out += mag.to_bytes(mag_len, "big")
         return
-    # arbitrary precision: [m][n][magnitude], complemented for negatives
+    # arbitrary precision beyond i128: [m][n][magnitude], complemented for negatives
     out.append(INT_NEG_BIG if negative else INT_POS_BIG)
-    n = mag_len
+    n = (mag.bit_length() + 7) // 8
     m = (n.bit_length() + 7) // 8 or 1
     comp = (lambda b: ~b & 0xFF) if negative else (lambda b: b)
     out.append(comp(m))
@@ -205,6 +217,13 @@ def _append_float32(out: bytearray, value: float) -> None:
 def _append_timestamp(out: bytearray, micros: int) -> None:
     out.append(TIMESTAMP)
     out += ((micros & _MASK64) ^ _SIGN64).to_bytes(8, "big")
+
+
+def _append_uuid(out: bytearray, raw: bytes) -> None:
+    if len(raw) != 16:
+        raise ValueError("struple: uuid must be 16 bytes")
+    out.append(UUID)
+    out += raw
 
 
 def _append_map(out: bytearray, entries: Iterable[tuple[bytes, bytes]]) -> None:
@@ -283,6 +302,8 @@ class Reader:
             return ("float64", self._read_f64())
         if t == TIMESTAMP:
             return ("timestamp", self._read_timestamp())
+        if t == UUID:
+            return ("uuid", self._take(16))
         if t == STRING:
             return ("string", self._take_framed_unescaped().decode("utf-8"))
         if t == BYTES:
@@ -343,13 +364,15 @@ class Reader:
         return _unescape(self._take_framed())
 
     def _read_fixed_int(self, t: int) -> Element:
-        n = (INT_ZERO - t) if t < INT_ZERO else (t - INT_ZERO)
-        if n > 8:
-            raise ValueError(f"struple: unsupported integer width {n}")
-        raw = int.from_bytes(self._take(n), "big")
-        if t > INT_ZERO:
-            return ("int", raw)
-        return ("int", raw - (1 << (8 * n)))
+        positive = t > INT_ZERO
+        n = (t - INT_ZERO) if positive else (INT_ZERO - t)
+        payload = self._take(n)
+        # The widest (16-byte) slots can address values outside i128; a canonical
+        # encoder uses the big-int codes for those, so reject them here.
+        if n == 16 and ((positive and payload[0] >= 0x80) or (not positive and payload[0] < 0x80)):
+            raise ValueError("struple: non-canonical 16-byte integer")
+        raw = int.from_bytes(payload, "big")
+        return ("int", raw if positive else raw - (1 << (8 * n)))
 
     def _read_big_int(self, t: int) -> Element:
         negative = t == INT_NEG_BIG
@@ -395,6 +418,8 @@ def _element_to_value(e: Element) -> Any:
         return val
     if kind == "timestamp":
         return _EPOCH + _dt.timedelta(microseconds=val)
+    if kind == "uuid":
+        return _uuid.UUID(bytes=val)
     if kind == "string" or kind == "bytes":
         return val
     if kind == "array":
@@ -451,6 +476,8 @@ def _append_element(out: bytearray, e: Element) -> None:
         _append_float64(out, val)
     elif kind == "timestamp":
         _append_timestamp(out, val)
+    elif kind == "uuid":
+        _append_uuid(out, val)
     elif kind == "string":
         _write_framed(out, STRING, val.encode("utf-8"))
     elif kind == "bytes":
@@ -552,6 +579,9 @@ class View:
 
     def is_timestamp(self) -> bool:
         return self.head_type() == TIMESTAMP
+
+    def is_uuid(self) -> bool:
+        return self.head_type() == UUID
 
     def is_string(self) -> bool:
         return self.head_type() == STRING

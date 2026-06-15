@@ -17,6 +17,7 @@
 #define FLOAT32 0x34
 #define FLOAT64 0x35
 #define TIMESTAMP 0x40
+#define UUID 0x44
 #define STRING 0x48
 #define BYTES 0x49
 #define ARRAY 0x50
@@ -98,10 +99,6 @@ static size_t byte_len(uint64_t x) {
     return n;
 }
 
-static void push_be(struple_writer *w, uint64_t value, size_t n) {
-    for (size_t i = n; i-- > 0;) sw_push(w, (uint8_t)((value >> (8 * i)) & 0xff));
-}
-
 static void write_escaped(struple_writer *w, const uint8_t *content, size_t len) {
     for (size_t i = 0; i < len; i++) {
         sw_push(w, content[i]);
@@ -115,24 +112,43 @@ static void write_framed(struple_writer *w, uint8_t type_code, const uint8_t *co
     sw_push(w, TERMINATOR);
 }
 
+/* Does this value (sign + trimmed big-endian magnitude) fit the i128 range
+ * [-2^127, 2^127-1]? Below 16 bytes always; at 16 bytes the top byte decides. */
+static bool fits_fixed(bool negative, const uint8_t *mag, size_t mag_len) {
+    if (mag_len < 16) return true;
+    if (mag_len > 16) return false;
+    if (mag[0] < 0x80) return true; /* |value| < 2^127 */
+    if (!negative) return false;    /* positive >= 2^127 -> big-int */
+    if (mag[0] != 0x80) return false;
+    for (size_t i = 1; i < 16; i++)
+        if (mag[i] != 0) return false; /* only exactly -2^127 still fits */
+    return true;
+}
+
 /* mag: normalized big-endian magnitude (non-empty, no leading zeros). */
 static void append_magnitude(struple_writer *w, bool negative, const uint8_t *mag, size_t mag_len) {
-    if (mag_len <= 8) {
-        if (negative) {
-            uint64_t m = be_to_u64(mag, mag_len);
-            uint64_t pos_val = m - 1;
-            size_t n = byte_len(pos_val);
-            if (n == 0) n = 1;
-            sw_push(w, (uint8_t)(INT_ZERO - n));
-            uint64_t payload = (n == 8) ? ((uint64_t)0 - m) : ((1ULL << (8 * n)) - m);
-            push_be(w, payload, n);
-        } else {
+    /* The fixed slots span the whole i128 range (1–16 byte magnitudes). */
+    if (fits_fixed(negative, mag, mag_len)) {
+        if (!negative) {
             sw_push(w, (uint8_t)(INT_ZERO + mag_len));
             sw_append(w, mag, mag_len);
+            return;
         }
+        /* Negative excess form = ~(magnitude - 1) over n bytes, where n is the
+         * byte length of (magnitude - 1). Pure byte math — no 128-bit type. */
+        uint8_t pv[16];
+        memcpy(pv, mag, mag_len);
+        for (size_t i = mag_len; i-- > 0;) {
+            if (pv[i]-- != 0) break; /* borrow only while a byte was 0x00 */
+        }
+        size_t start = 0;
+        while (start + 1 < mag_len && pv[start] == 0) start++; /* trim pos_val */
+        size_t n = mag_len - start;
+        sw_push(w, (uint8_t)(INT_ZERO - n));
+        for (size_t i = start; i < mag_len; i++) sw_push(w, (uint8_t)~pv[i]);
         return;
     }
-    /* arbitrary precision: [m][n][magnitude], complemented for negatives */
+    /* arbitrary precision beyond i128: [m][n][magnitude], complemented for negatives */
     sw_push(w, negative ? INT_NEG_BIG : INT_POS_BIG);
     size_t n = mag_len;
     size_t m = byte_len((uint64_t)n);
@@ -215,6 +231,11 @@ void struple_append_timestamp(struple_writer *w, int64_t micros) {
     uint64_t u = (uint64_t)micros ^ SIGN64;
     sw_push(w, TIMESTAMP);
     for (int i = 7; i >= 0; i--) sw_push(w, (uint8_t)((u >> (8 * i)) & 0xff));
+}
+
+void struple_append_uuid(struple_writer *w, const uint8_t *uuid16) {
+    sw_push(w, UUID);
+    sw_append(w, uuid16, 16);
 }
 
 void struple_append_string(struple_writer *w, const char *s, size_t len) {
@@ -336,56 +357,85 @@ static int unescape_to_scratch(struple_reader *r, const uint8_t *framed, size_t 
 }
 
 static int read_fixed_int(struple_reader *r, uint8_t t, struple_element *out) {
-    size_t n = (t < INT_ZERO) ? (size_t)(INT_ZERO - t) : (size_t)(t - INT_ZERO);
-    if (n > 8) return -1;
+    bool positive = t > INT_ZERO;
+    size_t n = positive ? (size_t)(t - INT_ZERO) : (size_t)(INT_ZERO - t);
     const uint8_t *p = take(r, n);
     if (!p) return -1;
-    uint64_t raw = be_to_u64(p, n);
-    if (t > INT_ZERO) {
-        if (raw <= (uint64_t)INT64_MAX) {
+    /* The widest (16-byte) slots can address values outside i128; a canonical
+     * encoder uses the big-int codes for those, so reject them here. */
+    if (n == 16 && ((positive && p[0] >= 0x80) || (!positive && p[0] < 0x80))) return -1;
+
+    if (n <= 8) {
+        uint64_t raw = be_to_u64(p, n);
+        if (positive) {
+            if (raw <= (uint64_t)INT64_MAX) {
+                out->kind = STRUPLE_INT;
+                out->int_val = (int64_t)raw;
+            } else {
+                out->kind = STRUPLE_BIGINT;
+                out->big_negative = false;
+                out->data = p;
+                out->data_len = n;
+            }
+            return 0;
+        }
+        /* negative: |value| = 2^(8n) - raw */
+        if (n < 8) {
             out->kind = STRUPLE_INT;
-            out->int_val = (int64_t)raw;
-        } else {
+            out->int_val = -(int64_t)((1ULL << (8 * n)) - raw);
+            return 0;
+        }
+        if (raw == 0) { /* |value| = 2^64 */
+            uint8_t *s = r_scratch(r, 9);
+            if (!s) return -1;
+            s[0] = 1;
+            memset(s + 1, 0, 8);
             out->kind = STRUPLE_BIGINT;
-            out->big_negative = false;
-            out->data = p;
-            out->data_len = n;
+            out->big_negative = true;
+            out->data = s;
+            out->data_len = 9;
+            return 0;
+        }
+        uint64_t m = (uint64_t)0 - raw; /* 2^64 - raw */
+        if (m <= (uint64_t)INT64_MAX + 1) {
+            out->kind = STRUPLE_INT;
+            out->int_val = (m == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)m;
+        } else {
+            uint8_t buf[8];
+            size_t mn = u64_to_be(m, buf);
+            uint8_t *s = r_scratch(r, mn);
+            if (!s) return -1;
+            memcpy(s, buf, mn);
+            out->kind = STRUPLE_BIGINT;
+            out->big_negative = true;
+            out->data = s;
+            out->data_len = mn;
         }
         return 0;
     }
-    /* negative: |value| = 2^(8n) - raw */
-    if (n < 8) {
-        uint64_t m = (1ULL << (8 * n)) - raw;
-        out->kind = STRUPLE_INT;
-        out->int_val = -(int64_t)m;
+
+    /* n in 9..16: the value exceeds int64, so it is always a big-int element. */
+    out->kind = STRUPLE_BIGINT;
+    if (positive) {
+        out->big_negative = false;
+        out->data = p; /* payload is already the magnitude (no leading zeros) */
+        out->data_len = n;
         return 0;
     }
-    if (raw == 0) { /* |value| = 2^64 (only from malformed fixed input) */
-        uint8_t *s = r_scratch(r, 9);
-        if (!s) return -1;
-        s[0] = 1;
-        memset(s + 1, 0, 8);
-        out->kind = STRUPLE_BIGINT;
-        out->big_negative = true;
-        out->data = s;
-        out->data_len = 9;
-        return 0;
+    /* negative: magnitude = 2^(8n) - excess = (~excess) + 1, computed in bytes */
+    uint8_t *s = r_scratch(r, n);
+    if (!s) return -1;
+    unsigned carry = 1;
+    for (size_t i = n; i-- > 0;) {
+        unsigned v = (unsigned)(uint8_t)~p[i] + carry;
+        s[i] = (uint8_t)(v & 0xff);
+        carry = v >> 8;
     }
-    uint64_t m = (uint64_t)0 - raw; /* 2^64 - raw */
-    if (m <= (uint64_t)INT64_MAX + 1) {
-        out->kind = STRUPLE_INT;
-        out->int_val = (m == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)m;
-    } else {
-        uint8_t buf[8];
-        size_t mn = u64_to_be(m, buf);
-        uint8_t *s = r_scratch(r, mn);
-        if (!s) return -1;
-        memcpy(s, buf, mn);
-        out->kind = STRUPLE_BIGINT;
-        out->big_negative = true;
-        out->data = s;
-        out->data_len = mn;
-    }
+    size_t start = 0;
+    while (start + 1 < n && s[start] == 0) start++; /* trim leading zeros */
+    out->big_negative = true;
+    out->data = s + start;
+    out->data_len = n - start;
     return 0;
 }
 
@@ -462,6 +512,14 @@ int struple_reader_next(struple_reader *r, struple_element *out) {
         case FLOAT32: return read_f32(r, out) == 0 ? 1 : -1;
         case FLOAT64: return read_f64(r, out) == 0 ? 1 : -1;
         case TIMESTAMP: return read_timestamp(r, out) == 0 ? 1 : -1;
+        case UUID: {
+            const uint8_t *p = take(r, 16);
+            if (!p) return -1;
+            out->kind = STRUPLE_UUID;
+            out->data = p;
+            out->data_len = 16;
+            return 1;
+        }
         case STRING:
         case BYTES:
         case ARRAY:
@@ -501,6 +559,7 @@ static void append_element(struple_writer *w, const struple_element *e) {
         case STRUPLE_F32: struple_append_f32(w, e->f32_val); break;
         case STRUPLE_F64: struple_append_f64(w, e->f64_val); break;
         case STRUPLE_TIMESTAMP: struple_append_timestamp(w, e->int_val); break;
+        case STRUPLE_UUID: struple_append_uuid(w, e->data); break;
         case STRUPLE_STRING: struple_append_string(w, (const char *)e->data, e->data_len); break;
         case STRUPLE_BYTES: struple_append_bytes(w, e->data, e->data_len); break;
         case STRUPLE_ARRAY: write_framed(w, ARRAY, e->data, e->data_len); break;
@@ -540,7 +599,6 @@ static int element_span(const uint8_t *buf, size_t len, size_t pos, size_t *out)
         /* no payload */
     } else if ((t >= 0x10 && t <= 0x1f) || (t >= 0x21 && t <= 0x30)) {
         size_t n = (t < INT_ZERO) ? (size_t)(INT_ZERO - t) : (size_t)(t - INT_ZERO);
-        if (n > 8) return -1;
         p += n;
     } else if (t == INT_NEG_BIG || t == INT_POS_BIG) {
         bool neg = (t == INT_NEG_BIG);
@@ -558,6 +616,8 @@ static int element_span(const uint8_t *buf, size_t len, size_t pos, size_t *out)
         p += 4;
     } else if (t == FLOAT64 || t == TIMESTAMP) {
         p += 8;
+    } else if (t == UUID) {
+        p += 16;
     } else if (t == STRING || t == BYTES || t == ARRAY || t == MAP || t == SET) {
         size_t i = p;
         for (;;) {
@@ -686,6 +746,7 @@ bool struple_view_is_float(struple_view v) {
 }
 bool struple_view_is_number(struple_view v) { return struple_view_is_int(v) || struple_view_is_float(v); }
 bool struple_view_is_timestamp(struple_view v) { return struple_view_head_type(v) == TIMESTAMP; }
+bool struple_view_is_uuid(struple_view v) { return struple_view_head_type(v) == UUID; }
 bool struple_view_is_string(struple_view v) { return struple_view_head_type(v) == STRING; }
 bool struple_view_is_bytes(struple_view v) { return struple_view_head_type(v) == BYTES; }
 bool struple_view_is_array(struple_view v) { return struple_view_head_type(v) == ARRAY; }

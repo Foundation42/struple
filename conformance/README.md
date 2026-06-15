@@ -38,6 +38,7 @@ strings (to stay precise and language-neutral), bytes are hex:
 | `{"int": "123"}` | integer |
 | `{"float64": 1.5}` / `{"float32": 1.5}` | float |
 | `{"timestamp": "1000000"}` | timestamp (µs since epoch) |
+| `{"uuid": "550e8400e29b41d4a716446655440000"}` | uuid (16 hex bytes) |
 | `{"string": "abc"}` | string |
 | `{"bytes": "00ff01"}` | bytes (hex) |
 | `{"array": [op, …]}` | array |
@@ -45,13 +46,15 @@ strings (to stay precise and language-neutral), bytes are hex:
 | `{"map": [[keyOp, valOp], …]}` | map (keys may be any type) |
 
 `build` interprets an op into a value/encoding; the interpreter is mirrored
-identically in the Zig generator and the TypeScript/Python conformance tests.
+identically in the Zig generator and every language's conformance test.
 
 ## Coverage
 
-JSON entries: null, booleans, integers across every width band (including
-arbitrary-precision values a JS `f64` round-trip would corrupt), non-integer
-floats, strings (prefix pairs + escapes), arrays, objects.
+JSON entries: null, booleans, integers across every width band — including the
+9–16 byte fixed slots and both sides of the i128 / big-int boundary (values a JS
+`f64` round-trip would corrupt) — non-integer floats, strings (prefix pairs +
+escapes), arrays, objects.
 
-Build entries: undefined, float32, timestamps (incl. negative), bytes (incl.
-embedded NULs), sets (dedup/sort), maps with non-string keys, and compositions.
+Build entries: undefined, float32, timestamps (incl. negative), uuid (incl. one
+with embedded NULs, inside an array), bytes (incl. embedded NULs), sets
+(dedup/sort), maps with non-string keys, and compositions.

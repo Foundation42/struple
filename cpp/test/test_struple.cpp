@@ -37,10 +37,31 @@ int main() {
     CHECK(hex(pack(int64_t(-100))) == "1f9c", "-100");
     CHECK(hex(pack("app")) == "4861707000", "app");
     {
+        // wide integers now use the fixed slots (the i128 range)
         Writer w;
-        uint8_t mag[9] = {1, 0, 0, 0, 0, 0, 0, 0, 0};
-        w.append_big_int(false, mag, 9);
-        CHECK(hex(w.bytes()) == "310109010000000000000000", "2^64");
+        uint8_t p64[9] = {1, 0, 0, 0, 0, 0, 0, 0, 0}; // 2^64
+        w.append_big_int(false, p64, 9);
+        CHECK(hex(w.bytes()) == "29010000000000000000", "2^64");
+
+        Writer w2;
+        uint8_t imax[16] = {0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        w2.append_big_int(false, imax, 16);
+        CHECK(hex(w2.bytes()) == "307fffffffffffffffffffffffffffffff", "i128 max");
+
+        Writer w3;
+        uint8_t p127[16] = {0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; // 2^127
+        w3.append_big_int(true, p127, 16);
+        CHECK(hex(w3.bytes()) == "1080000000000000000000000000000000", "i128 min");
+
+        Writer w4;
+        w4.append_big_int(false, p127, 16);
+        CHECK(hex(w4.bytes()) == "31011080000000000000000000000000000000", "first big-int");
+    }
+    {
+        Writer w;
+        uint8_t u[16] = {0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00};
+        w.append_uuid(u);
+        CHECK(hex(w.bytes()) == "44550e8400e29b41d4a716446655440000", "uuid");
     }
 
     // int round-trip

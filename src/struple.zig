@@ -11,7 +11,7 @@
 //!
 //! v2 covers the union of the Python and JavaScript data models: null,
 //! undefined, bool, arbitrary-precision integers, float32/64, (decimal —
-//! reserved), timestamp, string, bytes, array, map and set.
+//! reserved), timestamp, UUID, string, bytes, array, map and set.
 //!
 //! ## How ordering is achieved
 //!
@@ -20,16 +20,19 @@
 //!
 //!     null < undefined < false < true
 //!         < negative ints < zero < positive ints
-//!         < float32 < float64 < decimal < timestamp
+//!         < float32 < float64 < decimal < timestamp < uuid
 //!         < string < bytes < array < map < set
 //!
 //! Within a type the payload preserves order under `memcmp`:
 //!
 //!   * Integers carry their width in the type code (more magnitude -> a
 //!     larger/smaller code, so cross-width order is free). Fixed payloads are
-//!     big-endian; negatives use excess form (`value + 2^(8n)`). Values beyond
-//!     8 bytes use the bracketing big-int codes with an order-preserving,
-//!     self-delimiting `[m][n][magnitude]` length-prefix (effectively unbounded).
+//!     big-endian; negatives use excess form (`value + 2^(8n)`). The fixed slots
+//!     span 1–16 byte magnitudes (the whole i128 range); values beyond i128 use
+//!     the bracketing big-int codes with an order-preserving, self-delimiting
+//!     `[m][n][magnitude]` length-prefix (effectively unbounded).
+//!   * UUIDs are a fixed 16-byte payload (no framing); `memcmp` orders them
+//!     lexicographically, which also makes UUIDv7 time-ordered.
 //!   * Floats use the IEEE-754 total-ordering transform.
 //!   * Timestamps are an order-preserving signed i64 (microseconds since the
 //!     Unix epoch, UTC).
@@ -52,7 +55,7 @@ const std = @import("std");
 // ---------------------------------------------------------------------------
 
 /// One-byte type tags. The numeric values are load-bearing: their order *is* the
-/// cross-type sort order. Gaps are reserved for the future tower (UUID, float128,
+/// cross-type sort order. Gaps are reserved for the future tower (float128,
 /// date/time-only, intervals, ...).
 pub const tc = struct {
     /// Terminator / escape sentinel for variable-length framing. Never a type.
@@ -65,13 +68,13 @@ pub const tc = struct {
     pub const bool_true: u8 = 0x06;
 
     // Integers.
-    pub const int_neg_big: u8 = 0x0F; // arbitrary-precision negative
-    pub const int_neg_min: u8 = 0x10; // widest fixed negative (reserved up to 16 bytes)
+    pub const int_neg_big: u8 = 0x0F; // arbitrary-precision negative (beyond i128)
+    pub const int_neg_min: u8 = 0x10; // widest fixed negative (16-byte magnitude)
     pub const int_neg_max: u8 = 0x1F; // 1-byte fixed negative
     pub const int_zero: u8 = 0x20;
     pub const int_pos_min: u8 = 0x21; // 1-byte fixed positive
-    pub const int_pos_max: u8 = 0x30; // widest fixed positive (reserved up to 16 bytes)
-    pub const int_pos_big: u8 = 0x31; // arbitrary-precision positive
+    pub const int_pos_max: u8 = 0x30; // widest fixed positive (16-byte magnitude)
+    pub const int_pos_big: u8 = 0x31; // arbitrary-precision positive (beyond i128)
 
     pub const float32: u8 = 0x34;
     pub const float64: u8 = 0x35;
@@ -80,6 +83,8 @@ pub const tc = struct {
 
     pub const timestamp: u8 = 0x40;
 
+    pub const uuid: u8 = 0x44; // 16-byte fixed payload (no framing)
+
     pub const string: u8 = 0x48;
     pub const bytes: u8 = 0x49;
 
@@ -87,11 +92,6 @@ pub const tc = struct {
     pub const map: u8 = 0x52;
     pub const set: u8 = 0x54;
 };
-
-/// Largest integer width (in bytes) the *fixed* path uses. Values whose
-/// magnitude needs more than this many bytes use the big-int codes. 8 covers all
-/// of i64/u64; the 9–16 byte fixed slots stay reserved for a later optimization.
-const max_int_bytes: usize = 8;
 
 /// Companion byte written after a literal 0x00 inside variable-length payloads.
 const escape_byte: u8 = 0xFF;
@@ -112,6 +112,7 @@ pub const Kind = enum {
     float32,
     float64,
     timestamp,
+    uuid,
     string,
     bytes,
     array,
@@ -128,11 +129,12 @@ pub const Element = union(Kind) {
     nil,
     undef,
     boolean: bool,
-    int: i128, // fixed-width integers (|value| fits 8 bytes)
-    big_int: BigInt, // arbitrary-precision integers
+    int: i128, // fixed-width integers (the i128 range)
+    big_int: BigInt, // arbitrary-precision integers (beyond i128)
     float32: f32,
     float64: f64,
     timestamp: i64, // microseconds since the Unix epoch, UTC
+    uuid: [16]u8, // 128-bit identifier (raw bytes, big-endian/network order)
     string: []const u8,
     bytes: []const u8,
     array: []const u8,
@@ -235,7 +237,7 @@ pub const Packer = struct {
 
     /// Encode an arbitrary-precision integer given its sign and big-endian
     /// magnitude bytes (leading zeros are trimmed). Routes through the fixed path
-    /// when the magnitude fits in 8 bytes.
+    /// when the value fits i128 (1–16 byte magnitudes), else the big-int codes.
     pub fn appendBigInt(self: *Packer, negative: bool, magnitude_be: []const u8) EncodeError!void {
         var mag = magnitude_be;
         while (mag.len > 0 and mag[0] == 0) mag = mag[1..];
@@ -243,7 +245,7 @@ pub const Packer = struct {
             try self.list.append(tc.int_zero);
             return;
         }
-        if (mag.len <= max_int_bytes) {
+        if (fitsFixed(negative, mag)) {
             const value = readBigEndian(mag);
             if (negative) try encodeNegative(&self.list, value) else try encodePositive(&self.list, value);
             return;
@@ -273,6 +275,12 @@ pub const Packer = struct {
         std.mem.writeInt(u64, &buf, @as(u64, @bitCast(micros)) ^ (@as(u64, 1) << 63), .big);
         try self.list.append(tc.timestamp);
         try self.list.appendSlice(&buf);
+    }
+
+    /// A 128-bit UUID, stored as its 16 raw bytes (network/big-endian order).
+    pub fn appendUuid(self: *Packer, value: [16]u8) EncodeError!void {
+        try self.list.append(tc.uuid);
+        try self.list.appendSlice(&value);
     }
 
     pub fn appendString(self: *Packer, value: []const u8) EncodeError!void {
@@ -409,13 +417,15 @@ pub const Reader = struct {
             tc.bool_true => return .{ .boolean = true },
             tc.int_zero => return .{ .int = 0 },
             0x10...0x1f, 0x21...0x30 => {
-                const n: usize = if (type_code < tc.int_zero)
-                    tc.int_zero - type_code
-                else
-                    type_code - tc.int_zero;
-                if (n > max_int_bytes) return error.UnsupportedType; // reserved 9–16 byte slots
+                const positive = type_code > tc.int_zero;
+                const n: usize = if (positive) type_code - tc.int_zero else tc.int_zero - type_code;
                 const payload = try self.take(n);
-                return .{ .int = decodeIntPayload(type_code, payload) };
+                // The widest (16-byte) slots can address values outside i128; a
+                // canonical encoder uses the big-int codes for those, so a fixed
+                // 16-byte payload whose value escapes i128 is malformed.
+                if (n == 16 and ((positive and payload[0] >= 0x80) or (!positive and payload[0] < 0x80)))
+                    return error.InvalidType;
+                return .{ .int = decodeIntPayload(positive, payload) };
             },
             tc.int_neg_big, tc.int_pos_big => {
                 const negative = type_code == tc.int_neg_big;
@@ -431,6 +441,7 @@ pub const Reader = struct {
                 const raw = std.mem.readInt(u64, (try self.take(8))[0..8], .big);
                 return .{ .timestamp = @bitCast(raw ^ (@as(u64, 1) << 63)) };
             },
+            tc.uuid => return .{ .uuid = (try self.take(16))[0..16].* },
             tc.string => return .{ .string = try self.takeFramed() },
             tc.bytes => return .{ .bytes = try self.takeFramed() },
             tc.array => return .{ .array = try self.takeFramed() },
@@ -567,15 +578,30 @@ fn encodeNegative(list: *std.ArrayList(u8), magnitude: u128) EncodeError!void {
     var n = byteLen(pos_val);
     if (n == 0) n = 1;
     try list.append(tc.int_zero - @as(u8, @intCast(n)));
-    const span: u128 = @as(u128, 1) << @intCast(n * 8);
-    try writeBigEndian(list, span - magnitude, n);
+    // Excess form: store 2^(8n) - magnitude. The low n bytes of the wrapping
+    // negation give exactly that (and avoid the `1 << 128` overflow at n == 16).
+    try writeBigEndian(list, 0 -% magnitude, n);
 }
 
-fn decodeIntPayload(type_code: u8, payload: []const u8) i128 {
+fn decodeIntPayload(positive: bool, payload: []const u8) i128 {
     const raw = readBigEndian(payload);
-    if (type_code > tc.int_zero) return @intCast(raw);
+    if (positive) return @intCast(raw);
+    if (payload.len == 16) return @bitCast(raw); // raw - 2^128, via two's complement
     const span: u128 = @as(u128, 1) << @intCast(payload.len * 8);
     return @as(i128, @intCast(raw)) - @as(i128, @intCast(span));
+}
+
+/// Does this value (sign + trimmed big-endian magnitude) fit the fixed path, i.e.
+/// the i128 range [-2^127, 2^127-1]? Below 16 bytes always fits; at 16 bytes the
+/// top byte decides (positives < 2^127, and -2^127 = magnitude 2^127 still fits).
+fn fitsFixed(negative: bool, mag: []const u8) bool {
+    if (mag.len < 16) return true;
+    if (mag.len > 16) return false;
+    if (mag[0] < 0x80) return true; // |value| < 2^127
+    if (!negative) return false; // positive >= 2^127 -> big-int
+    if (mag[0] != 0x80) return false; // magnitude > 2^127 -> big-int
+    for (mag[1..]) |b| if (b != 0) return false; // only exactly 2^127 (i.e. -2^127) fits
+    return true;
 }
 
 /// Write `[m][n][magnitude]` for an arbitrary-precision integer, where `n` is the

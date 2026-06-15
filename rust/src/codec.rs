@@ -20,6 +20,7 @@ pub const INT_POS_BIG: u8 = 0x31;
 pub const FLOAT32: u8 = 0x34;
 pub const FLOAT64: u8 = 0x35;
 pub const TIMESTAMP: u8 = 0x40;
+pub const UUID: u8 = 0x44;
 pub const STRING: u8 = 0x48;
 pub const BYTES: u8 = 0x49;
 pub const ARRAY: u8 = 0x50;
@@ -61,6 +62,7 @@ pub enum Value {
     F32(f32),
     F64(f64),
     Timestamp(i64),
+    Uuid([u8; 16]),
     Str(String),
     Bytes(Vec<u8>),
     Array(Vec<Value>),
@@ -80,6 +82,7 @@ pub enum Element {
     F32(f32),
     F64(f64),
     Timestamp(i64),
+    Uuid([u8; 16]),
     Str(String),
     Bytes(Vec<u8>),
     Array(Vec<u8>),
@@ -138,6 +141,10 @@ impl Writer {
         append_timestamp(&mut self.buf, micros);
         self
     }
+    pub fn append_uuid(&mut self, u: [u8; 16]) -> &mut Self {
+        append_uuid(&mut self.buf, &u);
+        self
+    }
     pub fn append_string(&mut self, s: &str) -> &mut Self {
         write_framed(&mut self.buf, STRING, s.as_bytes());
         self
@@ -190,6 +197,7 @@ fn append_value(out: &mut Vec<u8>, value: &Value) {
         Value::F32(f) => append_f32(out, *f),
         Value::F64(f) => append_f64(out, *f),
         Value::Timestamp(t) => append_timestamp(out, *t),
+        Value::Uuid(u) => append_uuid(out, u),
         Value::Str(s) => write_framed(out, STRING, s.as_bytes()),
         Value::Bytes(b) => write_framed(out, BYTES, b),
         Value::Array(items) => {
@@ -234,20 +242,23 @@ fn append_big(out: &mut Vec<u8>, negative: bool, magnitude: &[u8]) {
 
 /// `mag`: normalized big-endian magnitude (non-empty, no leading zeros).
 fn append_magnitude(out: &mut Vec<u8>, negative: bool, mag: &[u8]) {
-    if mag.len() <= 8 {
+    // The fixed slots span the whole i128 range (1–16 byte magnitudes).
+    if fits_fixed(negative, mag) {
         if negative {
             let m = be_to_u128(mag);
             let pos_val = m - 1;
             let n = byte_len(pos_val).max(1);
             out.push(INT_ZERO - n as u8);
-            push_be(out, (1u128 << (8 * n)) - m, n);
+            // Excess form: the low n bytes of the wrapping negation give
+            // 2^(8n) - m, and avoid the `1 << 128` overflow at n == 16.
+            push_be(out, 0u128.wrapping_sub(m), n);
         } else {
             out.push(INT_ZERO + mag.len() as u8);
             out.extend_from_slice(mag);
         }
         return;
     }
-    // arbitrary precision: [m][n][magnitude], complemented for negatives
+    // arbitrary precision beyond i128: [m][n][magnitude], complemented for negatives
     out.push(if negative { INT_NEG_BIG } else { INT_POS_BIG });
     let n = mag.len();
     let m = byte_len(n as u128).max(1);
@@ -286,6 +297,27 @@ fn append_f32(out: &mut Vec<u8>, value: f32) {
 fn append_timestamp(out: &mut Vec<u8>, micros: i64) {
     out.push(TIMESTAMP);
     out.extend_from_slice(&((micros as u64) ^ SIGN64).to_be_bytes());
+}
+
+fn append_uuid(out: &mut Vec<u8>, u: &[u8; 16]) {
+    out.push(UUID);
+    out.extend_from_slice(u);
+}
+
+/// Does this value (sign + trimmed big-endian magnitude) fit the i128 range
+/// `[-2^127, 2^127-1]`? Below 16 bytes always; at 16 bytes the top byte decides.
+fn fits_fixed(negative: bool, mag: &[u8]) -> bool {
+    if mag.len() < 16 {
+        return true;
+    }
+    if mag.len() > 16 {
+        return false;
+    }
+    if mag[0] < 0x80 {
+        return true; // |value| < 2^127
+    }
+    // only -2^127 (magnitude exactly 2^127 = 0x80 00..00) still fits
+    negative && mag[0] == 0x80 && mag[1..].iter().all(|&b| b == 0)
 }
 
 fn append_map(out: &mut Vec<u8>, entries: &[(Vec<u8>, Vec<u8>)]) {
@@ -364,6 +396,7 @@ impl<'a> Reader<'a> {
             FLOAT32 => Element::F32(self.read_f32()?),
             FLOAT64 => Element::F64(self.read_f64()?),
             TIMESTAMP => Element::Timestamp(self.read_timestamp()?),
+            UUID => Element::Uuid(self.take(16)?.try_into().unwrap()),
             STRING => Element::Str(String::from_utf8(unescape(self.take_framed()?)).map_err(|_| Error::Utf8)?),
             BYTES => Element::Bytes(unescape(self.take_framed()?)),
             ARRAY => Element::Array(unescape(self.take_framed()?)),
@@ -428,16 +461,22 @@ impl<'a> Reader<'a> {
     }
 
     fn read_fixed_int(&mut self, t: u8) -> Result<Element, Error> {
-        let n = if t < INT_ZERO { (INT_ZERO - t) as usize } else { (t - INT_ZERO) as usize };
-        if n > 8 {
-            return Err(Error::UnsupportedWidth(n));
+        let positive = t > INT_ZERO;
+        let n = if positive { (t - INT_ZERO) as usize } else { (INT_ZERO - t) as usize };
+        let payload = self.take(n)?;
+        // The widest (16-byte) slots can address values outside i128; a canonical
+        // encoder uses the big-int codes for those, so reject them here.
+        if n == 16 && ((positive && payload[0] >= 0x80) || (!positive && payload[0] < 0x80)) {
+            return Err(Error::InvalidType(t));
         }
-        let raw = be_to_u128(self.take(n)?);
-        Ok(if t > INT_ZERO {
-            Element::Int(raw as i128)
+        let raw = be_to_u128(payload);
+        Ok(Element::Int(if positive {
+            raw as i128
+        } else if n == 16 {
+            raw as i128 // raw - 2^128 via two's-complement reinterpretation
         } else {
-            Element::Int(raw as i128 - (1i128 << (8 * n)))
-        })
+            raw as i128 - (1i128 << (8 * n))
+        }))
     }
 
     fn read_big_int(&mut self, t: u8) -> Result<Element, Error> {
@@ -490,6 +529,7 @@ fn element_to_value(e: Element) -> Result<Value, Error> {
         Element::F32(f) => Value::F32(f),
         Element::F64(f) => Value::F64(f),
         Element::Timestamp(t) => Value::Timestamp(t),
+        Element::Uuid(u) => Value::Uuid(u),
         Element::Str(s) => Value::Str(s),
         Element::Bytes(b) => Value::Bytes(b),
         Element::Array(body) => Value::Array(unpack(&body)?),
@@ -527,6 +567,7 @@ fn append_element(out: &mut Vec<u8>, e: &Element) {
         Element::F32(f) => append_f32(out, *f),
         Element::F64(f) => append_f64(out, *f),
         Element::Timestamp(t) => append_timestamp(out, *t),
+        Element::Uuid(u) => append_uuid(out, u),
         Element::Str(s) => write_framed(out, STRING, s.as_bytes()),
         Element::Bytes(b) => write_framed(out, BYTES, b),
         Element::Array(body) => write_framed(out, ARRAY, body),
@@ -642,6 +683,9 @@ impl<'a> View<'a> {
     }
     pub fn is_timestamp(&self) -> bool {
         self.head_type() == Some(TIMESTAMP)
+    }
+    pub fn is_uuid(&self) -> bool {
+        self.head_type() == Some(UUID)
     }
     pub fn is_string(&self) -> bool {
         self.head_type() == Some(STRING)

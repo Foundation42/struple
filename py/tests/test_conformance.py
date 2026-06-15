@@ -40,6 +40,8 @@ def _build_into(w, op):
         w.append_float32(val)
     elif key == "timestamp":
         w.append_timestamp(int(val))
+    elif key == "uuid":
+        w.append_uuid(bytes.fromhex(val))
     elif key == "string":
         w.append_string(val)
     elif key == "bytes":

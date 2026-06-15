@@ -620,6 +620,18 @@ static int render(struple_writer *out, const struple_element *e) {
         }
         case STRUPLE_F32: render_float(out, (double)e->f32_val); return 0;
         case STRUPLE_F64: render_float(out, e->f64_val); return 0;
+        case STRUPLE_UUID: {
+            static const char hexd[] = "0123456789abcdef";
+            char u[37];
+            size_t w = 0;
+            for (size_t i = 0; i < 16; i++) {
+                if (i == 4 || i == 6 || i == 8 || i == 10) u[w++] = '-';
+                u[w++] = hexd[e->data[i] >> 4];
+                u[w++] = hexd[e->data[i] & 0xf];
+            }
+            render_string(out, (const uint8_t *)u, w);
+            return 0;
+        }
         case STRUPLE_STRING: render_string(out, e->data, e->data_len); return 0;
         case STRUPLE_BYTES: {
             char *b = base64(e->data, e->data_len);

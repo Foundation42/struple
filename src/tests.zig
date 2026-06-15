@@ -82,11 +82,38 @@ test "golden: negative integers (excess form)" {
     try expectBytes(@as(i64, std.math.minInt(i64)), &.{ 0x18, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
 }
 
-test "golden: arbitrary-precision integers" {
-    // 2^64 = first value needing the big path: magnitude 01 followed by eight 00 (9 bytes)
-    try expectBytes(@as(i128, 1) << 64, &.{ 0x31, 0x01, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
-    // -(2^64): big negative, every field complemented
-    try expectBytes(-(@as(i128, 1) << 64), &.{ 0x0F, 0xFE, 0xF6, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
+test "golden: wide integers (i128 fixed slots)" {
+    // 2^64: 9-byte fixed positive (slot 0x29)
+    try expectBytes(@as(i128, 1) << 64, &.{ 0x29, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+    // -(2^64): the excess-form carry drops it to an 8-byte fixed negative (slot 0x18)
+    try expectBytes(-(@as(i128, 1) << 64), &.{ 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+    // i128 max = 2^127 - 1: widest fixed positive (slot 0x30)
+    try expectBytes(@as(i128, std.math.maxInt(i128)), &([_]u8{ 0x30, 0x7F } ++ [_]u8{0xFF} ** 15));
+    // i128 min = -2^127: widest fixed negative (slot 0x10)
+    try expectBytes(@as(i128, std.math.minInt(i128)), &([_]u8{ 0x10, 0x80 } ++ [_]u8{0x00} ** 15));
+}
+
+test "golden: big integers (beyond i128)" {
+    const a = testing.allocator;
+    // 2^127: first value past i128 max -> big-int code 0x31, [m=1][n=16][magnitude]
+    {
+        var mag = [_]u8{0} ** 16;
+        mag[0] = 0x80;
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendBigInt(false, &mag);
+        try testing.expectEqualSlices(u8, &([_]u8{ 0x31, 0x01, 0x10, 0x80 } ++ [_]u8{0x00} ** 15), p.bytes());
+    }
+    // -(2^127) - 1: first value past i128 min -> big-int code 0x0F, every field complemented
+    {
+        var mag = [_]u8{0} ** 16;
+        mag[0] = 0x80;
+        mag[15] = 0x01; // magnitude 2^127 + 1
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendBigInt(true, &mag);
+        try testing.expectEqualSlices(u8, &([_]u8{ 0x0F, 0xFE, 0xEF, 0x7F } ++ [_]u8{0xFF} ** 14 ++ [_]u8{0xFE}), p.bytes());
+    }
 }
 
 test "golden: floats" {
@@ -103,6 +130,39 @@ test "golden: timestamp" {
     p.reset();
     try p.appendTimestamp(-1);
     try testing.expectEqualSlices(u8, &.{ 0x40, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }, p.bytes());
+}
+
+test "golden + round-trip: uuid" {
+    const a = testing.allocator;
+    const u = [16]u8{ 0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00 };
+    var p = struple.Packer.init(a);
+    defer p.deinit();
+    try p.appendUuid(u);
+    try testing.expectEqualSlices(u8, &([_]u8{0x44} ++ u), p.bytes());
+
+    var r = struple.reader(p.bytes());
+    try testing.expectEqual(u, (try r.next()).?.uuid);
+    try testing.expect(try r.next() == null);
+}
+
+test "ordering: uuid sits between timestamp and string, ordered by bytes" {
+    const a = testing.allocator;
+    var lo = struple.Packer.init(a);
+    defer lo.deinit();
+    try lo.appendUuid([_]u8{0} ** 16);
+    var hi = struple.Packer.init(a);
+    defer hi.deinit();
+    try hi.appendUuid([_]u8{0} ** 15 ++ [_]u8{1});
+    try testing.expectEqual(std.math.Order.lt, struple.order(lo.bytes(), hi.bytes()));
+
+    var ts = struple.Packer.init(a);
+    defer ts.deinit();
+    try ts.appendTimestamp(std.math.maxInt(i64));
+    var str = struple.Packer.init(a);
+    defer str.deinit();
+    try str.appendString("");
+    try testing.expectEqual(std.math.Order.lt, struple.order(ts.bytes(), lo.bytes())); // timestamp < uuid
+    try testing.expectEqual(std.math.Order.lt, struple.order(hi.bytes(), str.bytes())); // uuid < string
 }
 
 test "golden: strings and bytes" {
@@ -160,20 +220,37 @@ test "round-trip: integers" {
     }
 }
 
-test "round-trip: arbitrary-precision integers" {
+test "round-trip: wide integers (i128 fixed slots and beyond)" {
     const a = testing.allocator;
 
-    // values that fit i128 but use the big path (9–16 byte magnitudes)
-    const big_cases = [_]i128{
+    // values across the 9–16 byte fixed slots now decode straight to .int
+    const fixed_cases = [_]i128{
         @as(i128, 1) << 64, -(@as(i128, 1) << 64),  @as(i128, 1) << 100,
         -(@as(i128, 1) << 100), std.math.maxInt(i128), std.math.minInt(i128),
     };
-    for (big_cases) |v| {
+    for (fixed_cases) |v| {
         const buf = try packOne(a, v);
         defer a.free(buf);
         var r = struple.reader(buf);
-        const elem = (try r.next()).?;
-        try testing.expectEqual(v, elem.big_int.toI128().?);
+        try testing.expectEqual(v, (try r.next()).?.int);
+    }
+
+    // boundary: 2^127 (one past i128 max) uses the big-int path; -2^127 still fits
+    {
+        var mag = [_]u8{0} ** 16;
+        mag[0] = 0x80; // 2^127
+        var pp = struple.Packer.init(a);
+        defer pp.deinit();
+        try pp.appendBigInt(false, &mag);
+        var rp = struple.reader(pp.bytes());
+        const ep = (try rp.next()).?;
+        try testing.expect(ep == .big_int and ep.big_int.toI128() == null);
+
+        var pn = struple.Packer.init(a);
+        defer pn.deinit();
+        try pn.appendBigInt(true, &mag); // -2^127 == i128 min
+        var rn = struple.reader(pn.bytes());
+        try testing.expectEqual(std.math.minInt(i128), (try rn.next()).?.int);
     }
 
     // a magnitude far beyond i128 round-trips via the byte API
@@ -455,8 +532,14 @@ test "decode: truncated and invalid input" {
         try testing.expectError(error.InvalidType, r.next());
     }
     {
-        var r = struple.reader(&.{0x30}); // reserved 16-byte fixed int slot
-        try testing.expectError(error.UnsupportedType, r.next());
+        var r = struple.reader(&.{0x29}); // 9-byte fixed int, payload missing
+        try testing.expectError(error.Truncated, r.next());
+    }
+    {
+        // non-canonical 16-byte positive: value >= 2^127 must use the big-int code
+        const buf = [_]u8{ 0x30, 0x80 } ++ [_]u8{0x00} ** 15;
+        var r = struple.reader(&buf);
+        try testing.expectError(error.InvalidType, r.next());
     }
 }
 

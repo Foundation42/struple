@@ -29,6 +29,13 @@ const json_inputs = [_][]const u8{
     "\"tab\\tnewline\\n\"", "[]",                              "[1,2,3]",
     "[null,true,\"x\",[1,2]]", "{}",                           "{\"a\":1,\"b\":2}",
     "{\"active\":true,\"id\":12345,\"name\":\"alice\",\"score\":87.5,\"tags\":[\"x\",\"y\"]}",
+    // wide integers: the i128 fixed slots and the i128/big-int boundary (both signs)
+    "18446744073709551616", // 2^64 (9-byte fixed positive)
+    "170141183460469231731687303715884105727", // 2^127 - 1 (i128 max, widest fixed)
+    "170141183460469231731687303715884105728", // 2^127 (first big-int positive)
+    "-170141183460469231731687303715884105728", // -2^127 (i128 min, widest fixed)
+    "-170141183460469231731687303715884105729", // -2^127 - 1 (first big-int negative)
+    "[1,18446744073709551616,-18446744073709551616]", // wide ints inside an array
 };
 
 /// Op descriptors for the non-JSON types. Each is valid JSON, embedded verbatim.
@@ -45,6 +52,9 @@ const build_ops = [_][]const u8{
     "{\"map\":[[{\"int\":\"1\"},{\"string\":\"one\"}],[{\"int\":\"2\"},{\"string\":\"two\"}]]}",
     "{\"map\":[[{\"string\":\"data\"},{\"bytes\":\"00ff\"}]]}",
     "{\"array\":[{\"timestamp\":\"1000000\"},{\"bytes\":\"01\"},{\"undef\":null}]}",
+    "{\"uuid\":\"550e8400e29b41d4a716446655440000\"}",
+    "{\"uuid\":\"ffffffffffffffffffffffffffffffff\"}",
+    "{\"array\":[{\"uuid\":\"00112233445566778899aabbccddeeff\"},{\"string\":\"x\"}]}",
 };
 
 pub fn main() !void {
@@ -120,6 +130,9 @@ fn buildInto(a: std.mem.Allocator, p: *struple.Packer, op: std.json.Value) !void
         try p.appendF32(@floatCast(asF64(val)));
     } else if (std.mem.eql(u8, key, "timestamp")) {
         try p.appendTimestamp(try std.fmt.parseInt(i64, val.string, 10));
+    } else if (std.mem.eql(u8, key, "uuid")) {
+        const raw = try hexDecode(a, val.string);
+        try p.appendUuid(raw[0..16].*);
     } else if (std.mem.eql(u8, key, "string")) {
         try p.appendString(val.string);
     } else if (std.mem.eql(u8, key, "bytes")) {

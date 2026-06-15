@@ -46,6 +46,8 @@ void struple_append_big_int(struple_writer *w, bool negative, const uint8_t *mag
 void struple_append_f32(struple_writer *w, float v);
 void struple_append_f64(struple_writer *w, double v);
 void struple_append_timestamp(struple_writer *w, int64_t micros);
+/* `uuid16` points to 16 raw bytes (network/big-endian order). */
+void struple_append_uuid(struple_writer *w, const uint8_t *uuid16);
 void struple_append_string(struple_writer *w, const char *s, size_t len);
 void struple_append_bytes(struple_writer *w, const uint8_t *b, size_t len);
 /* `child` is the encoded element stream of a nested tuple. */
@@ -77,6 +79,7 @@ typedef enum {
     STRUPLE_F32,
     STRUPLE_F64,
     STRUPLE_TIMESTAMP,  /* int_val = microseconds since the Unix epoch */
+    STRUPLE_UUID,       /* `data` = 16 raw bytes */
     STRUPLE_STRING,     /* `data` = UTF-8 (NUL-terminated past data_len) */
     STRUPLE_BYTES,
     STRUPLE_ARRAY,      /* `data` = un-escaped child stream */
@@ -137,6 +140,7 @@ bool struple_view_is_int(struple_view v);
 bool struple_view_is_float(struple_view v);
 bool struple_view_is_number(struple_view v);
 bool struple_view_is_timestamp(struple_view v);
+bool struple_view_is_uuid(struple_view v);
 bool struple_view_is_string(struple_view v);
 bool struple_view_is_bytes(struple_view v);
 bool struple_view_is_array(struple_view v);

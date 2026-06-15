@@ -14,7 +14,8 @@
 //!   object            <-> map  (canonical: keys come back sorted)
 //!
 //! struple types with no JSON equivalent degrade on `toJson`: undefined -> null,
-//! timestamp -> number (µs), bytes -> base64 string, set -> array.
+//! timestamp -> number (µs), uuid -> hyphenated string, bytes -> base64 string,
+//! set -> array.
 
 const std = @import("std");
 const struple = @import("struple.zig");
@@ -112,6 +113,7 @@ fn writeValue(arena: std.mem.Allocator, writer: anytype, elem: struple.Element) 
         .float32 => |f| try writeFloat(writer, f),
         .float64 => |f| try writeFloat(writer, f),
         .timestamp => |t| try writer.print("{d}", .{t}),
+        .uuid => |u| try writeUuid(writer, u),
         .string => |framed| try writeJsonString(arena, writer, framed),
         .bytes => |framed| try writeBase64(arena, writer, framed),
         .array, .set => |framed| try writeArray(arena, writer, framed),
@@ -190,6 +192,15 @@ fn writeBase64(arena: std.mem.Allocator, writer: anytype, framed: []const u8) !v
     const enc = std.base64.standard.Encoder;
     const buf = try arena.alloc(u8, enc.calcSize(raw.len));
     try writeQuoted(writer, enc.encode(buf, raw));
+}
+
+fn writeUuid(writer: anytype, u: [16]u8) !void {
+    try writer.writeByte('"');
+    for (u, 0..) |b, i| {
+        if (i == 4 or i == 6 or i == 8 or i == 10) try writer.writeByte('-');
+        try writer.print("{x:0>2}", .{b});
+    }
+    try writer.writeByte('"');
 }
 
 fn writeBigInt(arena: std.mem.Allocator, writer: anytype, bi: struple.BigInt) !void {

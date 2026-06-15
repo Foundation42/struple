@@ -21,6 +21,7 @@ export const TypeCode = {
   float64: 0x35,
   decimal: 0x38,
   timestamp: 0x40,
+  uuid: 0x44,
   string: 0x48,
   bytes: 0x49,
   array: 0x50,
@@ -31,6 +32,9 @@ export const TypeCode = {
 const T = TypeCode;
 const MASK64 = 0xffffffffffffffffn;
 const SIGN64 = 0x8000000000000000n;
+// The fixed integer slots span the i128 range; values beyond use the big-int codes.
+const I128_MAX = (1n << 127n) - 1n;
+const I128_MIN = -(1n << 127n);
 
 export type Value =
   | null
@@ -54,6 +58,7 @@ export type Element =
   | { kind: "float32"; value: number }
   | { kind: "float64"; value: number }
   | { kind: "timestamp"; micros: bigint }
+  | { kind: "uuid"; value: Uint8Array }
   | { kind: "string"; value: string }
   | { kind: "bytes"; value: Uint8Array }
   | { kind: "array"; body: Uint8Array }
@@ -100,6 +105,10 @@ export class Writer {
   }
   appendTimestamp(micros: bigint): this {
     appendTimestampInto(this.buf, micros);
+    return this;
+  }
+  appendUuid(u: Uint8Array): this {
+    appendUuidInto(this.buf, u);
     return this;
   }
   appendString(s: string): this {
@@ -182,6 +191,8 @@ export class Reader {
         return { kind: "float64", value: decodeFloat64(this.take(8)) };
       case T.timestamp:
         return this.readTimestamp();
+      case T.uuid:
+        return { kind: "uuid", value: this.take(16).slice() };
       case T.string:
         return { kind: "string", value: utf8Decode.decode(unescape(this.takeFramed())) };
       case T.bytes:
@@ -246,12 +257,16 @@ export class Reader {
   }
 
   readFixedInt(t: number): Element {
-    const n = t < T.intZero ? T.intZero - t : t - T.intZero;
-    if (n > 8) throw new Error(`struple: unsupported integer width ${n}`);
+    const positive = t > T.intZero;
+    const n = positive ? t - T.intZero : T.intZero - t;
+    const payload = this.take(n);
+    // The widest (16-byte) slots can address values outside i128; a canonical
+    // encoder uses the big-int codes for those, so reject them here.
+    if (n === 16 && ((positive && payload[0] >= 0x80) || (!positive && payload[0] < 0x80)))
+      throw new Error("struple: non-canonical 16-byte integer");
     let raw = 0n;
-    for (const b of this.take(n)) raw = (raw << 8n) | BigInt(b);
-    if (t > T.intZero) return { kind: "int", value: raw };
-    return { kind: "int", value: raw - (1n << BigInt(8 * n)) };
+    for (const b of payload) raw = (raw << 8n) | BigInt(b);
+    return { kind: "int", value: positive ? raw : raw - (1n << BigInt(8 * n)) };
   }
 
   readBigInt(t: number): Element {
@@ -297,6 +312,8 @@ function elementToValue(e: Element): Value {
       return e.value;
     case "timestamp":
       return new Date(Number(e.micros / 1000n));
+    case "uuid":
+      return e.value;
     case "string":
       return e.value;
     case "bytes":
@@ -352,6 +369,9 @@ function appendElement(out: number[], e: Element): void {
       break;
     case "timestamp":
       appendTimestampInto(out, e.micros);
+      break;
+    case "uuid":
+      appendUuidInto(out, e.value);
       break;
     case "string":
       writeFramed(out, T.string, utf8Encode.encode(e.value));
@@ -447,6 +467,7 @@ export class View {
   isFloat(): boolean { const t = this.headType(); return t === T.float32 || t === T.float64; }
   isNumber(): boolean { return this.isInt() || this.isFloat(); }
   isTimestamp(): boolean { return this.headType() === T.timestamp; }
+  isUuid(): boolean { return this.headType() === T.uuid; }
   isString(): boolean { return this.headType() === T.string; }
   isBytes(): boolean { return this.headType() === T.bytes; }
   isArray(): boolean { return this.headType() === T.array; }
@@ -570,8 +591,8 @@ function appendInteger(buf: number[], value: bigint): void {
   }
   const negative = value < 0n;
   const mag = negative ? -value : value;
-  const magBytes = bigIntToBytes(mag);
-  if (magBytes.length <= 8) {
+  // The fixed slots span the whole i128 range (1–16 byte magnitudes).
+  if (value >= I128_MIN && value <= I128_MAX) {
     if (negative) {
       const posVal = mag - 1n;
       let n = byteLenBig(posVal);
@@ -579,12 +600,14 @@ function appendInteger(buf: number[], value: bigint): void {
       buf.push(T.intZero - n);
       pushBigEndian(buf, (1n << BigInt(8 * n)) - mag, n);
     } else {
+      const magBytes = bigIntToBytes(mag);
       buf.push(T.intZero + magBytes.length);
       for (const b of magBytes) buf.push(b);
     }
     return;
   }
-  // arbitrary precision: [m][n][magnitude], complemented for negatives
+  // arbitrary precision beyond i128: [m][n][magnitude], complemented for negatives
+  const magBytes = bigIntToBytes(mag);
   buf.push(negative ? T.intNegBig : T.intPosBig);
   const n = magBytes.length;
   const m = byteLenNum(n);
@@ -624,6 +647,12 @@ function appendFloat32Into(buf: number[], value: number): void {
 function appendTimestampInto(buf: number[], micros: bigint): void {
   buf.push(T.timestamp);
   pushBigEndian(buf, BigInt.asUintN(64, micros) ^ SIGN64, 8);
+}
+
+function appendUuidInto(buf: number[], u: Uint8Array): void {
+  if (u.length !== 16) throw new Error("struple: uuid must be 16 bytes");
+  buf.push(T.uuid);
+  for (const b of u) buf.push(b);
 }
 
 function appendMapInto(buf: number[], entries: Array<[Uint8Array, Uint8Array]>): void {

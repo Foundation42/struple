@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json as _json
 import math
+import uuid as _uuid
 
 from ._core import Reader, encode
 
@@ -38,6 +39,8 @@ def _render(e: tuple) -> str:
         return repr(val) if math.isfinite(val) else "null"
     if kind == "timestamp":
         return str(val)
+    if kind == "uuid":
+        return _json.dumps(str(_uuid.UUID(bytes=val)))
     if kind == "string":
         return _json.dumps(val, ensure_ascii=False)
     if kind == "bytes":

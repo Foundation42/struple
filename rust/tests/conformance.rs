@@ -87,6 +87,10 @@ fn build_into(w: &mut Writer, op: &Json) {
         "bytes" => {
             w.append_bytes(&from_hex(as_str(val)));
         }
+        "uuid" => {
+            let raw: [u8; 16] = from_hex(as_str(val)).try_into().unwrap();
+            w.append_uuid(raw);
+        }
         "array" => {
             let mut child = Writer::new();
             for o in as_array(val) {
