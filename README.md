@@ -79,8 +79,9 @@ bytes, set, non-string map keys, compositions) via a small op language. See
 - **Python** ([`py/`](py/README.md)) — pure stdlib port.
 - **Rust** ([`rust/`](rust/README.md)) — pure, zero-dependency crate.
 - **C** ([`c/`](c/README.md)) — pure C11, zero-dependency.
+- **C++** ([`cpp/`](cpp/README.md)) — header-only C++17, zero-dependency.
 
-All five are driven by the same `vectors.json` and are verified byte-identical,
+All six are driven by the same `vectors.json` and are verified byte-identical,
 so they agree on every byte in both directions.
 
 ## Type coverage (Python + JavaScript)

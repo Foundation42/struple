@@ -17,9 +17,11 @@ build/
 /rust/target/
 /rust/Cargo.lock
 
-# C
+# C / C++
 /c/test_struple
 /c/test_conformance
+/cpp/test_struple
+/cpp/test_conformance
 *.o
 
 # Local Claude Code settings
