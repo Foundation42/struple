@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>struple — lexicographically-ordered tuple packing</title>
+  <meta name="description" content="A schema-free binary format whose encoded bytes are directly memcmp-orderable. One wire format, six byte-identical implementations." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <header class="hero">
+    <h1>struple</h1>
+    <p class="tag">Schema-free binary tuples whose bytes <em>sort themselves</em>.</p>
+    <p class="tag2">Pack values into bytes that are directly <code>memcmp</code>-comparable — drop them
+      into any byte-ordered store and they sort in the correct semantic order, no custom comparator.
+      One wire format, six byte-identical implementations.</p>
+    <div class="badges">
+      <span class="badge"><b>6</b> languages</span>
+      <span class="badge"><b>memcmp</b>-orderable</span>
+      <span class="badge">schema-free</span>
+      <span class="badge">zero-dependency</span>
+    </div>
+  </header>
+
+  <section id="idea">
+    <div class="wrap">
+      <h2>The idea</h2>
+      <p class="lead">A <strong>struple</strong> is a sequence of typed values packed into a byte buffer
+        so that comparing the raw bytes gives you the right order:</p>
+      <p class="order-line">std.mem.order(pack(a), pack(b)) &nbsp;==&nbsp; the semantic order of a and b</p>
+      <p>Every element starts with a one-byte <em>type code</em>, chosen so the type byte alone gives the
+        cross-type order. Within a type, payloads are encoded to preserve order under <code>memcmp</code>:
+        integers carry their width in the type code (negatives in excess form), floats use the IEEE-754
+        total-ordering transform, and variable-length values are <code>0x00</code>-terminated so a shorter
+        value sorts before a longer one that extends it. It's the FoundationDB tuple idea, rebuilt clean.</p>
+    </div>
+  </section>
+
+  <section id="encoder">
+    <div class="wrap io">
+      <h2>Pack it live <span class="sub">the actual codec, running in your browser</span></h2>
+      <div class="label">A tuple, as JSON (an array becomes the tuple's elements)</div>
+      <textarea id="enc-input" rows="2">["users", 12345, "alice", true]</textarea>
+      <div class="label">Encoded bytes</div>
+      <div class="bytes" id="enc-bytes"></div>
+      <div class="seg-legend" id="enc-legend"></div>
+      <div class="meta" id="enc-meta"></div>
+      <p class="note" style="margin-top:18px">Try a big integer like <code>[100000000000000000000000000000]</code>
+        — it stays lossless (a JSON&nbsp;→&nbsp;<code>f64</code> round-trip would corrupt it). Or a nested
+        <code>["user", [1, 2]]</code>, or an object <code>[{"b":2,"a":1}]</code> (keys come back sorted).</p>
+    </div>
+  </section>
+
+  <section id="ordering">
+    <div class="wrap io">
+      <h2>Watch them sort <span class="sub">one byte decides the order</span></h2>
+      <div class="cmp-grid">
+        <div>
+          <div class="label">Tuple A</div>
+          <input id="cmp-a" value='["user", 2]' />
+          <div class="bytes" id="cmp-abytes" style="margin-top:10px"></div>
+        </div>
+        <div>
+          <div class="label">Tuple B</div>
+          <input id="cmp-b" value='["user", 10]' />
+          <div class="bytes" id="cmp-bbytes" style="margin-top:10px"></div>
+        </div>
+      </div>
+      <div class="verdict" id="cmp-verdict"></div>
+      <p class="note" id="cmp-note"></p>
+      <p class="note" style="margin-top:14px">Note <code>2</code> sorts before <code>10</code> — these are
+        integers, not strings, so the width-prefixed encoding gets numeric order right. Try
+        <code>["app"]</code> vs <code>["apple"]</code>, or negatives like <code>[-256]</code> vs <code>[-100]</code>.</p>
+    </div>
+  </section>
+
+  <section id="compare">
+    <div class="wrap">
+      <h2>How it compares</h2>
+      <p class="lead">struple isn't trying to replace Protobuf or Cap'n Proto for RPC — it's built for one
+        thing those don't do: <strong>schema-free keys that sort by raw bytes</strong>.</p>
+      <table>
+        <thead>
+          <tr><th>&nbsp;</th><th class="s struple-col">struple</th><th class="s">Protobuf</th><th class="s">Cap'n&nbsp;Proto</th><th class="s">MessagePack</th><th class="s">JSON</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Schema-free</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s yes">✓</td><td class="s yes">✓</td></tr>
+          <tr><td>Compact binary</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s meh">~</td><td class="s yes">✓</td><td class="s no">✗</td></tr>
+          <tr><td>Self-describing (decode w/o schema)</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s yes">✓</td><td class="s yes">✓</td></tr>
+          <tr><td><code>memcmp</code>-ordered keys</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td></tr>
+          <tr><td>Arbitrary-precision integers</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td><td class="s meh">~</td></tr>
+          <tr><td>Identical bytes across languages</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s meh">~</td></tr>
+          <tr><td>Primary use</td><td class="s struple-col">ordered keys / tuples</td><td class="s">RPC messages</td><td class="s">zero-copy messages</td><td class="s">messages</td><td class="s">interchange</td></tr>
+        </tbody>
+      </table>
+      <p class="note" style="margin-top:14px">The standout row is <code>memcmp</code>-ordered keys — useful for
+        database keys, sorted indexes, range scans, priority queues, and event streams, in any byte-ordered
+        store (RocksDB, LMDB, FoundationDB-style layers, Redis ZSETs, …).</p>
+    </div>
+  </section>
+
+  <section id="format">
+    <div class="wrap">
+      <h2>The wire format</h2>
+      <p class="lead">Order falls straight out of the type byte:</p>
+      <p class="order-line">nil &lt; undefined &lt; false &lt; true &lt; −int &lt; 0 &lt; +int &lt; float32 &lt; float64 &lt; string &lt; bytes &lt; array &lt; map &lt; set</p>
+      <div class="codes">
+        <div><span class="hexcode">0x01</span> nil</div>
+        <div><span class="hexcode">0x02</span> undefined</div>
+        <div><span class="hexcode">0x05/06</span> false / true</div>
+        <div><span class="hexcode">0x10–1F</span> negative int</div>
+        <div><span class="hexcode">0x20</span> zero</div>
+        <div><span class="hexcode">0x21–30</span> positive int</div>
+        <div><span class="hexcode">0x0F / 31</span> big −/+ int</div>
+        <div><span class="hexcode">0x34 / 35</span> float32 / 64</div>
+        <div><span class="hexcode">0x40</span> timestamp</div>
+        <div><span class="hexcode">0x48 / 49</span> string / bytes</div>
+        <div><span class="hexcode">0x50</span> array</div>
+        <div><span class="hexcode">0x52 / 54</span> map / set</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="ports">
+    <div class="wrap">
+      <h2>Six implementations, every byte identical</h2>
+      <p class="lead">All driven by the same language-neutral conformance corpus, verified in both directions.</p>
+      <div class="ports">
+        <div class="port"><div class="name">Zig</div><div class="how">reference</div></div>
+        <div class="port"><div class="name">TypeScript</div><div class="how">npm test</div></div>
+        <div class="port"><div class="name">Python</div><div class="how">unittest</div></div>
+        <div class="port"><div class="name">Rust</div><div class="how">cargo test</div></div>
+        <div class="port"><div class="name">C</div><div class="how">make test</div></div>
+        <div class="port"><div class="name">C++</div><div class="how">make test</div></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p><a href="https://github.com/Foundation42/struple">github.com/Foundation42/struple</a> · Apache-2.0</p>
+    <p class="note">This page runs a self-contained demo codec; the authoritative implementations live in the repo.</p>
+  </footer>
+
+  <script type="module">
+    import { analyze, parseTuple, pack, compareBytes, typeName } from "./struple.js";
+
+    const PALETTE = ["#6ee7b7", "#38bdf8", "#f6c177", "#c4b5fd", "#fda4af", "#86efac", "#fca5a5", "#93c5fd"];
+    const hex2 = (b) => b.toString(16).padStart(2, "0");
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    function renderEncoder() {
+      const out = document.getElementById("enc-bytes");
+      const legend = document.getElementById("enc-legend");
+      const meta = document.getElementById("enc-meta");
+      let res;
+      try { res = analyze(parseTuple(document.getElementById("enc-input").value)); }
+      catch (e) { out.innerHTML = ""; legend.innerHTML = ""; meta.textContent = "⚠ " + e.message; return; }
+      out.innerHTML = "";
+      res.segs.forEach((seg, i) => {
+        const color = PALETTE[i % PALETTE.length];
+        for (let j = 0; j < seg.len; j++) {
+          const b = res.bytes[seg.start + j];
+          const span = document.createElement("span");
+          span.className = "byte" + (j === 0 ? " type" : "");
+          span.textContent = hex2(b);
+          span.style.background = color + "22";
+          span.style.borderColor = color + "66";
+          span.style.color = color;
+          if (j === 0) span.title = typeName(b);
+          out.appendChild(span);
+        }
+      });
+      legend.innerHTML = res.segs.map((seg, i) =>
+        `<span class="chip"><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${esc(seg.label)}</span>`).join("");
+      meta.innerHTML = `<b>${res.bytes.length}</b> bytes · ${res.segs.length} element${res.segs.length !== 1 ? "s" : ""} · the first byte of each is its <b>type code</b>`;
+    }
+
+    function renderRow(el, bytes, diff) {
+      el.innerHTML = "";
+      bytes.forEach((b, i) => {
+        const s = document.createElement("span");
+        s.className = "byte" + (i === diff ? " diff" : "");
+        s.textContent = hex2(b);
+        el.appendChild(s);
+      });
+    }
+
+    function renderCompare() {
+      const verdict = document.getElementById("cmp-verdict");
+      const note = document.getElementById("cmp-note");
+      let a, b;
+      try { a = pack(parseTuple(document.getElementById("cmp-a").value)); b = pack(parseTuple(document.getElementById("cmp-b").value)); }
+      catch (e) { verdict.textContent = "⚠ " + e.message; note.textContent = ""; return; }
+      let diff = -1;
+      const n = Math.min(a.length, b.length);
+      for (let i = 0; i < n; i++) if (a[i] !== b[i]) { diff = i; break; }
+      renderRow(document.getElementById("cmp-abytes"), a, diff);
+      renderRow(document.getElementById("cmp-bbytes"), b, diff);
+      const c = compareBytes(a, b);
+      verdict.innerHTML = `A <span class="op">${c < 0 ? "&lt;" : c > 0 ? "&gt;" : "="}</span> B`;
+      if (c === 0) note.textContent = "Identical bytes — equal values.";
+      else if (diff >= 0) note.innerHTML = `They first differ at byte ${diff}: <code>${hex2(a[diff])}</code> vs <code>${hex2(b[diff])}</code> — that single byte decides the order. Pure <code>memcmp</code>.`;
+      else note.innerHTML = "One is a prefix of the other — the shorter sorts first.";
+    }
+
+    document.getElementById("enc-input").addEventListener("input", renderEncoder);
+    document.getElementById("cmp-a").addEventListener("input", renderCompare);
+    document.getElementById("cmp-b").addEventListener("input", renderCompare);
+    renderEncoder();
+    renderCompare();
+  </script>
+</body>
+</html>
