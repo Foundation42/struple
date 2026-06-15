@@ -15,6 +15,9 @@ encoding is also **self-delimiting** — you can stream values back out without
 storing any external lengths. This is the FoundationDB tuple idea, rebuilt clean
 in Zig.
 
+The type system covers the **union of the Python and JavaScript data models**, so
+it can serve as the wire format for cross-language data exchange.
+
 ## Quick start
 
 ```zig
@@ -29,8 +32,7 @@ try p.append(true);
 
 const key = p.bytes();          // []const u8 — memcmp-orderable
 
-// stream it back
-var r = struple.reader(key);
+var r = struple.reader(key);    // zero-alloc streaming decode
 while (try r.next()) |elem| switch (elem) {
     .string => |s| { ... },
     .int    => |v| { ... },     // i128
@@ -38,75 +40,99 @@ while (try r.next()) |elem| switch (elem) {
     else => {},
 };
 
-// ordering is just memcmp
-std.mem.order(u8, key_a, key_b);   // .lt / .eq / .gt
+std.mem.order(u8, key_a, key_b);   // .lt / .eq / .gt — that's the comparator
 ```
 
 `Packer.append` dispatches on the Zig type at comptime; or call the explicit
-methods (`appendInt`, `appendUint`, `appendF32`, `appendF64`, `appendString`,
-`appendBytes`, `appendBool`, `appendNil`, `appendTuple`).
+methods: `appendNil`, `appendUndefined`, `appendBool`, `appendInt`/`appendUint`/
+`appendI128`/`appendBigInt`, `appendF32`/`appendF64`, `appendTimestamp`,
+`appendString`, `appendBytes`, `appendArray`, `appendMap`, `appendSet`.
 
-Build:
+Build: `zig build test` · `zig build run`.
 
-```
-zig build test     # run the suite
-zig build run      # run the demo
-```
+## Type coverage (Python + JavaScript)
 
-## v1 types
-
-`nil`, `bool`, integers (full `i64` / `u64` range), `f32`, `f64`, `string`
-(UTF-8), `bytes`, and nested `tuple`. The encoding reserves type-code space for
-the rest of the "tower" (UUID, decimals, `i128`, maps, vectors, sets, …).
+| concept | Python | JavaScript | struple |
+|---|---|---|---|
+| null | `None` | `null` | nil |
+| absent | — | `undefined` | undefined |
+| boolean | `bool` | `boolean` | bool |
+| integer (**unbounded**) | `int` | `BigInt` / integral `number` | int (fixed + arbitrary-precision) |
+| float | `float` | `number` | float32 / float64 |
+| decimal | `Decimal` | — | *(type code reserved; not yet implemented)* |
+| text | `str` | `string` | string (UTF-8) |
+| binary | `bytes` | `Uint8Array` | bytes |
+| sequence | `list`/`tuple` | `Array` | array |
+| mapping | `dict` | `Object`/`Map` | map |
+| set | `set`/`frozenset` | `Set` | set |
+| datetime | `datetime` | `Date` | timestamp |
 
 ## Wire format
 
-Every element is `[type code][payload]`. Type codes are assigned so the type
-byte alone gives the cross-type order:
+Every element is `[type code][payload]`. Type codes are assigned so the type byte
+alone gives the cross-type order:
 
 ```
-nil < false < true < negative ints < zero < positive ints
-    < float32 < float64 < string < bytes < tuple
+nil < undefined < false < true
+    < negative ints < zero < positive ints
+    < float32 < float64 < decimal < timestamp
+    < string < bytes < array < map < set
 ```
 
-| type        | code        | payload |
-|-------------|-------------|---------|
-| terminator  | `0x00`      | (framing sentinel, never an element) |
-| nil         | `0x01`      | — |
-| false/true  | `0x02`/`0x03` | — |
-| negative int| `0x10–0x1F` | big-endian excess form, width in the code |
-| zero        | `0x20`      | — |
-| positive int| `0x21–0x30` | big-endian magnitude, width in the code |
-| float32     | `0x31`      | 4 bytes, order-transformed |
-| float64     | `0x32`      | 8 bytes, order-transformed |
-| string      | `0x40`      | bytes, `0x00`-terminated, `0x00→0x00 0xFF` |
-| bytes       | `0x41`      | bytes, `0x00`-terminated, `0x00→0x00 0xFF` |
-| tuple       | `0x60`      | child encoding, `0x00`-terminated, escaped |
+| type | code | payload |
+|---|---|---|
+| terminator | `0x00` | framing sentinel, never an element |
+| nil | `0x01` | — |
+| undefined | `0x02` | — |
+| false / true | `0x05` / `0x06` | — |
+| int −big | `0x0F` | `[~m][~n][~magnitude]` (arbitrary precision) |
+| int −fixed | `0x10–0x1F` | big-endian excess form, width in the code |
+| zero | `0x20` | — |
+| int +fixed | `0x21–0x30` | big-endian magnitude, width in the code |
+| int +big | `0x31` | `[m][n][magnitude]` (arbitrary precision) |
+| float32 / float64 | `0x34` / `0x35` | 4 / 8 bytes, order-transformed |
+| decimal | `0x38` | *reserved* |
+| timestamp | `0x40` | 8 bytes: order-preserving signed µs since Unix epoch |
+| string / bytes | `0x48` / `0x49` | content, `0x00`-terminated, `0x00→0x00 0xFF` |
+| array | `0x50` | child element stream, terminated + escaped |
+| map | `0x52` | canonical (key-sorted) `[k][v]…`, terminated + escaped |
+| set | `0x54` | canonical (sorted, de-duped) elements, terminated + escaped |
 
-(v1 emits integer widths 1–8; the outer slots `0x10–0x17` / `0x29–0x30` are
-reserved for a future `i128`. `0x33–0x3F`, `0x42–0x5F`, `0x61+` are reserved.)
+(`0x33–0x3F`, `0x42–0x4F`, `0x53/0x55+`, and the 9–16 byte fixed-int slots
+`0x10–0x17` / `0x29–0x30` are reserved for the tower: i128 fast path, UUID,
+float128, date/time-only, intervals, …)
 
-**Integers.** Width is carried by the type code, so cross-width order is free
-(more magnitude → more bytes → a larger/smaller code). Payloads are big-endian.
-Negatives are stored in *excess* form (`value + 2^(8·width)`), which is the
-byte-complement of the magnitude — that is what makes `-256 < -100 < -1` sort
-correctly within a width band.
+**Integers.** Width is carried by the type code, so cross-width order is free.
+Fixed payloads (≤8 bytes) are big-endian, with negatives in *excess* form
+(`value + 2^(8·width)`) so `-256 < -100 < -1`. Larger magnitudes use the
+bracketing big-int codes: payload `[m][n][magnitude]` where `n` is the magnitude
+byte-count and `m` the byte-count of `n` — order-preserving, self-delimiting, and
+effectively unbounded. Negatives complement every byte so bigger magnitudes sort
+earlier.
 
-**Floats.** The IEEE-754 total-ordering transform: flip the sign bit for
-positives, flip all bits for negatives, store big-endian. `-0.0` is squashed to
-`+0.0`; `NaN` is canonicalized and sorts above `+inf`.
+**Floats.** IEEE-754 total-ordering transform: flip the sign bit for positives,
+flip all bits for negatives, big-endian. `-0.0` squashes to `+0.0`; `NaN`
+canonicalizes and sorts above `+inf`.
 
-**Variable-length (string / bytes / tuple).** Terminated by `0x00`, with any
-real `0x00` escaped as `0x00 0xFF`. Because `0x00` is below every content byte, a
-shorter value sorts before a longer one that extends it (`"app" < "apple"`). For
-strings/bytes/tuples the decoded slice points into the source buffer and is the
-*framed* payload; when it contains no `0x00` it is already the literal content
-(the common case), otherwise use `unescapeAlloc` / `unescapeInto`.
+**Timestamp.** Signed µs since the Unix epoch (UTC), sign-bit-flipped to 8
+order-preserving bytes — covers the full `datetime` year range at microsecond
+resolution.
+
+**Variable-length (string / bytes / array / map / set).** Terminated by `0x00`,
+with any real `0x00` escaped as `0x00 0xFF`. Because `0x00` is below every content
+byte, a shorter value sorts before a longer one that extends it (`"app" <
+"apple"`). Decoded slices point into the source buffer and are *framed* (escapes
+intact); when they contain no `0x00` they are already the literal content. Use
+`unescapeAlloc`/`unescapeInto`, then a child `Reader` for containers.
+
+**Maps and sets are canonical.** Entries/elements are sorted by their encoded
+bytes (sets are also de-duplicated), so equal maps/sets encode identically and
+compare correctly — at the cost of not preserving insertion order. If you need
+exact key order (e.g. byte-faithful JSON object round-trips), represent it as an
+**array of `[key, value]` pairs** instead.
 
 ## A note on numbers across representations
 
 Because type codes dominate `memcmp`, an integer and a float never interleave by
 magnitude — `int 1000000` sorts below `float 0.5`. Comparing numbers across
-representations (e.g. `int 5` vs `double 5.0`) is the job of a **semantic
-comparator**, which is intentionally out of scope for v1 and planned as a
-follow-on.
+representations is the job of a **semantic comparator**, planned as a follow-on.

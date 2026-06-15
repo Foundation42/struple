@@ -1,44 +1,49 @@
 //! struple — streaming, lexicographically-ordered tuple packing for Zig.
 //!
 //! A `struple` value is a stream of self-delimiting, typed elements packed into
-//! a byte buffer. The encoding has one defining property:
+//! a byte buffer. The defining property:
 //!
 //!     std.mem.order(u8, pack(a), pack(b)) == the semantic order of a and b
 //!
 //! i.e. the raw encoded bytes are directly `memcmp`-comparable — drop two packed
-//! tuples into any byte-ordered store (RocksDB, LMDB, sled, a sorted array) and
-//! they sort correctly with no custom comparator. This is the FoundationDB tuple
-//! idea, rebuilt clean in Zig.
+//! tuples into any byte-ordered store and they sort correctly with no custom
+//! comparator. This is the FoundationDB tuple idea, rebuilt clean in Zig.
+//!
+//! v2 covers the union of the Python and JavaScript data models: null,
+//! undefined, bool, arbitrary-precision integers, float32/64, (decimal —
+//! reserved), timestamp, string, bytes, array, map and set.
 //!
 //! ## How ordering is achieved
 //!
-//! Every element starts with a one-byte *type code*. The type codes are assigned
-//! so that `memcmp` of the type byte already gives the desired cross-type order:
+//! Every element starts with a one-byte *type code*, assigned so that `memcmp`
+//! of the type byte alone gives the cross-type order:
 //!
-//!     nil < false < true < negative ints < zero < positive ints
-//!         < float32 < float64 < string < bytes < tuple
+//!     null < undefined < false < true
+//!         < negative ints < zero < positive ints
+//!         < float32 < float64 < decimal < timestamp
+//!         < string < bytes < array < map < set
 //!
-//! Within a type, the payload is encoded to preserve order under `memcmp`:
+//! Within a type the payload preserves order under `memcmp`:
 //!
-//!   * Integers use a variable width carried by the type code (more magnitude ->
-//!     more bytes -> a larger/smaller type code, so cross-width order is free).
-//!     The payload is big-endian. Negatives are stored in *excess* form
-//!     (`value + 2^(8n)`), which is the byte-complement of the magnitude — that
-//!     is the one subtlety that makes `-256 < -100 < -1` come out right.
+//!   * Integers carry their width in the type code (more magnitude -> a
+//!     larger/smaller code, so cross-width order is free). Fixed payloads are
+//!     big-endian; negatives use excess form (`value + 2^(8n)`). Values beyond
+//!     8 bytes use the bracketing big-int codes with an order-preserving,
+//!     self-delimiting `[m][n][magnitude]` length-prefix (effectively unbounded).
+//!   * Floats use the IEEE-754 total-ordering transform.
+//!   * Timestamps are an order-preserving signed i64 (microseconds since the
+//!     Unix epoch, UTC).
+//!   * Variable-length payloads (string, bytes, array, map, set) are `0x00`
+//!     terminated, with real `0x00` escaped as `0x00 0xFF`, so a shorter value
+//!     sorts before a longer one that extends it ("app" < "apple").
+//!   * Maps and sets are stored in *canonical* order (entries/elements sorted by
+//!     their encoded bytes), so equal maps/sets encode identically and compare
+//!     correctly. (Insertion order is therefore not preserved — use an array of
+//!     pairs if you need that.)
 //!
-//!   * Floats use the classic IEEE-754 total-ordering transform: flip the sign
-//!     bit for positives, flip all bits for negatives, then store big-endian.
-//!
-//!   * Variable-length payloads (string, bytes, nested tuple) are terminated by
-//!     `0x00`, with any real `0x00` byte escaped as `0x00 0xFF`. Because `0x00`
-//!     is below every content byte, a shorter value (e.g. "app") sorts before a
-//!     longer one that extends it ("apple"). This framing is also what makes the
-//!     stream self-delimiting.
-//!
-//! Note: because type codes dominate, an integer and a float never interleave by
-//! magnitude (`int 1000000` sorts below `float 0.5`). Comparing numbers across
-//! representations is the job of a *semantic* comparator, which is intentionally
-//! out of scope for v1.
+//! Type codes dominate `memcmp`, so an integer and a float never interleave by
+//! magnitude. Comparing numbers across representations is the job of a *semantic*
+//! comparator, intentionally out of scope here.
 
 const std = @import("std");
 
@@ -46,52 +51,128 @@ const std = @import("std");
 // Type codes
 // ---------------------------------------------------------------------------
 
-/// One-byte type tags. The numeric values are load-bearing: their order *is*
-/// the cross-type sort order. Gaps are reserved for the future "tower" of types
-/// (UUID, decimals, i128, maps, vectors, sets, ...).
+/// One-byte type tags. The numeric values are load-bearing: their order *is* the
+/// cross-type sort order. Gaps are reserved for the future tower (UUID, float128,
+/// date/time-only, intervals, ...).
 pub const tc = struct {
     /// Terminator / escape sentinel for variable-length framing. Never a type.
     pub const terminator: u8 = 0x00;
 
-    pub const nil: u8 = 0x01;
-    pub const bool_false: u8 = 0x02;
-    pub const bool_true: u8 = 0x03;
+    pub const nil: u8 = 0x01; // null (Python None / JS null)
+    pub const undef: u8 = 0x02; // JS undefined
 
-    // Integers. Width is carried by the distance from `int_zero`.
-    //   0x10..0x1F  negative, widest (most negative) first
-    //   0x20        zero
-    //   0x21..0x30  positive
-    // v1 emits 1..8 byte widths (i64/u64); the outer slots are reserved for i128.
-    pub const int_neg_min: u8 = 0x10; // reserved widest negative (16 bytes)
-    pub const int_neg_max: u8 = 0x1F; // 1-byte negative
+    pub const bool_false: u8 = 0x05;
+    pub const bool_true: u8 = 0x06;
+
+    // Integers.
+    pub const int_neg_big: u8 = 0x0F; // arbitrary-precision negative
+    pub const int_neg_min: u8 = 0x10; // widest fixed negative (reserved up to 16 bytes)
+    pub const int_neg_max: u8 = 0x1F; // 1-byte fixed negative
     pub const int_zero: u8 = 0x20;
-    pub const int_pos_min: u8 = 0x21; // 1-byte positive
-    pub const int_pos_max: u8 = 0x30; // reserved widest positive (16 bytes)
+    pub const int_pos_min: u8 = 0x21; // 1-byte fixed positive
+    pub const int_pos_max: u8 = 0x30; // widest fixed positive (reserved up to 16 bytes)
+    pub const int_pos_big: u8 = 0x31; // arbitrary-precision positive
 
-    pub const float32: u8 = 0x31;
-    pub const float64: u8 = 0x32;
+    pub const float32: u8 = 0x34;
+    pub const float64: u8 = 0x35;
 
-    pub const string: u8 = 0x40;
-    pub const bytes: u8 = 0x41;
+    pub const decimal: u8 = 0x38; // RESERVED — not yet implemented
 
-    pub const tuple: u8 = 0x60;
+    pub const timestamp: u8 = 0x40;
+
+    pub const string: u8 = 0x48;
+    pub const bytes: u8 = 0x49;
+
+    pub const array: u8 = 0x50;
+    pub const map: u8 = 0x52;
+    pub const set: u8 = 0x54;
 };
 
-/// Largest integer width (in bytes) struple v1 will encode/decode. Covers the
-/// full range of i64 and u64. Wider slots are reserved for a future i128.
+/// Largest integer width (in bytes) the *fixed* path uses. Values whose
+/// magnitude needs more than this many bytes use the big-int codes. 8 covers all
+/// of i64/u64; the 9–16 byte fixed slots stay reserved for a later optimization.
 const max_int_bytes: usize = 8;
 
 /// Companion byte written after a literal 0x00 inside variable-length payloads.
-const escape: u8 = 0xFF;
+const escape_byte: u8 = 0xFF;
 
-pub const EncodeError = std.mem.Allocator.Error || error{IntegerTooLarge};
+pub const EncodeError = std.mem.Allocator.Error;
 pub const DecodeError = error{ Truncated, InvalidType, UnsupportedType };
+
+// ---------------------------------------------------------------------------
+// Decoded element view
+// ---------------------------------------------------------------------------
+
+pub const Kind = enum {
+    nil,
+    undef,
+    boolean,
+    int,
+    big_int,
+    float32,
+    float64,
+    timestamp,
+    string,
+    bytes,
+    array,
+    map,
+    set,
+};
+
+/// A decoded element. For `string`/`bytes`/`array`/`map`/`set` the slice points
+/// into the source buffer and is the *framed* payload (literal `0x00` still
+/// appears as `0x00 0xFF`); when it contains no `0x00` it is already the literal
+/// content. Use `unescapeAlloc`/`unescapeInto`, then a child `Reader` for
+/// containers.
+pub const Element = union(Kind) {
+    nil,
+    undef,
+    boolean: bool,
+    int: i128, // fixed-width integers (|value| fits 8 bytes)
+    big_int: BigInt, // arbitrary-precision integers
+    float32: f32,
+    float64: f64,
+    timestamp: i64, // microseconds since the Unix epoch, UTC
+    string: []const u8,
+    bytes: []const u8,
+    array: []const u8,
+    map: []const u8,
+    set: []const u8,
+};
+
+/// View of an arbitrary-precision integer that did not fit the fixed path.
+pub const BigInt = struct {
+    negative: bool,
+    /// Big-endian magnitude bytes *as stored* — complemented iff `negative`.
+    mag_stored: []const u8,
+
+    /// Materialize the normalized big-endian magnitude (un-complemented).
+    pub fn magnitudeAlloc(self: BigInt, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        const out = try allocator.alloc(u8, self.mag_stored.len);
+        for (self.mag_stored, out) |b, *o| o.* = if (self.negative) ~b else b;
+        return out;
+    }
+
+    /// The value as an i128 if it fits, else null.
+    pub fn toI128(self: BigInt) ?i128 {
+        if (self.mag_stored.len > 16) return null;
+        var mag: u128 = 0;
+        for (self.mag_stored) |b| mag = (mag << 8) | (if (self.negative) ~b else b);
+        if (self.negative) {
+            const i128_min_mag: u128 = @as(u128, 1) << 127;
+            if (mag == i128_min_mag) return std.math.minInt(i128);
+            if (mag > i128_min_mag) return null;
+            return -@as(i128, @intCast(mag));
+        }
+        if (mag > std.math.maxInt(i128)) return null;
+        return @intCast(mag);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Packer — builds an encoded tuple
 // ---------------------------------------------------------------------------
 
-/// Accumulates encoded elements into a growable buffer.
 pub const Packer = struct {
     list: std.ArrayList(u8),
 
@@ -103,7 +184,6 @@ pub const Packer = struct {
         self.list.deinit();
     }
 
-    /// Drop all elements but keep the allocated capacity.
     pub fn reset(self: *Packer) void {
         self.list.clearRetainingCapacity();
     }
@@ -113,7 +193,6 @@ pub const Packer = struct {
         return self.list.items;
     }
 
-    /// Hand ownership of the encoded bytes to the caller.
     pub fn toOwnedSlice(self: *Packer) std.mem.Allocator.Error![]u8 {
         return self.list.toOwnedSlice();
     }
@@ -122,21 +201,55 @@ pub const Packer = struct {
         try self.list.append(tc.nil);
     }
 
+    pub fn appendUndefined(self: *Packer) EncodeError!void {
+        try self.list.append(tc.undef);
+    }
+
     pub fn appendBool(self: *Packer, value: bool) EncodeError!void {
         try self.list.append(if (value) tc.bool_true else tc.bool_false);
     }
 
     pub fn appendInt(self: *Packer, value: i64) EncodeError!void {
-        // Promote to i128 first so that negating i64's minimum is safe.
-        try encodeInteger(&self.list, @as(i128, value));
+        try encodeFixedInt(&self.list, @as(i128, value));
     }
 
     pub fn appendUint(self: *Packer, value: u64) EncodeError!void {
+        if (value == 0) try self.list.append(tc.int_zero) else try encodePositive(&self.list, value);
+    }
+
+    /// Encode any i128, automatically using the big-int path past 8 bytes.
+    pub fn appendI128(self: *Packer, value: i128) EncodeError!void {
         if (value == 0) {
             try self.list.append(tc.int_zero);
-        } else {
-            try encodePositive(&self.list, @as(u128, value));
+            return;
         }
+        const negative = value < 0;
+        const bits: u128 = @bitCast(value);
+        const mag: u128 = if (negative) (~bits +% 1) else bits; // two's-complement magnitude
+        var buf: [16]u8 = undefined;
+        std.mem.writeInt(u128, &buf, mag, .big);
+        var start: usize = 0;
+        while (start < 16 and buf[start] == 0) start += 1;
+        try self.appendBigInt(negative, buf[start..]);
+    }
+
+    /// Encode an arbitrary-precision integer given its sign and big-endian
+    /// magnitude bytes (leading zeros are trimmed). Routes through the fixed path
+    /// when the magnitude fits in 8 bytes.
+    pub fn appendBigInt(self: *Packer, negative: bool, magnitude_be: []const u8) EncodeError!void {
+        var mag = magnitude_be;
+        while (mag.len > 0 and mag[0] == 0) mag = mag[1..];
+        if (mag.len == 0) {
+            try self.list.append(tc.int_zero);
+            return;
+        }
+        if (mag.len <= max_int_bytes) {
+            const value = readBigEndian(mag);
+            if (negative) try encodeNegative(&self.list, value) else try encodePositive(&self.list, value);
+            return;
+        }
+        try self.list.append(if (negative) tc.int_neg_big else tc.int_pos_big);
+        try writeBigIntFields(&self.list, mag, negative);
     }
 
     pub fn appendF32(self: *Packer, value: f32) EncodeError!void {
@@ -153,6 +266,15 @@ pub const Packer = struct {
         try self.list.appendSlice(&buf);
     }
 
+    /// Microseconds since the Unix epoch, UTC.
+    pub fn appendTimestamp(self: *Packer, micros: i64) EncodeError!void {
+        var buf: [8]u8 = undefined;
+        // Flip the sign bit so two's-complement order matches unsigned byte order.
+        std.mem.writeInt(u64, &buf, @as(u64, @bitCast(micros)) ^ (@as(u64, 1) << 63), .big);
+        try self.list.append(tc.timestamp);
+        try self.list.appendSlice(&buf);
+    }
+
     pub fn appendString(self: *Packer, value: []const u8) EncodeError!void {
         try writeFramed(&self.list, tc.string, value);
     }
@@ -161,10 +283,48 @@ pub const Packer = struct {
         try writeFramed(&self.list, tc.bytes, value);
     }
 
-    /// Append a nested tuple. `child` is the already-encoded bytes of another
+    /// Append a nested array. `child` is the encoded element stream of another
     /// tuple (e.g. `other_packer.bytes()`).
-    pub fn appendTuple(self: *Packer, child: []const u8) EncodeError!void {
-        try writeFramed(&self.list, tc.tuple, child);
+    pub fn appendArray(self: *Packer, child: []const u8) EncodeError!void {
+        try writeFramed(&self.list, tc.array, child);
+    }
+
+    /// Append a map. `entries` is a list of `[key_encoding, value_encoding]`
+    /// pairs; they are sorted by key into canonical order. (Duplicate keys are
+    /// the caller's responsibility.)
+    pub fn appendMap(self: *Packer, entries: []const [2][]const u8) EncodeError!void {
+        const allocator = self.list.allocator;
+        const idx = try allocator.alloc(usize, entries.len);
+        defer allocator.free(idx);
+        for (idx, 0..) |*x, i| x.* = i;
+        std.mem.sort(usize, idx, entries, lessByKey);
+
+        try self.list.append(tc.map);
+        for (idx) |i| {
+            try writeEscaped(&self.list, entries[i][0]);
+            try writeEscaped(&self.list, entries[i][1]);
+        }
+        try self.list.append(tc.terminator);
+    }
+
+    /// Append a set. `elements` (each an element encoding) are sorted and
+    /// de-duplicated into canonical order.
+    pub fn appendSet(self: *Packer, elements: []const []const u8) EncodeError!void {
+        const allocator = self.list.allocator;
+        const idx = try allocator.alloc(usize, elements.len);
+        defer allocator.free(idx);
+        for (idx, 0..) |*x, i| x.* = i;
+        std.mem.sort(usize, idx, elements, lessBySlice);
+
+        try self.list.append(tc.set);
+        var prev: ?[]const u8 = null;
+        for (idx) |i| {
+            const e = elements[i];
+            if (prev) |p| if (std.mem.eql(u8, p, e)) continue; // skip duplicate
+            try writeEscaped(&self.list, e);
+            prev = e;
+        }
+        try self.list.append(tc.terminator);
     }
 
     /// Convenience: dispatch on the Zig type of `value` at comptime.
@@ -172,10 +332,13 @@ pub const Packer = struct {
         const T = @TypeOf(value);
         switch (@typeInfo(T)) {
             .bool => try self.appendBool(value),
-            .int => |info| if (info.signedness == .signed)
-                try self.appendInt(@intCast(value))
+            .int => |info| if (info.bits <= 64)
+                (if (info.signedness == .signed)
+                    try self.appendInt(@intCast(value))
+                else
+                    try self.appendUint(@intCast(value)))
             else
-                try self.appendUint(@intCast(value)),
+                try self.appendI128(@intCast(value)),
             .comptime_int => if (value < 0)
                 try self.appendInt(value)
             else
@@ -194,6 +357,14 @@ pub const Packer = struct {
         }
     }
 };
+
+fn lessByKey(entries: []const [2][]const u8, l: usize, r: usize) bool {
+    return std.mem.lessThan(u8, entries[l][0], entries[r][0]);
+}
+
+fn lessBySlice(elements: []const []const u8, l: usize, r: usize) bool {
+    return std.mem.lessThan(u8, elements[l], elements[r]);
+}
 
 fn isStringLike(comptime T: type) bool {
     return switch (@typeInfo(T)) {
@@ -214,26 +385,6 @@ fn isStringLike(comptime T: type) bool {
 // Reader — streams elements back out (zero-allocation)
 // ---------------------------------------------------------------------------
 
-pub const Kind = enum { nil, boolean, int, float32, float64, string, bytes, tuple };
-
-/// A decoded element. For `string`/`bytes`/`tuple` the slice points into the
-/// source buffer and is the *framed* payload (literal `0x00` bytes still appear
-/// as `0x00 0xFF`). When the slice contains no `0x00` it is already the literal
-/// content (the common case); otherwise call `unescapeAlloc` / `unescapeInto`.
-/// For a nested `tuple`, un-escape the slice (if needed) then feed it to a new
-/// `Reader`.
-pub const Element = union(Kind) {
-    nil,
-    boolean: bool,
-    int: i128,
-    float32: f32,
-    float64: f64,
-    string: []const u8,
-    bytes: []const u8,
-    tuple: []const u8,
-};
-
-/// A forward, zero-allocation cursor over an encoded tuple.
 pub const Reader = struct {
     buf: []const u8,
     pos: usize = 0,
@@ -246,7 +397,6 @@ pub const Reader = struct {
         return self.pos >= self.buf.len;
     }
 
-    /// Returns the next element, or null at end of stream.
     pub fn next(self: *Reader) DecodeError!?Element {
         if (self.pos >= self.buf.len) return null;
         const type_code = self.buf[self.pos];
@@ -254,6 +404,7 @@ pub const Reader = struct {
 
         switch (type_code) {
             tc.nil => return .nil,
+            tc.undef => return .undef,
             tc.bool_false => return .{ .boolean = false },
             tc.bool_true => return .{ .boolean = true },
             tc.int_zero => return .{ .int = 0 },
@@ -262,21 +413,29 @@ pub const Reader = struct {
                     tc.int_zero - type_code
                 else
                     type_code - tc.int_zero;
-                if (n > max_int_bytes) return error.UnsupportedType;
+                if (n > max_int_bytes) return error.UnsupportedType; // reserved 9–16 byte slots
                 const payload = try self.take(n);
                 return .{ .int = decodeIntPayload(type_code, payload) };
             },
-            tc.float32 => {
-                const p = try self.take(4);
-                return .{ .float32 = decodeF32(p[0..4]) };
+            tc.int_neg_big, tc.int_pos_big => {
+                const negative = type_code == tc.int_neg_big;
+                const m: usize = decodeByte((try self.take(1))[0], negative);
+                var n: usize = 0;
+                for (try self.take(m)) |b| n = (n << 8) | decodeByte(b, negative);
+                const mag = try self.take(n);
+                return .{ .big_int = .{ .negative = negative, .mag_stored = mag } };
             },
-            tc.float64 => {
-                const p = try self.take(8);
-                return .{ .float64 = decodeF64(p[0..8]) };
+            tc.float32 => return .{ .float32 = decodeF32((try self.take(4))[0..4]) },
+            tc.float64 => return .{ .float64 = decodeF64((try self.take(8))[0..8]) },
+            tc.timestamp => {
+                const raw = std.mem.readInt(u64, (try self.take(8))[0..8], .big);
+                return .{ .timestamp = @bitCast(raw ^ (@as(u64, 1) << 63)) };
             },
             tc.string => return .{ .string = try self.takeFramed() },
             tc.bytes => return .{ .bytes = try self.takeFramed() },
-            tc.tuple => return .{ .tuple = try self.takeFramed() },
+            tc.array => return .{ .array = try self.takeFramed() },
+            tc.map => return .{ .map = try self.takeFramed() },
+            tc.set => return .{ .set = try self.takeFramed() },
             else => return error.InvalidType,
         }
     }
@@ -288,14 +447,12 @@ pub const Reader = struct {
         return slice;
     }
 
-    /// Scans to the framing terminator (`0x00` not followed by `0xFF`), returns
-    /// the framed payload (escapes intact), and advances past the terminator.
     fn takeFramed(self: *Reader) DecodeError![]const u8 {
         const start = self.pos;
         var i = self.pos;
         while (i < self.buf.len) {
             if (self.buf[i] == 0x00) {
-                if (i + 1 < self.buf.len and self.buf[i + 1] == escape) {
+                if (i + 1 < self.buf.len and self.buf[i + 1] == escape_byte) {
                     i += 2; // escaped literal 0x00
                     continue;
                 }
@@ -304,7 +461,7 @@ pub const Reader = struct {
             }
             i += 1;
         }
-        return error.Truncated; // ran off the end without a terminator
+        return error.Truncated;
     }
 };
 
@@ -312,8 +469,12 @@ pub fn reader(buf: []const u8) Reader {
     return Reader.init(buf);
 }
 
+inline fn decodeByte(b: u8, complemented: bool) u8 {
+    return if (complemented) ~b else b;
+}
+
 // ---------------------------------------------------------------------------
-// Ordering helpers (documentation-as-code: ordering IS memcmp)
+// Ordering helpers (ordering IS memcmp)
 // ---------------------------------------------------------------------------
 
 pub fn order(a: []const u8, b: []const u8) std.math.Order {
@@ -328,36 +489,31 @@ pub fn lessThan(_: void, a: []const u8, b: []const u8) bool {
 // Escaping helpers for variable-length payloads
 // ---------------------------------------------------------------------------
 
-/// True if `framed` contains escaped bytes (i.e. needs un-escaping). When false,
-/// the framed slice already equals the literal content.
 pub fn hasEscapes(framed: []const u8) bool {
     return std.mem.indexOfScalar(u8, framed, 0x00) != null;
 }
 
-/// Number of literal bytes a framed payload decodes to.
 pub fn unescapedLen(framed: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
     while (i < framed.len) : (i += 1) {
         n += 1;
-        if (framed[i] == 0x00) i += 1; // skip the 0xFF companion
+        if (framed[i] == 0x00) i += 1;
     }
     return n;
 }
 
-/// Un-escape `framed` into `out` (which must be at least `unescapedLen` long).
 pub fn unescapeInto(framed: []const u8, out: []u8) []u8 {
     var w: usize = 0;
     var i: usize = 0;
     while (i < framed.len) : (i += 1) {
         out[w] = framed[i];
         w += 1;
-        if (framed[i] == 0x00) i += 1; // skip the 0xFF companion
+        if (framed[i] == 0x00) i += 1;
     }
     return out[0..w];
 }
 
-/// Allocate and return the literal content of a framed payload.
 pub fn unescapeAlloc(allocator: std.mem.Allocator, framed: []const u8) std.mem.Allocator.Error![]u8 {
     const out = try allocator.alloc(u8, unescapedLen(framed));
     return unescapeInto(framed, out);
@@ -367,7 +523,7 @@ pub fn unescapeAlloc(allocator: std.mem.Allocator, framed: []const u8) std.mem.A
 // Integer encode/decode
 // ---------------------------------------------------------------------------
 
-fn encodeInteger(list: *std.ArrayList(u8), value: i128) EncodeError!void {
+fn encodeFixedInt(list: *std.ArrayList(u8), value: i128) EncodeError!void {
     if (value == 0) {
         try list.append(tc.int_zero);
     } else if (value > 0) {
@@ -377,22 +533,16 @@ fn encodeInteger(list: *std.ArrayList(u8), value: i128) EncodeError!void {
     }
 }
 
-/// Encode a positive magnitude (>= 1) as big-endian over the minimal width.
 fn encodePositive(list: *std.ArrayList(u8), magnitude: u128) EncodeError!void {
     const n = byteLen(magnitude);
-    if (n > max_int_bytes) return error.IntegerTooLarge;
     try list.append(tc.int_zero + @as(u8, @intCast(n)));
     try writeBigEndian(list, magnitude, n);
 }
 
-/// Encode a negative value whose magnitude is `magnitude` (>= 1). The payload is
-/// `value + 2^(8n)` (excess form) — equivalently the n-byte complement of
-/// `magnitude - 1` — so that more-negative values produce smaller bytes.
 fn encodeNegative(list: *std.ArrayList(u8), magnitude: u128) EncodeError!void {
     const pos_val = magnitude - 1;
     var n = byteLen(pos_val);
-    if (n == 0) n = 1; // value == -1 -> pos_val 0, still needs one byte
-    if (n > max_int_bytes) return error.IntegerTooLarge;
+    if (n == 0) n = 1;
     try list.append(tc.int_zero - @as(u8, @intCast(n)));
     const span: u128 = @as(u128, 1) << @intCast(n * 8);
     try writeBigEndian(list, span - magnitude, n);
@@ -400,15 +550,27 @@ fn encodeNegative(list: *std.ArrayList(u8), magnitude: u128) EncodeError!void {
 
 fn decodeIntPayload(type_code: u8, payload: []const u8) i128 {
     const raw = readBigEndian(payload);
-    if (type_code > tc.int_zero) {
-        return @intCast(raw); // positive
-    }
-    // negative: value = raw - 2^(8n)
+    if (type_code > tc.int_zero) return @intCast(raw);
     const span: u128 = @as(u128, 1) << @intCast(payload.len * 8);
     return @as(i128, @intCast(raw)) - @as(i128, @intCast(span));
 }
 
-/// Bytes needed to represent `x` (0 for zero).
+/// Write `[m][n][magnitude]` for an arbitrary-precision integer, where `n` is the
+/// magnitude byte count and `m` the byte count of `n`. Complement every byte for
+/// negatives so larger magnitudes sort earlier.
+fn writeBigIntFields(list: *std.ArrayList(u8), mag: []const u8, complement: bool) EncodeError!void {
+    const n = mag.len;
+    const m = byteLen(n);
+    try list.append(if (complement) ~@as(u8, @intCast(m)) else @as(u8, @intCast(m)));
+    var i: usize = m;
+    while (i > 0) {
+        i -= 1;
+        const b: u8 = @truncate(n >> @intCast(i * 8));
+        try list.append(if (complement) ~b else b);
+    }
+    for (mag) |b| try list.append(if (complement) ~b else b);
+}
+
 fn byteLen(x: u128) usize {
     if (x == 0) return 0;
     const bits: usize = 128 - @clz(x);
@@ -436,20 +598,19 @@ fn readBigEndian(payload: []const u8) u128 {
 fn orderableF32Bits(value: f32) u32 {
     var bits: u32 = undefined;
     if (std.math.isNan(value)) {
-        bits = 0x7fc00000; // canonical positive qNaN
+        bits = 0x7fc00000;
     } else {
         var v = value;
-        if (v == 0) v = 0; // squash -0.0 to +0.0
+        if (v == 0) v = 0; // squash -0.0
         bits = @bitCast(v);
     }
-    // Positive (sign 0): set the high bit. Negative: flip everything.
     return if (bits & 0x80000000 != 0) ~bits else bits ^ 0x80000000;
 }
 
 fn orderableF64Bits(value: f64) u64 {
     var bits: u64 = undefined;
     if (std.math.isNan(value)) {
-        bits = 0x7ff8000000000000; // canonical positive qNaN
+        bits = 0x7ff8000000000000;
     } else {
         var v = value;
         if (v == 0) v = 0;
@@ -474,16 +635,20 @@ fn decodeF64(p: *const [8]u8) f64 {
 // Variable-length framing
 // ---------------------------------------------------------------------------
 
-fn writeFramed(list: *std.ArrayList(u8), type_code: u8, content: []const u8) EncodeError!void {
-    try list.append(type_code);
+/// Append `content` with `0x00 -> 0x00 0xFF` escaping (no type code, no terminator).
+fn writeEscaped(list: *std.ArrayList(u8), content: []const u8) EncodeError!void {
     for (content) |b| {
         try list.append(b);
-        if (b == 0x00) try list.append(escape); // 0x00 -> 0x00 0xFF
+        if (b == 0x00) try list.append(escape_byte);
     }
+}
+
+fn writeFramed(list: *std.ArrayList(u8), type_code: u8, content: []const u8) EncodeError!void {
+    try list.append(type_code);
+    try writeEscaped(list, content);
     try list.append(tc.terminator);
 }
 
 test {
-    // Pull the full test suite into `zig build test`.
     _ = @import("tests.zig");
 }
