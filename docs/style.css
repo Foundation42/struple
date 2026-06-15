@@ -96,6 +96,18 @@ thead th:first-child, tbody td:first-child { color: var(--text); }
 tbody tr:hover { background: var(--panel); }
 .struple-col { color: var(--accent) !important; font-weight: 700; }
 
+/* streaming + crdt */
+.crdt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
+.crdt-card { padding: 18px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+.crdt-card h3 { margin: 0 0 8px; font-size: 1.05rem; color: var(--accent); }
+.crdt-card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.crdt-card p strong, .crdt-card p em { color: var(--text); font-style: normal; }
+.stream-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0; align-items: center; }
+.stream-strip .byte { cursor: default; }
+.stream-strip .arrived { opacity: 1; }
+.stream-strip .pending { opacity: 0.28; }
+.stream-strip .cursor { color: var(--accent); font-weight: 700; padding: 0 4px; }
+
 /* wire format */
 .codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-top: 10px; }
 .codes div { font-family: var(--mono); font-size: 0.86rem; padding: 8px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; }

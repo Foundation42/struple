@@ -13,10 +13,14 @@ std.mem.order(u8, pack(a), pack(b))  ==  the semantic order of a and b
 ```
 
 Pack a tuple, use the bytes as a key in any byte-ordered store (RocksDB, LMDB,
-sled, a sorted array) and it sorts correctly with **no custom comparator**. The
-encoding is also **self-delimiting** — you can stream values back out without
-storing any external lengths. This is the FoundationDB tuple idea, rebuilt clean
-in Zig.
+sled, a sorted array) and it sorts correctly with **no custom comparator**.
+
+The encoding is **streamable** (a sequence of self-delimiting elements — decode
+fields one at a time as the bytes arrive, no length prefix, the opposite of a
+random-access format you must load whole) and **canonical** (one value → one byte
+sequence, byte-identical across all six languages). Ordered + canonical also makes
+it a natural fit for **CRDTs** and content-addressed systems. This is the
+FoundationDB tuple idea, rebuilt clean.
 
 The type system covers the **union of the Python and JavaScript data models**, so
 it can serve as the wire format for cross-language data exchange.

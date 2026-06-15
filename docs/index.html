@@ -14,10 +14,14 @@
     <p class="tag">Schema-free binary tuples whose bytes <em>sort themselves</em>.</p>
     <p class="tag2">Pack values into bytes that are directly <code>memcmp</code>-comparable — drop them
       into any byte-ordered store and they sort in the correct semantic order, no custom comparator.
-      One wire format, six byte-identical implementations.</p>
+      It's a <strong>stream</strong>, not a message, and a <strong>canonical</strong> one — which
+      makes it a natural fit for databases and CRDTs alike. One wire format, six byte-identical
+      implementations.</p>
     <div class="badges">
       <span class="badge"><b>6</b> languages</span>
       <span class="badge"><b>memcmp</b>-orderable</span>
+      <span class="badge">streamable</span>
+      <span class="badge">canonical</span>
       <span class="badge">schema-free</span>
       <span class="badge">zero-dependency</span>
     </div>
@@ -75,6 +79,56 @@
     </div>
   </section>
 
+  <section id="streaming">
+    <div class="wrap">
+      <h2>Read it as it streams <span class="sub">a stream of fields, not a message</span></h2>
+      <p class="lead">A struple isn't a blob you parse all at once — it's a sequence of
+        <strong>self-delimiting</strong> elements. Each one carries its own length in its type code
+        and framing, so there's no length prefix to wait for.</p>
+      <div class="stream-strip">
+        <span class="byte arrived" title="string &quot;user&quot;">48</span>
+        <span class="byte arrived">75</span><span class="byte arrived">73</span><span class="byte arrived">65</span><span class="byte arrived">72</span><span class="byte arrived">00</span>
+        <span class="byte arrived" title="int 42">21</span><span class="byte arrived">2a</span>
+        <span class="cursor">▸</span>
+        <span class="byte pending" title="bool true — still arriving">06</span>
+      </div>
+      <p>A reader walks the stream one element at a time, so you can decode field 1, field 2, …
+        <strong>as the bytes arrive</strong> — pull out the few fields you need and stop, or skip the
+        rest without decoding it. That's the opposite of a random-access format like Cap'n&nbsp;Proto,
+        which needs the whole message resident to follow its pointers.</p>
+      <p class="note">And because each element leads with its most-significant bytes (type code first,
+        then big-endian payload), a <em>prefix</em> of the stream already orders correctly — perfect
+        for database key scans, range queries, and tailing a log.</p>
+    </div>
+  </section>
+
+  <section id="crdt">
+    <div class="wrap">
+      <h2>Built for CRDTs <span class="sub">deterministic + ordered = mergeable</span></h2>
+      <p class="lead">Two properties make struple an unusually good substrate for conflict-free
+        replicated data (CRDTs) and content-addressed systems:</p>
+      <div class="crdt-grid">
+        <div class="crdt-card">
+          <h3>Canonical bytes</h3>
+          <p>The same value always encodes to <strong>exactly the same bytes</strong> — map keys
+            sorted, floats canonicalized, no whitespace or ordering ambiguity — and identically across
+            all six languages. So you can hash, compare, dedup, and merge by raw bytes, and two
+            replicas independently produce byte-identical encodings. Most formats (JSON, Protobuf,
+            MessagePack) have no canonical form at all.</p>
+        </div>
+        <div class="crdt-card">
+          <h3>Ordered keys</h3>
+          <p>Because keys are <code>memcmp</code>-ordered, you can mint a key <em>between</em> any two
+            existing keys — fractional indexing for sequence CRDTs (RGA / LSEQ / Fugue-style), ordered
+            maps and sets that merge by range, and operation logs that sort deterministically — for
+            tuples of <strong>any</strong> typed values, not just strings.</p>
+        </div>
+      </div>
+      <p class="note">Deterministic encoding + a total order is exactly the substrate that replicated,
+        mergeable, ordered data is built on.</p>
+    </div>
+  </section>
+
   <section id="compare">
     <div class="wrap">
       <h2>How it compares</h2>
@@ -88,15 +142,18 @@
           <tr><td>Schema-free</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s yes">✓</td><td class="s yes">✓</td></tr>
           <tr><td>Compact binary</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s meh">~</td><td class="s yes">✓</td><td class="s no">✗</td></tr>
           <tr><td>Self-describing (decode w/o schema)</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s yes">✓</td><td class="s yes">✓</td></tr>
+          <tr><td>Streamable (decode fields incrementally)</td><td class="s yes">✓</td><td class="s meh">~</td><td class="s no">✗</td><td class="s yes">✓</td><td class="s meh">~</td></tr>
           <tr><td><code>memcmp</code>-ordered keys</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td></tr>
           <tr><td>Arbitrary-precision integers</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td><td class="s meh">~</td></tr>
           <tr><td>Identical bytes across languages</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s yes">✓</td><td class="s meh">~</td></tr>
-          <tr><td>Primary use</td><td class="s struple-col">ordered keys / tuples</td><td class="s">RPC messages</td><td class="s">zero-copy messages</td><td class="s">messages</td><td class="s">interchange</td></tr>
+          <tr><td>Canonical encoding (one per value)</td><td class="s yes">✓</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td><td class="s no">✗</td></tr>
+          <tr><td>Primary use</td><td class="s struple-col">ordered keys · CRDTs · indexes</td><td class="s">RPC messages</td><td class="s">zero-copy messages</td><td class="s">messages</td><td class="s">interchange</td></tr>
         </tbody>
       </table>
-      <p class="note" style="margin-top:14px">The standout row is <code>memcmp</code>-ordered keys — useful for
-        database keys, sorted indexes, range scans, priority queues, and event streams, in any byte-ordered
-        store (RocksDB, LMDB, FoundationDB-style layers, Redis ZSETs, …).</p>
+      <p class="note" style="margin-top:14px">The standout rows are <code>memcmp</code>-ordered keys and
+        <strong>canonical encoding</strong> — together they make struple ideal for database keys, sorted
+        indexes, range scans, content-addressing, and CRDTs, in any byte-ordered store (RocksDB, LMDB,
+        FoundationDB-style layers, Redis ZSETs, …).</p>
     </div>
   </section>
 
