@@ -297,6 +297,58 @@ function elementToValue(e: Element): Value {
   }
 }
 
+/** Decode every element and re-encode it. The output equals the input for any
+ *  canonical buffer — a full round-trip validation of the decoder (and a way to
+ *  re-canonicalize a buffer from another encoder). */
+export function transcode(bytes: Uint8Array): Uint8Array {
+  const r = new Reader(bytes);
+  const out: number[] = [];
+  let e: Element | null;
+  while ((e = r.next()) !== null) appendElement(out, e);
+  return Uint8Array.from(out);
+}
+
+function appendElement(out: number[], e: Element): void {
+  switch (e.kind) {
+    case "nil":
+      out.push(T.nil);
+      break;
+    case "undef":
+      out.push(T.undef);
+      break;
+    case "bool":
+      out.push(e.value ? T.boolTrue : T.boolFalse);
+      break;
+    case "int":
+      appendInteger(out, e.value);
+      break;
+    case "float32":
+      appendFloat32Into(out, e.value);
+      break;
+    case "float64":
+      appendFloat64Into(out, e.value);
+      break;
+    case "timestamp":
+      appendTimestampInto(out, e.micros);
+      break;
+    case "string":
+      writeFramed(out, T.string, utf8Encode.encode(e.value));
+      break;
+    case "bytes":
+      writeFramed(out, T.bytes, e.value);
+      break;
+    case "array":
+      writeFramed(out, T.array, e.body);
+      break;
+    case "map":
+      writeFramed(out, T.map, e.body);
+      break;
+    case "set":
+      writeFramed(out, T.set, e.body);
+      break;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Ordering
 // ---------------------------------------------------------------------------

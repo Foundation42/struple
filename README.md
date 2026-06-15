@@ -66,8 +66,11 @@ defer allocator.free(json);
 ## Conformance corpus
 
 `conformance/vectors.json` (regenerate with `zig build vectors`) is the
-language-neutral contract — `{json, bytes}` pairs that every implementation must
-reproduce in both directions. See [conformance/README.md](conformance/README.md).
+language-neutral contract that every implementation must reproduce in both
+directions. JSON entries (`{json, bytes}`) cover the JSON-expressible types;
+build entries (`{build, bytes}`) cover the rest (undefined, float32, timestamp,
+bytes, set, non-string map keys, compositions) via a small op language. See
+[conformance/README.md](conformance/README.md).
 
 ## Implementations
 

@@ -406,6 +406,46 @@ def _unescape(framed: bytes) -> bytes:
     return bytes(out)
 
 
+def transcode(data: bytes) -> bytes:
+    """Decode every element and re-encode it. The output equals the input for any
+    canonical buffer — a full round-trip validation of the decoder."""
+    r = Reader(data)
+    out = bytearray()
+    while (e := r.next()) is not None:
+        _append_element(out, e)
+    return bytes(out)
+
+
+def _append_element(out: bytearray, e: Element) -> None:
+    kind, val = e
+    if kind == "nil":
+        out.append(NIL)
+    elif kind == "undef":
+        out.append(UNDEF)
+    elif kind == "bool":
+        out.append(BOOL_TRUE if val else BOOL_FALSE)
+    elif kind == "int":
+        _append_integer(out, val)
+    elif kind == "float32":
+        _append_float32(out, val)
+    elif kind == "float64":
+        _append_float64(out, val)
+    elif kind == "timestamp":
+        _append_timestamp(out, val)
+    elif kind == "string":
+        _write_framed(out, STRING, val.encode("utf-8"))
+    elif kind == "bytes":
+        _write_framed(out, BYTES, val)
+    elif kind == "array":
+        _write_framed(out, ARRAY, val)
+    elif kind == "map":
+        _write_framed(out, MAP, val)
+    elif kind == "set":
+        _write_framed(out, SET, val)
+    else:
+        raise ValueError(f"struple: unknown element kind {kind!r}")
+
+
 def compare(a: bytes, b: bytes) -> int:
     """Lexicographic byte comparison (-1/0/1). Plain ``bytes`` comparison and
     ``sorted`` work too — they are already memcmp on the encoded keys."""

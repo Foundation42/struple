@@ -4,33 +4,54 @@
 (Zig, TypeScript, Python, …) must satisfy. It is generated from the Zig reference
 with `zig build vectors` — **do not edit by hand**.
 
-Each entry is:
+There are two entry shapes, distinguished by which key is present:
 
 ```json
-{ "json": "<canonical JSON text>", "bytes": "<lowercase hex of the encoding>" }
+{ "json":  "<canonical JSON text>", "bytes": "<hex>" }
+{ "build": <op>,                    "bytes": "<hex>" }
 ```
 
-`json` is stored as a **string** (the exact canonical text) so the contract is
-unambiguous regardless of how a consumer parses numbers. A conforming
-implementation must pass, for every vector:
+A conforming implementation must pass, for every vector:
 
-| direction | check |
+| entry | check | check |
+|---|---|---|
+| `json`  | `fromJson(json)` == `bytes` | `toJson(bytes)` == `json` |
+| `build` | `encode(build(op))` == `bytes` | `transcode(bytes)` == `bytes` |
+
+`json` is stored as a **string** (exact canonical text) so the contract is
+unambiguous regardless of how a consumer parses numbers. `transcode` decodes
+every element and re-encodes it, so the build-entry decode check is exact even
+for types a language can't natively round-trip (Python has no `undefined`; JS
+`Date` is millisecond-only).
+
+## The build op language
+
+JSON cannot express several struple types, so build entries use a tiny op
+language. An **op** is a one-key object; integers and timestamps are decimal
+strings (to stay precise and language-neutral), bytes are hex:
+
+| op | builds |
 |---|---|
-| encode | `fromJson(json)` equals `bytes` (byte-for-byte) |
-| decode | `toJson(bytes)` equals `json` (string-for-string) |
+| `{"nil": null}` | nil |
+| `{"undef": null}` | undefined |
+| `{"bool": true}` | bool |
+| `{"int": "123"}` | integer |
+| `{"float64": 1.5}` / `{"float32": 1.5}` | float |
+| `{"timestamp": "1000000"}` | timestamp (µs since epoch) |
+| `{"string": "abc"}` | string |
+| `{"bytes": "00ff01"}` | bytes (hex) |
+| `{"array": [op, …]}` | array |
+| `{"set": [op, …]}` | set |
+| `{"map": [[keyOp, valOp], …]}` | map (keys may be any type) |
 
-Both directions are exact equality — the Zig reference and the TypeScript port
-agree on every byte, including float rendering.
+`build` interprets an op into a value/encoding; the interpreter is mirrored
+identically in the Zig generator and the TypeScript/Python conformance tests.
 
 ## Coverage
 
-null, booleans, integers across every width band (including arbitrary-precision
-values a JS `f64` round-trip would corrupt), non-integer floats, strings
-(including prefix pairs that exercise lexicographic ordering, and escapes),
-arrays, and objects.
+JSON entries: null, booleans, integers across every width band (including
+arbitrary-precision values a JS `f64` round-trip would corrupt), non-integer
+floats, strings (prefix pairs + escapes), arrays, objects.
 
-Floats are non-integer-valued so their canonical text keeps a decimal point and
-round-trips as a float (an integer-valued float would render as integer text).
-
-Still to add: typed vectors for the non-JSON struple types (timestamp, bytes,
-set, undefined) with a language-neutral build descriptor.
+Build entries: undefined, float32, timestamps (incl. negative), bytes (incl.
+embedded NULs), sets (dedup/sort), maps with non-string keys, and compositions.
