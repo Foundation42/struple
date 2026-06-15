@@ -1,0 +1,10 @@
+[package]
+name = "struple"
+version = "0.0.0"
+edition = "2021"
+description = "Streaming, lexicographically-ordered tuple packing — memcmp-orderable, JSON-compatible"
+license = "MIT"
+repository = "https://github.com/Foundation42/struple"
+
+# No dependencies — pure Rust, including the JSON module.
+[dependencies]

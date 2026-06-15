@@ -13,5 +13,9 @@ __pycache__/
 dist/
 build/
 
+# Rust
+/rust/target/
+/rust/Cargo.lock
+
 # Local Claude Code settings
 .claude/settings.local.json
