@@ -1,0 +1,6 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Local Claude Code settings
+.claude/settings.local.json
