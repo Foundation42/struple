@@ -1,0 +1,135 @@
+/* struple — streaming, lexicographically-ordered tuple packing (C).
+ *
+ * Encoded bytes are directly memcmp-comparable: struple_compare(encode(a), ...)
+ * matches the semantic order of the values. A faithful port of the Zig
+ * reference; the conformance corpus (conformance/vectors.json) pins byte
+ * identity across languages.
+ *
+ * No dependencies (C11). Integers up to 64 bits are first-class; larger ones go
+ * through the (sign, big-endian magnitude bytes) API, so no bignum library is
+ * required. */
+#ifndef STRUPLE_H
+#define STRUPLE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- Writer: builds an encoded buffer ---- */
+
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+} struple_writer;
+
+void struple_writer_init(struple_writer *w);
+void struple_writer_free(struple_writer *w);
+void struple_writer_reset(struple_writer *w);
+static inline const uint8_t *struple_writer_data(const struple_writer *w) { return w->data; }
+static inline size_t struple_writer_len(const struple_writer *w) { return w->len; }
+
+/* Append raw bytes (e.g. when a writer is used to hold JSON text). */
+void struple_writer_append(struple_writer *w, const uint8_t *data, size_t len);
+
+void struple_append_nil(struple_writer *w);
+void struple_append_undefined(struple_writer *w);
+void struple_append_bool(struple_writer *w, bool v);
+void struple_append_int(struple_writer *w, int64_t v);
+void struple_append_uint(struple_writer *w, uint64_t v);
+/* `magnitude` is big-endian; leading zeros are trimmed. */
+void struple_append_big_int(struple_writer *w, bool negative, const uint8_t *magnitude, size_t mag_len);
+void struple_append_f32(struple_writer *w, float v);
+void struple_append_f64(struple_writer *w, double v);
+void struple_append_timestamp(struple_writer *w, int64_t micros);
+void struple_append_string(struple_writer *w, const char *s, size_t len);
+void struple_append_bytes(struple_writer *w, const uint8_t *b, size_t len);
+/* `child` is the encoded element stream of a nested tuple. */
+void struple_append_array(struple_writer *w, const uint8_t *child, size_t child_len);
+
+typedef struct {
+    const uint8_t *ptr;
+    size_t len;
+} struple_bytes;
+
+typedef struct {
+    struple_bytes key;
+    struple_bytes value;
+} struple_kv;
+
+/* Pre-encoded entries/elements; sorted (and de-duplicated, for sets) into
+ * canonical order. The arrays are reordered in place. */
+void struple_append_map(struple_writer *w, struple_kv *entries, size_t count);
+void struple_append_set(struple_writer *w, struple_bytes *elements, size_t count);
+
+/* ---- Reader: streams elements back out ---- */
+
+typedef enum {
+    STRUPLE_NIL,
+    STRUPLE_UNDEF,
+    STRUPLE_BOOL,
+    STRUPLE_INT,        /* fits int64_t */
+    STRUPLE_BIGINT,     /* sign + big-endian magnitude in `data` */
+    STRUPLE_F32,
+    STRUPLE_F64,
+    STRUPLE_TIMESTAMP,  /* int_val = microseconds since the Unix epoch */
+    STRUPLE_STRING,     /* `data` = UTF-8 (NUL-terminated past data_len) */
+    STRUPLE_BYTES,
+    STRUPLE_ARRAY,      /* `data` = un-escaped child stream */
+    STRUPLE_MAP,
+    STRUPLE_SET
+} struple_kind;
+
+typedef struct {
+    struple_kind kind;
+    bool bool_val;
+    bool big_negative;
+    int64_t int_val;
+    float f32_val;
+    double f64_val;
+    const uint8_t *data; /* STRING/BYTES/ARRAY/MAP/SET/BIGINT — valid until the next next() call */
+    size_t data_len;
+} struple_element;
+
+typedef struct {
+    const uint8_t *buf;
+    size_t len;
+    size_t pos;
+    uint8_t *scratch;
+    size_t scratch_cap;
+} struple_reader;
+
+void struple_reader_init(struple_reader *r, const uint8_t *buf, size_t len);
+void struple_reader_free(struple_reader *r);
+/* Returns 1 and fills *out for the next element, 0 at end of stream, -1 on error. */
+int struple_reader_next(struple_reader *r, struple_element *out);
+
+/* ---- ordering / round-trip ---- */
+
+/* Lexicographic comparison: -1, 0, or 1. Matches semantic order. */
+int struple_compare(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen);
+
+/* Decode every element and re-encode it into `out` (validates the decoder).
+ * Returns 0 on success, -1 on error. */
+int struple_transcode(const uint8_t *buf, size_t len, struple_writer *out);
+
+/* ---- JSON convenience (see struple_json.c) ---- */
+
+/* Parse JSON text into a struple encoding in `out`. Returns 0 on success, -1 on
+ * parse/encode error. Integer tokens up to int64/uint64 are first-class; larger
+ * integers stay lossless via arbitrary-precision magnitude bytes. */
+int struple_from_json(const char *text, size_t len, struple_writer *out);
+
+/* Render the first element of `buf` as canonical JSON text into `out` (the
+ * bytes are UTF-8 text). Returns 0 on success, -1 on error. */
+int struple_to_json(const uint8_t *buf, size_t len, struple_writer *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* STRUPLE_H */

@@ -78,8 +78,9 @@ bytes, set, non-string map keys, compositions) via a small op language. See
 - **TypeScript** ([`js/`](js/README.md)) — pure, zero-dependency port.
 - **Python** ([`py/`](py/README.md)) — pure stdlib port.
 - **Rust** ([`rust/`](rust/README.md)) — pure, zero-dependency crate.
+- **C** ([`c/`](c/README.md)) — pure C11, zero-dependency.
 
-All four are driven by the same `vectors.json` and are verified byte-identical,
+All five are driven by the same `vectors.json` and are verified byte-identical,
 so they agree on every byte in both directions.
 
 ## Type coverage (Python + JavaScript)
