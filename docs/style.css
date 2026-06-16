@@ -115,7 +115,8 @@ tbody tr:hover { background: var(--panel); }
 .order-line { font-family: var(--mono); font-size: 0.9rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 12px; overflow-x: auto; }
 
 /* ports */
-.ports { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-top: 8px; }
+.ports { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 8px; }
+@media (max-width: 560px) { .ports { grid-template-columns: repeat(2, 1fr); } }
 .port { padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; text-align: center; }
 .port .name { font-weight: 700; }
 .port .how { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
