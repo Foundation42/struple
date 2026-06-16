@@ -854,6 +854,60 @@ test "navigate: map lookup (get/iterator)" {
     try testing.expect(try it.next() == null);
 }
 
+test "navigate: indexed map (O(log n) get, positional at)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // eight entries "a".."h" -> 1..8, fed out of order so canonicalization sorts them
+    const keys = [_][]const u8{ "h", "c", "a", "g", "d", "f", "b", "e" };
+    var entries: [keys.len][2][]const u8 = undefined;
+    for (keys, 0..) |k, i| {
+        entries[i] = .{ try packOne(a, k), try packOne(a, @as(i64, @intCast(i + 1))) };
+    }
+    var p = struple.Packer.init(a);
+    try p.appendMap(&entries);
+
+    const mv = struple.view(p.bytes());
+    const inner = (try mv.containedItems(a)).?;
+    var im = try struple.IndexedMap.init(a, inner);
+    defer im.deinit(a);
+
+    try testing.expectEqual(@as(usize, 8), im.count());
+
+    // at() walks canonical (sorted) order: a,b,c,...,h
+    for ("abcdefgh", 0..) |ch, i| {
+        const e = im.at(i).?;
+        var kr = struple.reader(e.key);
+        try testing.expectEqualStrings(&[_]u8{ch}, (try kr.next()).?.string);
+    }
+    try testing.expect(im.at(8) == null);
+
+    // get() binary-searches; agrees with the linear MapView.get on every key
+    const m = struple.MapView.init(inner);
+    for ("abcdefgh") |ch| {
+        const key = try packOne(a, &[_]u8{ch});
+        const want = (try m.get(key)).?;
+        try testing.expectEqualSlices(u8, want, im.get(key).?);
+    }
+    // "e" was inserted 8th (value 8) but sits at sorted position 4 — get still finds it
+    try testing.expectEqual(@as(usize, 4), im.find(try packOne(a, "e")).?);
+    try testing.expectEqual(@as(i128, 8), try intOf(im.get(try packOne(a, "e")).?));
+
+    // misses: before, between, and after the key range
+    try testing.expect(im.get(try packOne(a, "A")) == null); // below "a"
+    try testing.expect(im.get(try packOne(a, "cc")) == null); // between "c" and "d"
+    try testing.expect(im.get(try packOne(a, "z")) == null); // above "h"
+    try testing.expect(im.find(try packOne(a, "a")).? == 0);
+    try testing.expect(im.find(try packOne(a, "h")).? == 7);
+
+    // iterator yields the same canonical order
+    var it = im.iterator();
+    var n: usize = 0;
+    while (it.next()) |_| n += 1;
+    try testing.expectEqual(@as(usize, 8), n);
+}
+
 // ---------------------------------------------------------------------------
 // Semantic (value-based) ordering
 // ---------------------------------------------------------------------------

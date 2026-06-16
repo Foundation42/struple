@@ -893,6 +893,7 @@ pub const toJson = @import("json.zig").toJson;
 
 pub const View = @import("navigate.zig").View;
 pub const MapView = @import("navigate.zig").MapView;
+pub const IndexedMap = @import("navigate.zig").IndexedMap;
 pub const view = @import("navigate.zig").view;
 
 // ---------------------------------------------------------------------------

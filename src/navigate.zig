@@ -203,4 +203,85 @@ pub const MapView = struct {
         }
         return null;
     }
+
+    /// Materialize a random-access index for O(log n) `get` and O(1) `at` (see
+    /// `IndexedMap`). One O(n) pass; the caller owns the result.
+    pub fn indexed(self: MapView, allocator: std.mem.Allocator) (DecodeError || AllocError)!IndexedMap {
+        return IndexedMap.init(allocator, self.inner);
+    }
+};
+
+/// A map's entries materialized into a random-access index. Building it is one
+/// O(n) pass over the inner stream; thereafter `get` is an O(log n) binary search
+/// (canonical key order means a key memcmp *is* the sort order) and `at` is O(1).
+///
+/// Use `MapView` directly for a single lookup (zero-alloc); reach for `IndexedMap`
+/// when you do many lookups, or need positional access, on the same map. The entry
+/// slices borrow the inner stream, so keep it alive for the index's lifetime.
+pub const IndexedMap = struct {
+    entries: []MapView.Entry,
+
+    /// Build the index from a map's *inner* stream (the un-escaped body from
+    /// `View.containedItems`). Free it with `deinit`; keep `inner` alive meanwhile.
+    pub fn init(allocator: std.mem.Allocator, inner: []const u8) (DecodeError || AllocError)!IndexedMap {
+        var list = std.ArrayList(MapView.Entry).init(allocator);
+        errdefer list.deinit();
+        var r = Reader.init(inner);
+        while (try r.nextView()) |k| {
+            const v = (try r.nextView()) orelse return error.Truncated;
+            try list.append(.{ .key = k, .value = v });
+        }
+        return .{ .entries = try list.toOwnedSlice() };
+    }
+
+    pub fn deinit(self: *IndexedMap, allocator: std.mem.Allocator) void {
+        allocator.free(self.entries);
+        self.entries = &.{};
+    }
+
+    /// Number of entries — O(1).
+    pub fn count(self: IndexedMap) usize {
+        return self.entries.len;
+    }
+
+    /// The entry at `index` in canonical (sorted) order — O(1); null if out of range.
+    pub fn at(self: IndexedMap, index: usize) ?MapView.Entry {
+        return if (index < self.entries.len) self.entries[index] else null;
+    }
+
+    /// Look up `key` (an encoded key element) — O(log n) binary search. Returns the
+    /// value's encoded bytes, or null.
+    pub fn get(self: IndexedMap, key: []const u8) ?[]const u8 {
+        return if (self.find(key)) |i| self.entries[i].value else null;
+    }
+
+    /// The index of `key` in canonical order, or null — O(log n).
+    pub fn find(self: IndexedMap, key: []const u8) ?usize {
+        var lo: usize = 0;
+        var hi: usize = self.entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            switch (std.mem.order(u8, self.entries[mid].key, key)) {
+                .eq => return mid,
+                .lt => lo = mid + 1,
+                .gt => hi = mid,
+            }
+        }
+        return null;
+    }
+
+    pub const Iterator = struct {
+        entries: []const MapView.Entry,
+        i: usize = 0,
+        pub fn next(self: *Iterator) ?MapView.Entry {
+            if (self.i >= self.entries.len) return null;
+            defer self.i += 1;
+            return self.entries[self.i];
+        }
+    };
+
+    /// Entries in canonical (sorted) order.
+    pub fn iterator(self: IndexedMap) Iterator {
+        return .{ .entries = self.entries };
+    }
 };
