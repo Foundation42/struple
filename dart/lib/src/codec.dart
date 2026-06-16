@@ -229,7 +229,26 @@ class Writer {
   void appendBool(bool v) => _byte(v ? TypeCode.boolTrue : TypeCode.boolFalse);
 
   /// Appends a signed integer element.
-  void appendInt(int v) => appendBigIntValue(BigInt.from(v));
+  /// Fast path: encode straight from a 64-bit int with no BigInt allocation
+  /// (a Dart int always fits the i128 fixed slots). Byte-identical to the BigInt
+  /// path — for negatives the excess form's low bytes are exactly the low bytes
+  /// of the two's-complement pattern, so `>>>` reads them directly.
+  void appendInt(int v) {
+    if (v == 0) {
+      _byte(TypeCode.intZero);
+      return;
+    }
+    if (v > 0) {
+      final n = (v.bitLength + 7) >> 3;
+      _byte(TypeCode.intZero + n);
+      for (var i = n - 1; i >= 0; i--) _byte((v >>> (8 * i)) & 0xFF);
+    } else {
+      var n = ((~v).bitLength + 7) >> 3; // ~v == |v| - 1, non-negative
+      if (n == 0) n = 1;
+      _byte(TypeCode.intZero - n);
+      for (var i = n - 1; i >= 0; i--) _byte((v >>> (8 * i)) & 0xFF);
+    }
+  }
 
   /// Appends an arbitrary-precision integer. Values inside the i128 range use
   /// the fixed-width codes; values beyond it use the big-int codes.

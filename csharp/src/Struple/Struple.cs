@@ -149,6 +149,36 @@ public static class Struple
     // Integer encode
     // -----------------------------------------------------------------------
 
+    // Fixed-path integer encode straight from a long — no BigInteger allocation
+    // (a long always fits the i128 fixed slots). Byte-identical to AppendInteger.
+    internal static void AppendLong(ByteBuf outBuf, long v)
+    {
+        if (v == 0) { outBuf.Add(IntZero); return; }
+        bool negative = v < 0;
+        ulong bits = (ulong)v;
+        ulong mag = negative ? (~bits + 1UL) : bits; // unsigned magnitude (correct for long.MinValue)
+        if (negative)
+        {
+            int n = System.Math.Max(1, ByteLenUlong(mag - 1UL));
+            outBuf.Add(IntZero - n);
+            WriteBigEndianUlong(outBuf, ~mag + 1UL, n); // low n bytes = 2^(8n) - magnitude
+        }
+        else
+        {
+            int n = ByteLenUlong(mag);
+            outBuf.Add(IntZero + n);
+            WriteBigEndianUlong(outBuf, mag, n);
+        }
+    }
+
+    private static int ByteLenUlong(ulong m) =>
+        m == 0 ? 0 : (64 - System.Numerics.BitOperations.LeadingZeroCount(m) + 7) / 8;
+
+    private static void WriteBigEndianUlong(ByteBuf outBuf, ulong value, int n)
+    {
+        for (int i = n - 1; i >= 0; i--) outBuf.Add((int)((value >> (8 * i)) & 0xFF));
+    }
+
     internal static void AppendInteger(ByteBuf outBuf, BigInteger value)
     {
         int sign = value.Sign;
@@ -624,7 +654,7 @@ public static class Struple
 
         public Packer AppendInt(long v)
         {
-            AppendInteger(_out, new BigInteger(v));
+            AppendLong(_out, v);
             return this;
         }
 

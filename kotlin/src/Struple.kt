@@ -127,7 +127,7 @@ class Writer {
     fun appendUndefined(): Writer { put(Tc.UNDEF); return this }
     fun appendBool(v: Boolean): Writer { put(if (v) Tc.BOOL_TRUE else Tc.BOOL_FALSE); return this }
 
-    fun appendInt(v: Long): Writer = appendInt(BigInteger.valueOf(v))
+    fun appendInt(v: Long): Writer { appendLong(buf, v); return this }
     fun appendInt(v: BigInteger): Writer { appendInteger(buf, v); return this }
 
     fun appendFloat64(v: Double): Writer { appendFloat64(buf, v); return this }
@@ -234,6 +234,31 @@ private fun appendValue(out: java.io.ByteArrayOutputStream, value: Any?) {
 }
 
 // -- integers ---------------------------------------------------------------
+
+// Fixed-path integer encode straight from a Long — no BigInteger allocation
+// (a Long always fits the i128 fixed slots). Byte-identical to appendInteger.
+private fun appendLong(out: java.io.ByteArrayOutputStream, v: Long) {
+    if (v == 0L) { out.write(Tc.INT_ZERO); return }
+    val negative = v < 0
+    val mag = if (negative) -v else v // unsigned magnitude (wraps for MIN_VALUE)
+    if (negative) {
+        var n = byteLenLong(mag - 1)
+        if (n == 0) n = 1
+        out.write(Tc.INT_ZERO - n)
+        writeBigEndianLong(out, -mag, n) // low n bytes = 2^(8n) - magnitude
+    } else {
+        val n = byteLenLong(mag)
+        out.write(Tc.INT_ZERO + n)
+        writeBigEndianLong(out, mag, n)
+    }
+}
+
+private fun byteLenLong(magUnsigned: Long): Int =
+    if (magUnsigned == 0L) 0 else (64 - java.lang.Long.numberOfLeadingZeros(magUnsigned) + 7) / 8
+
+private fun writeBigEndianLong(out: java.io.ByteArrayOutputStream, value: Long, n: Int) {
+    for (i in n - 1 downTo 0) out.write(((value ushr (8 * i)) and 0xFF).toInt())
+}
 
 private fun appendInteger(out: java.io.ByteArrayOutputStream, value: BigInteger) {
     if (value.signum() == 0) { out.write(Tc.INT_ZERO); return }

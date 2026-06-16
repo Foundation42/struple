@@ -209,11 +209,34 @@ func (w *Writer) AppendBool(v bool) {
 	}
 }
 
-// AppendInt appends a signed integer element.
-func (w *Writer) AppendInt(v int64) { w.AppendBigIntValue(big.NewInt(v)) }
+// AppendInt appends a signed integer element. Fast path: build the big-endian
+// magnitude on the stack and reuse the fixed/big-int router — no per-call big.Int
+// allocation (which dominated integer-heavy encodes). Byte-identical output.
+func (w *Writer) AppendInt(v int64) {
+	if v == 0 {
+		w.buf = append(w.buf, tcIntZero)
+		return
+	}
+	neg := v < 0
+	mag := uint64(v)
+	if neg {
+		mag = -mag // two's-complement magnitude (correct even for math.MinInt64)
+	}
+	a := [8]byte{byte(mag >> 56), byte(mag >> 48), byte(mag >> 40), byte(mag >> 32),
+		byte(mag >> 24), byte(mag >> 16), byte(mag >> 8), byte(mag)}
+	w.AppendBigInt(neg, a[:])
+}
 
-// AppendUint appends an unsigned integer element.
-func (w *Writer) AppendUint(v uint64) { w.AppendBigIntValue(new(big.Int).SetUint64(v)) }
+// AppendUint appends an unsigned integer element (same stack-magnitude fast path).
+func (w *Writer) AppendUint(v uint64) {
+	if v == 0 {
+		w.buf = append(w.buf, tcIntZero)
+		return
+	}
+	a := [8]byte{byte(v >> 56), byte(v >> 48), byte(v >> 40), byte(v >> 32),
+		byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
+	w.AppendBigInt(false, a[:])
+}
 
 // AppendBigIntValue appends an arbitrary-precision integer. Values inside the
 // i128 range use the fixed-width codes; values beyond it use the big-int codes.

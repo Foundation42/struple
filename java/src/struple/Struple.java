@@ -343,7 +343,7 @@ public final class Struple {
         }
 
         public Packer appendInt(long v) {
-            appendInteger(out, BigInteger.valueOf(v));
+            appendLong(out, v);
             return this;
         }
 
@@ -816,6 +816,35 @@ public final class Struple {
         for (byte b : magBytes) {
             out.add(comp.applyAsInt(b & 0xFF));
         }
+    }
+
+    /** Fixed-path integer encode straight from a long — no BigInteger allocation
+     *  (a long always fits the i128 fixed slots). Byte-identical to appendInteger. */
+    private static void appendLong(ByteBuf out, long v) {
+        if (v == 0) {
+            out.add(INT_ZERO);
+            return;
+        }
+        boolean negative = v < 0;
+        long mag = negative ? -v : v; // unsigned magnitude (wraps correctly for MIN_VALUE)
+        if (negative) {
+            int n = Math.max(1, byteLenLong(mag - 1)); // size for |value| - 1
+            out.add(INT_ZERO - n);
+            writeBigEndianLong(out, -mag, n); // low n bytes = 2^(8n) - magnitude (excess form)
+        } else {
+            int n = byteLenLong(mag);
+            out.add(INT_ZERO + n);
+            writeBigEndianLong(out, mag, n);
+        }
+    }
+
+    private static int byteLenLong(long magUnsigned) {
+        if (magUnsigned == 0) return 0;
+        return (64 - Long.numberOfLeadingZeros(magUnsigned) + 7) / 8;
+    }
+
+    private static void writeBigEndianLong(ByteBuf out, long value, int n) {
+        for (int i = n - 1; i >= 0; i--) out.add((int) ((value >>> (8 * i)) & 0xFF));
     }
 
     // -----------------------------------------------------------------------
