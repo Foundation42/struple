@@ -1,0 +1,50 @@
+name: CLA
+
+# Contributor License Agreement gate, powered by the CLA-Assistant action.
+#
+# On every PR it checks whether the author has signed CLA.md. If not, the bot
+# comments asking them to reply with the sign-off phrase from CONTRIBUTING.md:
+#
+#     I have read the CLA Document and I hereby sign the CLA
+#
+# That comment is what this workflow listens for (issue_comment). Signatures are
+# recorded in signatures/version1/cla.json on a dedicated `cla-signatures`
+# branch, so main stays clean. No secrets to configure — the built-in
+# GITHUB_TOKEN is sufficient for storing signatures in this same repo.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    name: CLA signed
+    runs-on: ubuntu-latest
+    # Run when a PR event fires, or when someone comments the sign-off / "recheck".
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event.comment.body == 'recheck' ||
+      github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
+    steps:
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: "https://github.com/Foundation42/struple/blob/main/CLA.md"
+          path-to-signatures: "signatures/version1/cla.json"
+          branch: "cla-signatures"
+          # Bots that don't need to sign.
+          allowlist: dependabot[bot]
+          # Keep the bot's wording aligned with CONTRIBUTING.md / CLA.md.
+          custom-notsigned-prcomment: "Thank you for your contribution to **struple**! Before we can merge, please read our [CLA](https://github.com/Foundation42/struple/blob/main/CLA.md) and sign it by posting a comment below with exactly:"
+          custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
+          custom-allsigned-prcomment: "✅ All contributors have signed the CLA. Thanks!"
