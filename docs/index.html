@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>struple — lexicographically-ordered tuple packing</title>
   <meta name="description" content="A schema-free binary format whose encoded bytes are directly memcmp-orderable. One wire format, twelve byte-identical implementations." />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -15,8 +16,8 @@
     <p class="tag2">Pack values into bytes that are directly <code>memcmp</code>-comparable — drop them
       into any byte-ordered store and they sort in the correct semantic order, no custom comparator.
       It's a <strong>stream</strong>, not a message, and a <strong>canonical</strong> one — which
-      makes it a natural fit for databases and CRDTs alike. One wire format, twelve byte-identical
-      implementations.</p>
+      makes it a natural fit for databases and CRDTs alike. One wire format. Twelve byte-identical
+      implementations. Zero schemas.</p>
     <div class="badges">
       <span class="badge"><b>12</b> languages</span>
       <span class="badge"><b>memcmp</b>-orderable</span>
@@ -171,26 +172,26 @@
         stream you can read incrementally — add up to a handful of things struple is unusually good at.</p>
       <div class="crdt-grid">
         <div class="crdt-card">
-          <h3>Database keys &amp; indexes</h3>
+          <h3>🔑 Database keys &amp; indexes</h3>
           <p>Pack a composite key like <code>[tenant, "user", id]</code> and drop the bytes straight into
             RocksDB, LMDB, sled or FoundationDB. They sort in the right order with <strong>no custom
             comparator</strong>, so range scans, prefix queries and secondary indexes just work.</p>
         </div>
         <div class="crdt-card">
-          <h3>Message passing &amp; queues</h3>
+          <h3>📨 Message passing &amp; queues</h3>
           <p>Because all twelve languages emit identical bytes, a struple <em>is</em> a language-neutral
             message — no schema compiler, no codegen. It's how Substrate wires <strong>functional-style FFIs
             and queues between languages and cores</strong>: a Rust core enqueues a struple, a Python or Swift
             worker dequeues and decodes it. Self-delimiting, so you can parse it as it streams.</p>
         </div>
         <div class="crdt-card">
-          <h3>Content addressing &amp; caching</h3>
+          <h3>🧩 Content addressing &amp; caching</h3>
           <p>One value → one canonical byte string → one hash. Use it as a cache key, a content address or a
             dedup fingerprint, and every language agrees on the identity. The same property makes it a clean
             <a href="#crdt">CRDT</a> substrate.</p>
         </div>
         <div class="crdt-card">
-          <h3>Polyglot data exchange</h3>
+          <h3>🌐 Polyglot data exchange</h3>
           <p>A wire format spanning the union of the Python and JavaScript data models — nulls, big integers,
             decimals, timestamps, UUIDs, nested maps and sets — round-tripping byte-identically across a dozen
             runtimes. One format for your whole stack, front to back.</p>
@@ -369,6 +370,8 @@
     renderSemantic();
   </script>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
   <script>
     // Rotating polyglot banner — the same tuple packed in each implementation.
     (function () {
@@ -446,6 +449,15 @@ let key = w.bytes // [UInt8] — compare(a, b) sorts` },
 final key = w.bytes(); // Uint8List — memcmp-orderable` },
       ];
 
+      const PRISM_LANG = {
+        "Zig": "zig", "TypeScript": "typescript", "Python": "python", "Rust": "rust",
+        "Go": "go", "C": "c", "C++": "cpp", "Java": "java", "Kotlin": "kotlin",
+        "C#": "csharp", "Swift": "swift", "Dart": "dart",
+      };
+      if (window.Prism && Prism.plugins && Prism.plugins.autoloader) {
+        Prism.plugins.autoloader.languages_path = "https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/";
+      }
+
       const tabs = document.getElementById("lang-tabs");
       const codeEl = document.getElementById("lang-code");
       if (!tabs || !codeEl) return;
@@ -462,7 +474,10 @@ final key = w.bytes(); // Uint8List — memcmp-orderable` },
       let active = -1, timer = null;
       function show(i) {
         active = i;
-        codeEl.textContent = SNIPPETS[i].code;
+        const s = SNIPPETS[i];
+        codeEl.textContent = s.code;
+        codeEl.className = "language-" + (PRISM_LANG[s.name] || "clike");
+        if (window.Prism) Prism.highlightElement(codeEl);
         pills.forEach((p, j) => p.classList.toggle("active", j === i));
       }
       function stop() { if (timer) { clearInterval(timer); timer = null; } }

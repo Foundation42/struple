@@ -37,21 +37,27 @@ code { font-family: var(--mono); background: var(--panel2); padding: 1px 6px; bo
   border-top: none;
 }
 .hero h1 {
-  font-size: 3.2rem;
+  font-size: 3.4rem;
   margin: 0;
   letter-spacing: -1.5px;
-  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  background: linear-gradient(90deg, var(--accent), var(--accent2), var(--accent));
+  background-size: 200% auto;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
+  animation: hero-shimmer 7s linear infinite;
 }
+@keyframes hero-shimmer { to { background-position: 200% center; } }
+@media (prefers-reduced-motion: reduce) { .hero h1 { animation: none; } }
 .hero .tag { font-size: 1.25rem; color: var(--text); margin: 14px 0 6px; }
 .hero .tag2 { color: var(--muted); max-width: 620px; margin: 0 auto 26px; }
 .badges { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
 .badge {
   font-family: var(--mono); font-size: 0.82rem; padding: 6px 12px; border-radius: 999px;
   background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+  transition: color 0.15s, border-color 0.15s, transform 0.15s;
 }
+.badge:hover { color: var(--text); border-color: var(--accent2); transform: translateY(-1px); }
 .badge b { color: var(--accent); }
 
 .lead { font-size: 1.08rem; color: var(--muted); }
@@ -63,15 +69,20 @@ code { font-family: var(--mono); background: var(--panel2); padding: 1px 6px; bo
   background: var(--panel); border: 1px solid var(--border); color: var(--muted);
   cursor: pointer; transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
-.lang-pill:hover { color: var(--text); border-color: var(--accent2); }
-.lang-pill.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.lang-pill:hover { color: var(--text); border-color: var(--accent2); transform: translateY(-1px); }
+.lang-pill.active {
+  color: var(--bg); border-color: transparent; font-weight: 700;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  box-shadow: 0 4px 14px rgba(56, 189, 248, 0.25);
+}
 .lang-snippet {
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
   padding: 18px 20px; margin: 0; overflow-x: auto; min-height: 192px;
+  box-shadow: inset 0 0 0 1px rgba(110, 231, 183, 0.04);
 }
 .lang-snippet code {
   font-family: var(--mono); font-size: 0.9rem; background: none; padding: 0;
-  color: var(--text); white-space: pre; line-height: 1.55;
+  color: var(--text); white-space: pre; line-height: 1.6; text-shadow: none;
 }
 
 /* playground */
@@ -116,7 +127,21 @@ tbody tr:hover { background: var(--panel); }
 
 /* streaming + crdt */
 .crdt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
-.crdt-card { padding: 18px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+.crdt-card {
+  padding: 18px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  position: relative; overflow: hidden;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.crdt-card::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  opacity: 0; transition: opacity 0.16s ease;
+}
+.crdt-card:hover {
+  transform: translateY(-4px); border-color: var(--accent2);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+.crdt-card:hover::before { opacity: 1; }
 .crdt-card h3 { margin: 0 0 8px; font-size: 1.05rem; color: var(--accent); }
 .crdt-card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
 .crdt-card p strong, .crdt-card p em { color: var(--text); font-style: normal; }
