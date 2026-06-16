@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Foundation42/struple/actions/workflows/ci.yml/badge.svg)](https://github.com/Foundation42/struple/actions/workflows/ci.yml)
 
-**Streaming, lexicographically-ordered tuple packing.** One wire format, six
+**Streaming, lexicographically-ordered tuple packing.** One wire format, nine
 byte-identical implementations.
 
 A `struple` is a sequence of typed values packed into a byte buffer such that the
@@ -18,7 +18,7 @@ sled, a sorted array) and it sorts correctly with **no custom comparator**.
 The encoding is **streamable** (a sequence of self-delimiting elements — decode
 fields one at a time as the bytes arrive, no length prefix, the opposite of a
 random-access format you must load whole) and **canonical** (one value → one byte
-sequence, byte-identical across all six languages). Ordered + canonical also makes
+sequence, byte-identical across all nine languages). Ordered + canonical also makes
 it a natural fit for **CRDTs** and content-addressed systems. This is the
 FoundationDB tuple idea, rebuilt clean.
 
@@ -112,7 +112,7 @@ im.at(0);                  // O(1) → (key, value) at a sorted position
 The streaming `Reader` also gains a cursor surface: `peekType`, `nextView` (the
 next element's raw bytes), `skip`, and `rest`.
 
-*(Available in all six implementations, with idiomatic names per language —
+*(Available in all nine implementations, with idiomatic names per language —
 `is_string`/`isString`, `nth_rest`/`nthRest`, etc.)*
 
 ## Conformance corpus
@@ -132,8 +132,11 @@ uuid, bytes, set, non-string map keys, compositions) via a small op language. Se
 - **Rust** ([`rust/`](rust/README.md)) — pure, zero-dependency crate.
 - **C** ([`c/`](c/README.md)) — pure C11, zero-dependency.
 - **C++** ([`cpp/`](cpp/README.md)) — header-only C++17, zero-dependency.
+- **Go** ([`go/`](go/README.md)) — pure, zero-dependency module (stdlib `math/big`).
+- **Kotlin** ([`kotlin/`](kotlin/README.md)) — pure JVM, zero-dependency (`BigInteger` / `BigDecimal`).
+- **Java** ([`java/`](java/README.md)) — pure JVM, zero-dependency (`BigInteger` / `BigDecimal`).
 
-All six are driven by the same `vectors.json` and are verified byte-identical,
+All nine are driven by the same `vectors.json` and are verified byte-identical,
 so they agree on every byte in both directions.
 
 ## Type coverage (Python + JavaScript)
@@ -222,8 +225,8 @@ figures, leading/trailing zeros stripped and packed base-100 (two per byte),
 magnitude sorts earlier. `memcmp` of the payload equals decimal value order, and
 the encoding is **canonical** — `12.300` and `12.3` produce identical bytes, and
 zero has one form. Python maps it to/from `decimal.Decimal` natively (the
-`Decimal.as_tuple()` model is the wire model); elsewhere it's an explicit
-`appendDecimal` / `appendDecimalString`. JSON has no decimal type, so `toJson`
+`Decimal.as_tuple()` model is the wire model), and Java/Kotlin to/from
+`BigDecimal`; elsewhere it's an explicit `appendDecimal` / `appendDecimalString`. JSON has no decimal type, so `toJson`
 renders an exact number literal (one-way — `fromJson` keeps non-integer JSON
 numbers as float64).
 
@@ -260,8 +263,9 @@ number; `-0.0 == 0.0 == int 0`. Non-numbers keep the wire family order (`nil <
 bool < number < timestamp < uuid < string < bytes < array < map < set`, with all
 numbers unified into one class); containers recurse element-wise.
 
-Available in all six languages (`semanticOrder` / `semantic_order` /
-`struple_semantic_order`) and pinned by `conformance/semantic_vectors.json` — a
+Available in all nine languages (`semanticOrder` / `semantic_order` /
+`struple_semantic_order` / `SemanticOrder`) and pinned by
+`conformance/semantic_vectors.json` — a
 language-neutral set of `{a, b, order}` pairs every implementation must agree on.
 
 ## License
