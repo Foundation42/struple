@@ -53,4 +53,25 @@ pub fn build(b: *std.Build) void {
     gen_run.setCwd(b.path("."));
     const vectors_step = b.step("vectors", "Generate conformance/vectors.json");
     vectors_step.dependOn(&gen_run.step);
+
+    // Benchmarks: always ReleaseFast (regardless of the global optimize mode) so
+    // the numbers are meaningful. Writes BENCHMARKS.md + bench/payloads.json.
+    const bench_struple = b.addModule("struple-bench-lib", .{
+        .root_source_file = b.path("src/struple.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/zig/bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("struple", bench_struple);
+    const bench_exe = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
+    bench_exe.linkLibC(); // bench uses std.heap.c_allocator (fast malloc)
+    const bench_run = b.addRunArtifact(bench_exe);
+    bench_run.setCwd(b.path("."));
+    if (b.args) |args| bench_run.addArgs(args);
+    const bench_step = b.step("bench", "Run benchmarks (ReleaseFast); writes BENCHMARKS.md + bench/payloads.json");
+    bench_step.dependOn(&bench_run.step);
 }

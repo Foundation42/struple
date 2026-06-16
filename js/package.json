@@ -10,7 +10,8 @@
     "node": ">=23.6"
   },
   "scripts": {
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "bench": "node ../bench/js/bench.ts"
   },
   "license": "Apache-2.0"
 }

@@ -166,8 +166,19 @@ impl Writer {
     pub fn new() -> Self {
         Self::default()
     }
+    /// A writer pre-sized to `cap` bytes (avoids reallocations while encoding a
+    /// known-size record/stream). Behavior-identical to `new` otherwise.
+    pub fn with_capacity(cap: usize) -> Self {
+        Writer { buf: Vec::with_capacity(cap) }
+    }
     pub fn bytes(&self) -> &[u8] {
         &self.buf
+    }
+    /// Truncate the buffer to empty while retaining its capacity, so the writer
+    /// can be reused for the next record without reallocating.
+    pub fn clear(&mut self) -> &mut Self {
+        self.buf.clear();
+        self
     }
     pub fn into_bytes(self) -> Vec<u8> {
         self.buf

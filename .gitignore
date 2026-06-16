@@ -24,5 +24,16 @@ build/
 /cpp/test_conformance
 *.o
 
+# Benchmark build artifacts (sources, bench/data, and bench/results are committed;
+# build/ and __pycache__/ above already cover the JVM/Swift/Python outputs)
+/bench/c/bench
+/bench/cpp/bench
+/bench/dart/bench
+/bench/dart/.dart_tool/
+/bench/dart/pubspec.lock
+/bench/kotlin/*.jar
+/bench/csharp/bin/
+/bench/csharp/obj/
+
 # Local Claude Code settings
 .claude/settings.local.json

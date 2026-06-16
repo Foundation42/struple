@@ -390,10 +390,14 @@ def _write_framed(out: bytearray, type_code: int, content: bytes) -> None:
 
 
 def _write_escaped(out: bytearray, content: bytes) -> None:
-    for b in content:
-        out.append(b)
-        if b == 0x00:
-            out.append(0xFF)
+    # Escape only the order-significant terminator byte: every 0x00 is followed by
+    # a 0xFF companion. The common case (no 0x00) bulk-copies the run; otherwise a
+    # single C-level replace inserts the companions — both byte-identical to the
+    # per-byte loop, but far faster than appending one byte at a time in Python.
+    if 0x00 in content:
+        out += content.replace(b"\x00", b"\x00\xff")
+    else:
+        out += content
 
 
 def _datetime_to_micros(dt: _dt.datetime) -> int:
@@ -483,20 +487,25 @@ class Reader:
         return s
 
     def _take_framed(self) -> bytes:
+        # Jump to each candidate 0x00 in C (bytes.find) rather than scanning byte
+        # by byte in Python. A 0x00 is the terminator unless it is immediately
+        # followed by its 0xFF escape companion (an escaped data byte) — identical
+        # framing to the per-byte loop, but the runs between terminators are
+        # skipped at C speed.
         start = self.pos
-        i = self.pos
         buf = self.buf
         n = len(buf)
-        while i < n:
-            if buf[i] == 0x00:
-                if i + 1 < n and buf[i + 1] == 0xFF:
-                    i += 2
-                    continue
-                slice_ = buf[start:i]
-                self.pos = i + 1
-                return slice_
-            i += 1
-        raise ValueError("struple: truncated (unterminated framed value)")
+        i = start
+        find = buf.find
+        while True:
+            i = find(0x00, i)
+            if i == -1:
+                raise ValueError("struple: truncated (unterminated framed value)")
+            if i + 1 < n and buf[i + 1] == 0xFF:
+                i += 2
+                continue
+            self.pos = i + 1
+            return buf[start:i]
 
     def _take_framed_unescaped(self) -> bytes:
         return _unescape(self._take_framed())

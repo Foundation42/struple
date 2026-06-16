@@ -1,0 +1,55 @@
+{
+  "lang": "C++",
+  "host": "AMD Ryzen 9 9950X3D 16-Core Processor",
+  "payloads": {
+    "stock_quotes": {
+      "enc_mrec_s": 10.22,
+      "enc_mb_s": 500.93,
+      "dec_mrec_s": 7.32,
+      "dec_mb_s": 358.93,
+      "sha256_ok": true
+    },
+    "geo_points": {
+      "enc_mrec_s": 25.77,
+      "enc_mb_s": 1223.55,
+      "dec_mrec_s": 8.33,
+      "dec_mb_s": 395.26,
+      "sha256_ok": true
+    },
+    "tweets": {
+      "enc_mrec_s": 10.84,
+      "enc_mb_s": 1439.42,
+      "dec_mrec_s": 2.16,
+      "dec_mb_s": 287.41,
+      "sha256_ok": true
+    },
+    "blockchain_txs": {
+      "enc_mrec_s": 8.42,
+      "enc_mb_s": 1034.14,
+      "dec_mrec_s": 2.65,
+      "dec_mb_s": 326.03,
+      "sha256_ok": true
+    },
+    "int_stream": {
+      "enc_mrec_s": 102.51,
+      "enc_mb_s": 921.82,
+      "dec_mrec_s": 138.88,
+      "dec_mb_s": 1248.87,
+      "sha256_ok": true
+    },
+    "string_stream": {
+      "enc_mrec_s": 89.02,
+      "enc_mb_s": 1524.50,
+      "dec_mrec_s": 29.25,
+      "dec_mb_s": 500.86,
+      "sha256_ok": true
+    },
+    "nested_doc": {
+      "enc_mrec_s": 2.95,
+      "enc_mb_s": 195.84,
+      "dec_mrec_s": 3.57,
+      "dec_mb_s": 237.27,
+      "sha256_ok": true
+    }
+  }
+}

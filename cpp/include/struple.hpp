@@ -75,9 +75,13 @@ inline void push_be(Bytes& b, uint64_t v, size_t n) {
 }
 
 inline void write_escaped(Bytes& b, const uint8_t* c, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        b.push_back(c[i]);
-        if (c[i] == 0) b.push_back(0xff);
+    // Bulk-copy the runs between 0x00 bytes; the escape-free case is one insert.
+    size_t i = 0;
+    while (i < n) {
+        size_t start = i;
+        while (i < n && c[i] != 0) i++;
+        b.insert(b.end(), c + start, c + i);
+        if (i < n) { b.push_back(0x00); b.push_back(0xff); i++; }
     }
 }
 

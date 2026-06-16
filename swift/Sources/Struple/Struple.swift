@@ -242,7 +242,8 @@ public struct Writer {
         }
     }
 
-    /// Encode any i128, automatically using the big-int path past 8 bytes.
+    /// Encode any i128. Values in the i128 range always use the fixed slots, so
+    /// this writes straight to the buffer with no intermediate magnitude array.
     public mutating func appendI128(_ value: Int128) {
         if value == 0 {
             buffer.append(TypeCode.intZero)
@@ -251,11 +252,7 @@ public struct Writer {
         let negative = value < 0
         let bits = UInt128(bitPattern: value)
         let mag: UInt128 = negative ? (~bits &+ 1) : bits  // two's-complement magnitude
-        var buf = [UInt8](repeating: 0, count: 16)
-        writeBigEndianU128(&buf, 0, mag, 16)
-        var start = 0
-        while start < 16 && buf[start] == 0 { start += 1 }
-        appendBigInt(negative: negative, magnitude: Array(buf[start...]))
+        if negative { encodeNegative(mag) } else { encodePositive(mag) }
     }
 
     /// Encode an arbitrary-precision integer given its sign and big-endian
@@ -497,9 +494,18 @@ public struct Writer {
     }
 
     private mutating func writeEscaped(_ content: [UInt8]) {
-        for b in content {
-            buffer.append(b)
-            if b == 0x00 { buffer.append(escapeByte) }
+        // Bulk-copy the runs between 0x00 bytes; the escape-free case is one append.
+        var i = 0
+        let n = content.count
+        while i < n {
+            let start = i
+            while i < n && content[i] != 0x00 { i += 1 }
+            buffer.append(contentsOf: content[start..<i])
+            if i < n {
+                buffer.append(0x00)
+                buffer.append(escapeByte)
+                i += 1
+            }
         }
     }
 

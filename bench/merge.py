@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Merge bench/results/<lang>.json into ../BENCHMARKS.md.
+
+Each port writes bench/results/<lang>.json (schema in bench/README.md). This
+collates them into one document: a comparison table per workload, languages
+ordered fastest-encode-first, with byte-identity (sha256) called out.
+
+Run from the repo root after the ports have produced their results:
+    python3 bench/merge.py
+"""
+import json
+import os
+import glob
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESULTS = os.path.join(ROOT, "bench", "results")
+MANIFEST = os.path.join(ROOT, "bench", "payloads.json")
+OUT = os.path.join(ROOT, "BENCHMARKS.md")
+
+
+def load_results():
+    out = {}
+    for path in sorted(glob.glob(os.path.join(RESULTS, "*.json"))):
+        with open(path) as f:
+            r = json.load(f)
+        out[r["lang"]] = r
+    return out
+
+
+def fmt(x):
+    return f"{x:,.2f}" if x < 100 else f"{x:,.0f}"
+
+
+def main():
+    with open(MANIFEST) as f:
+        manifest = json.load(f)
+    payloads = manifest["payloads"]
+    results = load_results()
+    langs = list(results.values())
+    host = next((r["host"] for r in langs if r.get("host")), "unknown")
+
+    # Byte-identity audit across every (lang, payload).
+    mismatches = [
+        f"{r['lang']}/{name}"
+        for r in langs
+        for name, m in r.get("payloads", {}).items()
+        if not m.get("sha256_ok", False)
+    ]
+
+    out = []
+    out.append("# struple benchmarks\n")
+    out.append(
+        "Encode (build a stream from in-memory records) and decode (walk a stream, "
+        "touching every value) throughput across all twelve byte-identical "
+        "implementations, on the **same shared workloads** (see "
+        "[`bench/README.md`](bench/README.md)).\n"
+    )
+    out.append(
+        "**Mrec/s** (millions of records per second) is the headline figure — how "
+        "many quotes, points, tweets, transactions, or items move through the codec "
+        "each second. MB/s is shown alongside.\n"
+    )
+    out.append(
+        "All figures are **single-threaded (per core)**. struple encodes/decodes each "
+        "record and stream independently, so the work is embarrassingly parallel — "
+        "aggregate throughput scales ~linearly with cores.\n"
+    )
+    if mismatches:
+        out.append(
+            "> ⚠️ **Byte-identity FAILED** for: " + ", ".join(mismatches) +
+            ". These numbers are not trustworthy until the encoder reproduces the "
+            "canonical bytes.\n"
+        )
+    else:
+        out.append(
+            "> ✅ Every implementation reproduced every workload **byte-for-byte** "
+            "(sha256-verified against the shared manifest) before timing.\n"
+        )
+    out.append(
+        f"**Host:** {host} · single-threaded · "
+        f"{len(results)}/{12} ports reporting.\n"
+    )
+    out.append(
+        "> Numbers are machine- and runtime-specific — treat them as relative. "
+        "Compiled ports (Zig/Rust/C/C++) and managed/JIT ports (Go/Java/Kotlin/C#) "
+        "occupy different bands; the interpreted port (Python) and the JS runtime "
+        "are slower in absolute terms but exercise identical bytes.\n"
+    )
+
+    def section(title, category):
+        out.append(f"\n## {title}\n")
+        for p in payloads:
+            if p["category"] != category:
+                continue
+            name = p["name"]
+            kb = p["byte_len"] / 1024.0
+            out.append(f"\n### `{name}` — {p['description']}\n")
+            out.append(f"_{p['records']:,} records · {kb:,.0f} KB_\n")
+            rows = []
+            for r in langs:
+                m = r.get("payloads", {}).get(name)
+                if not m:
+                    continue
+                flag = "" if m.get("sha256_ok", False) else " ⚠️"
+                rows.append((r["lang"] + flag, m["enc_mrec_s"], m["enc_mb_s"],
+                             m["dec_mrec_s"], m["dec_mb_s"]))
+            rows.sort(key=lambda t: t[1], reverse=True)
+            out.append("\n| language | encode Mrec/s | encode MB/s | decode Mrec/s | decode MB/s |")
+            out.append("|---|--:|--:|--:|--:|")
+            for lang, em, eb, dm, db in rows:
+                out.append(f"| {lang} | {fmt(em)} | {fmt(eb)} | {fmt(dm)} | {fmt(db)} |")
+            out.append("")
+
+    section("Streaming workloads", "streaming")
+    section("Structural micro-benchmarks", "structural")
+
+    out.append("\n## Method\n")
+    out.append(
+        "Optimized build per language, deterministic shared data, single-threaded. "
+        "Per `(workload, op)`: warm-up, auto-calibrate iterations to a ~100 ms trial, "
+        "then several trials reporting the **median** ns/op, with a checksum sink so "
+        "the optimizer can't elide the work. **Encode** builds the framed stream from "
+        "prepared in-memory records; **decode** walks the whole stream, "
+        "descending/unescaping every container and touching every scalar. "
+        "Regenerate the Zig reference with `zig build bench`, each port via its "
+        "`bench/<lang>/` runner, then `python3 bench/merge.py`.\n"
+    )
+
+    with open(OUT, "w") as f:
+        f.write("\n".join(out) + "\n")
+    print(f"Wrote {OUT} from {len(results)} port(s): {', '.join(sorted(results))}")
+    if mismatches:
+        print("WARNING byte-identity mismatches:", ", ".join(mismatches))
+
+
+if __name__ == "__main__":
+    main()

@@ -108,9 +108,17 @@ static size_t byte_len(uint64_t x) {
 }
 
 static void write_escaped(struple_writer *w, const uint8_t *content, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        sw_push(w, content[i]);
-        if (content[i] == 0x00) sw_push(w, 0xff);
+    /* Bulk-copy the runs between 0x00 bytes; the escape-free case is one memcpy. */
+    static const uint8_t esc[2] = { 0x00, 0xff };
+    size_t i = 0;
+    while (i < len) {
+        size_t start = i;
+        while (i < len && content[i] != 0x00) i++;
+        sw_append(w, content + start, i - start);
+        if (i < len) {
+            sw_append(w, esc, 2);
+            i++;
+        }
     }
 }
 

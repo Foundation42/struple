@@ -237,13 +237,26 @@ pub const Decimal = struct {
 
 pub const Packer = struct {
     list: std.ArrayList(u8),
+    /// Reused, grow-only scratch so the transient allocations in `appendDecimal`
+    /// (the order-bearing tail) and `appendMap`/`appendSet` (the sort index) don't
+    /// malloc/free on every call. They hang off the Packer — itself a reused,
+    /// grow-only object — rather than a process-wide thread-local, which keeps the
+    /// codec allocator-aware (FFI/WASM-friendly) and thread-safe by construction.
+    dec_scratch: std.ArrayList(u8),
+    idx_scratch: std.ArrayList(usize),
 
     pub fn init(allocator: std.mem.Allocator) Packer {
-        return .{ .list = std.ArrayList(u8).init(allocator) };
+        return .{
+            .list = std.ArrayList(u8).init(allocator),
+            .dec_scratch = std.ArrayList(u8).init(allocator),
+            .idx_scratch = std.ArrayList(usize).init(allocator),
+        };
     }
 
     pub fn deinit(self: *Packer) void {
         self.list.deinit();
+        self.dec_scratch.deinit();
+        self.idx_scratch.deinit();
     }
 
     pub fn reset(self: *Packer) void {
@@ -256,6 +269,11 @@ pub const Packer = struct {
     }
 
     pub fn toOwnedSlice(self: *Packer) std.mem.Allocator.Error![]u8 {
+        // The transient scratch isn't part of the output; release it so callers
+        // that treat toOwnedSlice as terminal (and never deinit) don't leak it.
+        // The Packer stays valid for reuse (next append re-grows the scratch).
+        self.dec_scratch.clearAndFree();
+        self.idx_scratch.clearAndFree();
         return self.list.toOwnedSlice();
     }
 
@@ -350,10 +368,11 @@ pub const Packer = struct {
         while (end > 0 and sig[end - 1] == 0) end -= 1;
         const store = sig[0..end];
 
-        // Order-bearing tail: [E as a struple int][base-100 digits][terminator].
-        var tail = std.ArrayList(u8).init(self.list.allocator);
-        defer tail.deinit();
-        try encodeFixedInt(&tail, adj_exp);
+        // Order-bearing tail: [E as a struple int][base-100 digits][terminator],
+        // built in the reused scratch buffer (no per-call alloc).
+        const tail = &self.dec_scratch;
+        tail.clearRetainingCapacity();
+        try encodeFixedInt(tail, adj_exp);
         var i: usize = 0;
         while (i < store.len) : (i += 2) {
             const hi: u16 = store[i];
@@ -363,7 +382,11 @@ pub const Packer = struct {
         try tail.append(tc.terminator);
 
         try self.list.append(if (negative) dec_sign_neg else dec_sign_pos);
-        for (tail.items) |b| try self.list.append(if (negative) ~b else b);
+        if (negative) {
+            for (tail.items) |b| try self.list.append(~b);
+        } else {
+            try self.list.appendSlice(tail.items); // positive: bulk-copy, no complement
+        }
     }
 
     /// Append a decimal parsed from text: `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`.
@@ -446,9 +469,8 @@ pub const Packer = struct {
     /// pairs; they are sorted by key into canonical order. (Duplicate keys are
     /// the caller's responsibility.)
     pub fn appendMap(self: *Packer, entries: []const [2][]const u8) EncodeError!void {
-        const allocator = self.list.allocator;
-        const idx = try allocator.alloc(usize, entries.len);
-        defer allocator.free(idx);
+        try self.idx_scratch.resize(entries.len);
+        const idx = self.idx_scratch.items;
         for (idx, 0..) |*x, i| x.* = i;
         std.mem.sort(usize, idx, entries, lessByKey);
 
@@ -463,9 +485,8 @@ pub const Packer = struct {
     /// Append a set. `elements` (each an element encoding) are sorted and
     /// de-duplicated into canonical order.
     pub fn appendSet(self: *Packer, elements: []const []const u8) EncodeError!void {
-        const allocator = self.list.allocator;
-        const idx = try allocator.alloc(usize, elements.len);
-        defer allocator.free(idx);
+        try self.idx_scratch.resize(elements.len);
+        const idx = self.idx_scratch.items;
         for (idx, 0..) |*x, i| x.* = i;
         std.mem.sort(usize, idx, elements, lessBySlice);
 
@@ -867,10 +888,18 @@ fn decodeF64(p: *const [8]u8) f64 {
 // ---------------------------------------------------------------------------
 
 /// Append `content` with `0x00 -> 0x00 0xFF` escaping (no type code, no terminator).
+/// Bulk-copies the runs between `0x00` bytes so the common (escape-free) case is a
+/// single `appendSlice` rather than a per-byte loop.
 fn writeEscaped(list: *std.ArrayList(u8), content: []const u8) EncodeError!void {
-    for (content) |b| {
-        try list.append(b);
-        if (b == 0x00) try list.append(escape_byte);
+    var i: usize = 0;
+    while (i < content.len) {
+        const start = i;
+        while (i < content.len and content[i] != 0x00) i += 1;
+        try list.appendSlice(content[start..i]);
+        if (i < content.len) {
+            try list.appendSlice(&[_]u8{ 0x00, escape_byte });
+            i += 1;
+        }
     }
 }
 

@@ -966,11 +966,20 @@ public final class Struple {
     // -----------------------------------------------------------------------
 
     private static void writeEscaped(ByteBuf out, byte[] content) {
-        for (byte b : content) {
-            out.add(b & 0xFF);
-            if ((b & 0xFF) == 0x00) {
+        // Run-length escaping: bulk-copy the runs between literal 0x00 bytes
+        // (the common case is a single run with no 0x00). Output is identical to
+        // the per-byte form — each 0x00 is still followed by the 0xFF companion.
+        int n = content.length;
+        int run = 0;
+        for (int i = 0; i < n; i++) {
+            if (content[i] == 0x00) {
+                out.addBytes(content, run, i - run + 1); // run + the 0x00 itself
                 out.add(ESCAPE_BYTE);
+                run = i + 1;
             }
+        }
+        if (run < n) {
+            out.addBytes(content, run, n - run);
         }
     }
 
@@ -1054,8 +1063,27 @@ public final class Struple {
         }
 
         void addAll(byte[] bs) {
-            for (byte b : bs) {
-                add(b & 0xFF);
+            addBytes(bs, 0, bs.length);
+        }
+
+        /** Bulk-append {@code len} bytes from {@code src} starting at {@code off}. */
+        void addBytes(byte[] src, int off, int len) {
+            if (len <= 0) {
+                return;
+            }
+            ensure(len);
+            System.arraycopy(src, off, data, this.len, len);
+            this.len += len;
+        }
+
+        private void ensure(int extra) {
+            int need = len + extra;
+            if (need > data.length) {
+                int cap = data.length;
+                while (cap < need) {
+                    cap <<= 1;
+                }
+                data = Arrays.copyOf(data, cap);
             }
         }
 

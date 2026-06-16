@@ -1,0 +1,16 @@
+name: struple_bench
+description: >-
+  struple encode/decode throughput benchmark (Dart). Reads the shared workload
+  in bench/data/*.json, rebuilds each payload with the struple codec, verifies
+  byte-identity against bench/payloads.json, and reports median ns/op.
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+# No external (network) pub dependencies — only a local path dependency on the
+# struple package in this same repo (the Dart analog of the Go bench's `replace`
+# directive). Nothing is fetched from pub.dev.
+dependencies:
+  struple:
+    path: ../../dart

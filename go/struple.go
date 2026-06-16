@@ -292,26 +292,28 @@ func (w *Writer) AppendDecimal(negative bool, digits []byte, exp int) {
 	store := sig[:end]
 
 	// Order-bearing tail: [E as a struple int][base-100 digits][terminator].
-	var tail []byte
-	tail = appendFixedInt(tail, big.NewInt(adjExp))
+	// Built directly into w.buf (no per-call scratch slice); for negatives the
+	// appended tail is bit-complemented in place afterwards.
+	if negative {
+		w.buf = append(w.buf, decSignNeg)
+	} else {
+		w.buf = append(w.buf, decSignPos)
+	}
+	tailStart := len(w.buf)
+	w.buf = appendFixedInt(w.buf, big.NewInt(adjExp))
 	for i := 0; i < len(store); i += 2 {
 		hi := int(store[i])
 		lo := 0
 		if i+1 < len(store) {
 			lo = int(store[i+1])
 		}
-		tail = append(tail, byte(hi*10+lo+1)) // pair 0..99 -> byte 1..100
+		w.buf = append(w.buf, byte(hi*10+lo+1)) // pair 0..99 -> byte 1..100
 	}
-	tail = append(tail, tcTerminator)
-
+	w.buf = append(w.buf, tcTerminator)
 	if negative {
-		w.buf = append(w.buf, decSignNeg)
-		for _, b := range tail {
-			w.buf = append(w.buf, ^b)
+		for i := tailStart; i < len(w.buf); i++ {
+			w.buf[i] = ^w.buf[i]
 		}
-	} else {
-		w.buf = append(w.buf, decSignPos)
-		w.buf = append(w.buf, tail...)
 	}
 }
 
@@ -487,12 +489,18 @@ func (w *Writer) writeBigIntFields(mag []byte, complement bool) {
 }
 
 func (w *Writer) writeEscaped(content []byte) {
-	for _, b := range content {
-		w.buf = append(w.buf, b)
-		if b == 0x00 {
+	// Bulk-copy the runs between literal 0x00 bytes, inserting the escape byte at
+	// each 0x00 — far cheaper than appending one byte at a time when escapes are
+	// rare (the common case for text/UTF-8 payloads).
+	start := 0
+	for i := 0; i < len(content); i++ {
+		if content[i] == 0x00 {
+			w.buf = append(w.buf, content[start:i+1]...)
 			w.buf = append(w.buf, escapeByte)
+			start = i + 1
 		}
 	}
+	w.buf = append(w.buf, content[start:]...)
 }
 
 func (w *Writer) writeFramed(typeCode byte, content []byte) {

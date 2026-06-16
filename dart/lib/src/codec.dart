@@ -475,10 +475,24 @@ class Writer {
   }
 
   void _writeEscaped(List<int> content) {
-    for (final b in content) {
-      _byte(b);
-      if (b == 0x00) _byte(_escapeByte);
+    // Run-length escaping: bulk-copy the spans between literal 0x00 bytes
+    // (`add` blits a slice) instead of dispatching `addByte` per byte; insert
+    // the `0x00 0xFF` pair only at each zero. Byte-identical to the per-byte
+    // form. The common case (a span with no zeros — most strings/containers)
+    // becomes a single slice copy.
+    final n = content.length;
+    if (n == 0) return;
+    final src = content is Uint8List ? content : Uint8List.fromList(content);
+    var start = 0;
+    for (var i = 0; i < n; i++) {
+      if (src[i] == 0x00) {
+        if (i > start) _bb.add(Uint8List.sublistView(src, start, i));
+        _bb.addByte(0x00);
+        _bb.addByte(_escapeByte);
+        start = i + 1;
+      }
     }
+    if (start < n) _bb.add(Uint8List.sublistView(src, start, n));
   }
 
   void _writeFramed(int typeCode, List<int> content) {
@@ -748,14 +762,41 @@ void _reencodeDecimal(Writer w, Decimal d) {
 // ---------------------------------------------------------------------------
 
 /// Converts a framed payload (0x00 0xFF -> 0x00) into its literal inner bytes
-/// (a fresh slice).
+/// (a fresh slice). Single-pass, run-length: bulk-copies the spans between the
+/// escaped zeros (`setRange` blits a slice) rather than dispatching per byte.
+/// The unescaped length is always <= the framed length, so the output buffer is
+/// sized once up front. Byte-identical to the per-byte form.
 Uint8List unescape(Uint8List framed) {
-  final out = BytesBuilder(copy: false);
-  for (var i = 0; i < framed.length; i++) {
-    out.addByte(framed[i]);
-    if (framed[i] == 0x00) i++; // skip the escape byte
+  final n = framed.length;
+  // Fast path: no literal 0x00 means no escapes — copy the slice directly.
+  var firstZero = -1;
+  for (var i = 0; i < n; i++) {
+    if (framed[i] == 0x00) {
+      firstZero = i;
+      break;
+    }
   }
-  return out.toBytes();
+  if (firstZero == -1) return Uint8List.fromList(framed);
+
+  final out = Uint8List(n); // upper bound; truncated via a view at the end
+  // Copy the escape-free prefix in one blit.
+  out.setRange(0, firstZero, framed);
+  var w = firstZero;
+  var start = firstZero;
+  for (var i = firstZero; i < n; i++) {
+    if (framed[i] == 0x00) {
+      final run = i - start + 1; // include the literal 0x00 itself
+      out.setRange(w, w + run, framed, start);
+      w += run;
+      i++; // skip the 0xFF escape companion
+      start = i + 1;
+    }
+  }
+  if (start < n) {
+    out.setRange(w, w + (n - start), framed, start);
+    w += n - start;
+  }
+  return Uint8List.sublistView(out, 0, w);
 }
 
 // ---------------------------------------------------------------------------
