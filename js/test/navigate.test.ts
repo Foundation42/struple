@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pack, encode, view, View, MapView, Reader } from "../src/index.ts";
+import { pack, encode, view, View, MapView, IndexedMap, Reader } from "../src/index.ts";
 
 function intOf(bytes: Uint8Array): bigint {
   const e = new Reader(bytes).next();
@@ -54,4 +54,48 @@ test("navigate: map lookup", () => {
   assert.equal(m.get(encode("z")), null);
   assert.equal(m.get(encode("aa")), null);
   assert.deepEqual([...m.entries()].map(([k]) => strOf(k)), ["a", "b", "c"]);
+});
+
+test("navigate: indexed map (O(log n) get, positional at)", () => {
+  // eight entries "a".."h" -> 1..8, fed out of order so canonicalization sorts them
+  const keys = ["h", "c", "a", "g", "d", "f", "b", "e"];
+  const m = new Map<unknown, unknown>(keys.map((k, i) => [k, BigInt(i + 1)]));
+  const v = view(encode(m));
+  assert.ok(v.isMap());
+  const inner = v.containedItems()!;
+  const im = new IndexedMap(inner);
+
+  assert.equal(im.count(), 8);
+
+  // at() walks canonical (sorted) order: a,b,c,...,h
+  const sorted = "abcdefgh";
+  for (let i = 0; i < sorted.length; i++) {
+    assert.equal(strOf(im.at(i)![0]), sorted[i]);
+  }
+  assert.equal(im.at(8), null); // out of range
+
+  // get() binary-searches; agrees with the linear MapView.get on every key
+  const mv = new MapView(inner);
+  for (const ch of sorted) {
+    const key = encode(ch);
+    const want = mv.get(key)!;
+    assert.equal(hex(im.get(key)!), hex(want));
+  }
+  // "e" was inserted 8th (value 8) but sits at sorted position 4 — get still finds it
+  assert.equal(im.find(encode("e")), 4);
+  assert.equal(intOf(im.get(encode("e"))!), 8n);
+
+  // misses: before, between, and after the key range
+  assert.equal(im.get(encode("A")), null); // below "a"
+  assert.equal(im.get(encode("cc")), null); // between "c" and "d"
+  assert.equal(im.get(encode("z")), null); // above "h"
+  assert.equal(im.find(encode("a")), 0);
+  assert.equal(im.find(encode("h")), 7);
+
+  // iterator yields the same canonical order
+  assert.deepEqual([...im].map(([k]) => strOf(k)), [...sorted]);
+  assert.equal([...im].length, 8);
+
+  // mapView.indexed() shortcut builds the same index
+  assert.equal(mv.indexed().count(), 8);
 });

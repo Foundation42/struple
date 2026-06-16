@@ -186,6 +186,46 @@ typedef struct {
 struple_map_iter struple_map_iterator(struple_map m);
 int struple_map_next(struple_map_iter *it, struple_view *key, struple_view *value); /* 1/0/-1 */
 
+/* ---- Indexed map (O(log n) get, O(1) positional at) ----
+ *
+ * A map's entries materialized into a random-access index: one O(n) pass over
+ * the inner stream populates a heap array, after which `get` is an O(log n)
+ * binary search (canonical key order means a key memcmp *is* the sort order)
+ * and `at` is O(1). The entry slices borrow the inner stream, so keep the inner
+ * buffer alive for the index's lifetime. Use `struple_map_get` for a single
+ * lookup (zero-alloc); reach for this when you do many lookups, or need
+ * positional access, on the same map. */
+
+typedef struct {
+    const uint8_t *key;
+    size_t key_len;
+    const uint8_t *value;
+    size_t value_len;
+} struple_indexed_entry;
+
+typedef struct {
+    struple_indexed_entry *entries;
+    size_t count;
+} struple_indexed_map;
+
+/* Build the index from a map's *inner* stream (the un-escaped body from
+ * struple_view_contained_items). Returns 0 on success (fills *out; free it with
+ * struple_indexed_map_free), -1 on a malformed stream or out-of-memory. */
+int struple_indexed_map_init(struple_indexed_map *out, const uint8_t *inner, size_t len);
+void struple_indexed_map_free(struple_indexed_map *m);
+
+/* Number of entries — O(1). */
+size_t struple_indexed_map_count(const struple_indexed_map *m);
+/* The entry at `index` in canonical (sorted) order — O(1). 1 found (fills
+ * *out), 0 out of range. */
+int struple_indexed_map_at(const struple_indexed_map *m, size_t index, struple_indexed_entry *out);
+/* Look up an encoded key — O(log n) binary search. 1 found (fills *out), 0 not
+ * found. */
+int struple_indexed_map_get(const struple_indexed_map *m, const uint8_t *key, size_t keylen, struple_view *out);
+/* The index of `key` in canonical order — O(log n). 1 found (sets *out_index),
+ * 0 not found. */
+int struple_indexed_map_find(const struple_indexed_map *m, const uint8_t *key, size_t keylen, size_t *out_index);
+
 /* ---- ordering / round-trip ---- */
 
 /* Lexicographic byte comparison: -1, 0, or 1. */

@@ -97,6 +97,18 @@ const m = struple.MapView.init(inner);
 var it = m.iterator();        // (key, value) views, in sorted order
 ```
 
+For repeated lookups (or positional access) on the same map, build an
+`IndexedMap` once — a single O(n) pass materializes the entries, after which
+`get`/`find` are **O(log n)** binary searches (a key `memcmp` *is* the sort
+order) and `at`/`count` are O(1):
+
+```zig
+var im = try struple.IndexedMap.init(allocator, inner);  // or m.indexed(allocator)
+defer im.deinit(allocator);
+(im.get(encoded_key)).?;   // O(log n) → value bytes
+im.at(0);                  // O(1) → (key, value) at a sorted position
+```
+
 The streaming `Reader` also gains a cursor surface: `peekType`, `nextView` (the
 next element's raw bytes), `skip`, and `rest`.
 

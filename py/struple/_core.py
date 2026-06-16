@@ -845,6 +845,73 @@ class MapView:
                 return None
         return None
 
+    def indexed(self) -> "IndexedMap":
+        """Materialize a random-access index for O(log n) ``get`` and O(1)
+        ``at`` (see :class:`IndexedMap`). One O(n) pass over the inner stream."""
+        return IndexedMap(self.inner)
+
+
+class IndexedMap:
+    """A map's entries materialized into a random-access index. Building it is one
+    O(n) pass over the inner stream (from ``View.contained_items``); thereafter
+    ``get`` is an O(log n) binary search (canonical key order means a key byte
+    compare *is* the sort order) and ``at`` is O(1).
+
+    Reach for this when you do many lookups, or need positional access, on the
+    same map; use :class:`MapView` directly for a single zero-build lookup. The
+    entry slices borrow the inner stream, so keep it alive for this index's life.
+    """
+
+    def __init__(self, inner: bytes) -> None:
+        entries: list[tuple[bytes, bytes]] = []
+        r = Reader(inner)
+        while True:
+            k = r.next_view()
+            if k is None:
+                break
+            v = r.next_view()
+            if v is None:
+                raise ValueError("struple: malformed map")
+            entries.append((k, v))
+        self.entries = entries
+
+    def count(self) -> int:
+        """Number of entries — O(1)."""
+        return len(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def at(self, index: int):
+        """The ``(key, value)`` entry at ``index`` in canonical (sorted) order —
+        O(1); None if out of range."""
+        if 0 <= index < len(self.entries):
+            return self.entries[index]
+        return None
+
+    def find(self, key: bytes):
+        """The index of ``key`` in canonical order, or None — O(log n)."""
+        lo, hi = 0, len(self.entries)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            k = self.entries[mid][0]
+            if k == key:
+                return mid
+            if k < key:
+                lo = mid + 1
+            else:
+                hi = mid
+        return None
+
+    def get(self, key: bytes):
+        """Look up the value bytes for an encoded key — O(log n) binary search."""
+        i = self.find(key)
+        return self.entries[i][1] if i is not None else None
+
+    def __iter__(self):
+        """Entries in canonical (sorted) order."""
+        return iter(self.entries)
+
 
 # ---------------------------------------------------------------------------
 # Semantic (value-based) ordering

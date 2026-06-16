@@ -5,8 +5,8 @@ Encoded bytes are directly comparable: ``compare(pack(a), pack(b))`` (and plain
 """
 
 from ._core import (
-    MapView, Reader, View, Writer, compare, encode, pack, semantic_eq,
-    semantic_order, transcode, unpack, view,
+    IndexedMap, MapView, Reader, View, Writer, compare, encode, pack,
+    semantic_eq, semantic_order, transcode, unpack, view,
 )
 from ._json import from_json, to_json
 
@@ -22,6 +22,7 @@ __all__ = [
     "Writer",
     "View",
     "MapView",
+    "IndexedMap",
     "view",
     "from_json",
     "to_json",

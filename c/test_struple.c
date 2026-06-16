@@ -263,6 +263,123 @@ int main(void) {
         struple_writer_free(&kz); struple_writer_free(&mp); struple_writer_free(&minner);
     }
 
+    /* indexed map (O(log n) get, positional at) */
+    {
+        /* eight entries "a".."h" -> 1..8, fed out of order so canonicalization sorts them */
+        const char *order = "hcagdfbe";
+        struple_writer kw[8], vw[8];
+        struple_kv entries[8];
+        for (int i = 0; i < 8; i++) {
+            struple_writer_init(&kw[i]);
+            struple_append_string(&kw[i], &order[i], 1);
+            struple_writer_init(&vw[i]);
+            struple_append_int(&vw[i], i + 1); /* value = insertion index + 1 */
+            entries[i].key = (struple_bytes){kw[i].data, kw[i].len};
+            entries[i].value = (struple_bytes){vw[i].data, vw[i].len};
+        }
+        struple_writer mp, minner;
+        struple_writer_init(&mp);
+        struple_append_map(&mp, entries, 8); /* sorts the entries array in place */
+        struple_view mv = {mp.data, mp.len};
+        struple_writer_init(&minner);
+        struple_view_contained_items(mv, &minner);
+        struple_map m = {minner.data, minner.len};
+
+        struple_indexed_map im;
+        CHECK(struple_indexed_map_init(&im, minner.data, minner.len) == 0, "indexed init");
+        CHECK(struple_indexed_map_count(&im) == 8, "indexed count");
+
+        /* at() walks canonical (sorted) order: a,b,c,...,h */
+        for (int i = 0; i < 8; i++) {
+            struple_indexed_entry e;
+            CHECK(struple_indexed_map_at(&im, (size_t)i, &e) == 1, "indexed at in range");
+            struple_reader r;
+            struple_reader_init(&r, e.key, e.key_len);
+            struple_element el;
+            struple_reader_next(&r, &el);
+            CHECK(el.kind == STRUPLE_STRING && el.data_len == 1 && el.data[0] == (uint8_t)('a' + i),
+                  "indexed at sorted key");
+            struple_reader_free(&r);
+        }
+        struple_indexed_entry oob;
+        CHECK(struple_indexed_map_at(&im, 8, &oob) == 0, "indexed at out of range");
+
+        /* get() binary-searches; agrees with the linear map get on every key */
+        for (int i = 0; i < 8; i++) {
+            char ch = (char)('a' + i);
+            struple_writer kq;
+            struple_writer_init(&kq);
+            struple_append_string(&kq, &ch, 1);
+            struple_view linear, indexed;
+            int lr = struple_map_get(m, kq.data, kq.len, &linear);
+            int ir = struple_indexed_map_get(&im, kq.data, kq.len, &indexed);
+            CHECK(lr == 1 && ir == 1, "indexed get hit");
+            CHECK(lr == ir &&
+                  struple_compare(linear.bytes, linear.len, indexed.bytes, indexed.len) == 0,
+                  "indexed get agrees with linear get");
+            struple_writer_free(&kq);
+        }
+
+        /* "e" was inserted 8th (value 8) but sits at sorted position 4 — get still finds it */
+        {
+            struple_writer ke;
+            struple_writer_init(&ke);
+            struple_append_string(&ke, "e", 1);
+            size_t idx;
+            CHECK(struple_indexed_map_find(&im, ke.data, ke.len, &idx) == 1 && idx == 4,
+                  "indexed find(e)==4");
+            struple_view got;
+            CHECK(struple_indexed_map_get(&im, ke.data, ke.len, &got) == 1, "indexed get(e) hit");
+            struple_reader r;
+            struple_reader_init(&r, got.bytes, got.len);
+            struple_element el;
+            struple_reader_next(&r, &el);
+            CHECK(el.kind == STRUPLE_INT && el.int_val == 8, "indexed get(e)==8");
+            struple_reader_free(&r);
+            struple_writer_free(&ke);
+        }
+
+        /* misses: before, between, and after the key range */
+        {
+            const char *misses[3] = {"A", "cc", "z"}; /* below "a", between c/d, above "h" */
+            size_t mlen[3] = {1, 2, 1};
+            for (int i = 0; i < 3; i++) {
+                struple_writer km;
+                struple_writer_init(&km);
+                struple_append_string(&km, misses[i], mlen[i]);
+                struple_view got;
+                size_t idx;
+                CHECK(struple_indexed_map_get(&im, km.data, km.len, &got) == 0, "indexed get miss");
+                CHECK(struple_indexed_map_find(&im, km.data, km.len, &idx) == 0, "indexed find miss");
+                struple_writer_free(&km);
+            }
+        }
+
+        /* find at the ends */
+        {
+            struple_writer ka, kh;
+            struple_writer_init(&ka);
+            struple_append_string(&ka, "a", 1);
+            struple_writer_init(&kh);
+            struple_append_string(&kh, "h", 1);
+            size_t idx;
+            CHECK(struple_indexed_map_find(&im, ka.data, ka.len, &idx) == 1 && idx == 0,
+                  "indexed find(a)==0");
+            CHECK(struple_indexed_map_find(&im, kh.data, kh.len, &idx) == 1 && idx == 7,
+                  "indexed find(h)==7");
+            struple_writer_free(&ka);
+            struple_writer_free(&kh);
+        }
+
+        struple_indexed_map_free(&im);
+        for (int i = 0; i < 8; i++) {
+            struple_writer_free(&kw[i]);
+            struple_writer_free(&vw[i]);
+        }
+        struple_writer_free(&mp);
+        struple_writer_free(&minner);
+    }
+
     if (failures == 0)
         printf("test_struple: all checks passed\n");
     else

@@ -218,6 +218,91 @@ int main() {
         }
     }
 
+    // indexed map (O(log n) get, positional at)
+    {
+        // eight entries "a".."h" -> 1..8, fed out of order so canonicalization sorts them
+        const char* keys = "hcagdfbe";
+        std::vector<std::pair<Bytes, Bytes>> entries;
+        for (size_t i = 0; i < 8; i++)
+            entries.push_back({pack(std::string(1, keys[i])), pack(int64_t(i + 1))});
+        Writer mp;
+        mp.append_map(entries);
+        Bytes mapbuf = mp.take();
+
+        View mv(mapbuf);
+        auto inner = mv.containedItems();
+        CHECK(inner.has_value(), "idx inner");
+        if (inner) {
+            MapView m(*inner);
+            IndexedMap im(*inner);
+
+            CHECK(im.count() == 8, "idx count");
+            CHECK(im.size() == 8, "idx size");
+
+            // at() walks canonical (sorted) order: a,b,c,...,h
+            bool at_ok = true;
+            for (size_t i = 0; i < 8; i++) {
+                auto e = im.at(i);
+                if (!e) { at_ok = false; break; }
+                Reader r(e->key.data, e->key.size);
+                auto el = r.next();
+                if (!el || el->kind != Kind::String || el->str != std::string(1, char('a' + i)))
+                    at_ok = false;
+            }
+            CHECK(at_ok, "idx at sorted order");
+            CHECK(!im.at(8).has_value(), "idx at out of range");
+
+            // get() binary-searches; agrees with the linear MapView.get on every key
+            bool get_ok = true;
+            for (char ch = 'a'; ch <= 'h'; ch++) {
+                Bytes key = pack(std::string(1, ch));
+                auto want = m.get(key);
+                auto got = im.get(key);
+                if (!want || !got ||
+                    compare(want->data, want->size, got->data, got->size) != 0)
+                    get_ok = false;
+            }
+            CHECK(get_ok, "idx get agrees with linear");
+
+            // "e" was inserted 8th (value 8) but sits at sorted position 4
+            auto fe = im.find(pack(std::string("e")));
+            CHECK(fe.has_value() && *fe == 4, "idx find e == 4");
+            auto ve = im.get(pack(std::string("e")));
+            CHECK(ve.has_value(), "idx get e hit");
+            if (ve) {
+                Reader r(ve->data, ve->size);
+                auto el = r.next();
+                CHECK(el && el->kind == Kind::Int && el->integer == 8, "idx get e == 8");
+            }
+
+            // misses: before, between, and after the key range
+            CHECK(!im.get(pack(std::string("A"))).has_value(), "idx miss below");
+            CHECK(!im.get(pack(std::string("cc"))).has_value(), "idx miss between");
+            CHECK(!im.get(pack(std::string("z"))).has_value(), "idx miss above");
+
+            auto fa = im.find(pack(std::string("a")));
+            auto fh = im.find(pack(std::string("h")));
+            CHECK(fa.has_value() && *fa == 0, "idx find a == 0");
+            CHECK(fh.has_value() && *fh == 7, "idx find h == 7");
+
+            // iteration yields the 8 entries in canonical order
+            size_t n = 0;
+            std::vector<std::string> order;
+            for (const auto& e : im) {
+                Reader r(e.key.data, e.key.size);
+                order.push_back(r.next()->str);
+                n++;
+            }
+            CHECK(n == 8, "idx iter count");
+            CHECK(order.size() == 8 && order.front() == "a" && order.back() == "h",
+                  "idx iter order");
+
+            // the indexed() shortcut on MapView yields the same index
+            IndexedMap im2 = m.indexed();
+            CHECK(im2.count() == 8, "idx shortcut count");
+        }
+    }
+
     if (fails == 0)
         std::printf("test_struple: all checks passed\n");
     else

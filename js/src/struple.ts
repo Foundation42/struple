@@ -604,6 +604,72 @@ export class MapView {
     }
     return null;
   }
+  /** Materialize a random-access index for O(log n) `get` and O(1) `at` (see
+   *  IndexedMap). One O(n) pass; entries borrow the inner stream. */
+  indexed(): IndexedMap {
+    return new IndexedMap(this.inner);
+  }
+}
+
+/** A map's entries materialized into a random-access index. Building it is one
+ *  O(n) pass over the inner stream; thereafter `get` is an O(log n) binary search
+ *  (canonical key order means a key byte-compare *is* the sort order) and `at` is
+ *  O(1).
+ *
+ *  Use MapView directly for a single lookup; reach for IndexedMap when you do many
+ *  lookups, or need positional access, on the same map. The entry slices borrow the
+ *  inner stream, so keep it alive for the index's lifetime. */
+export class IndexedMap {
+  readonly entries: ReadonlyArray<[Uint8Array, Uint8Array]>;
+
+  /** Build the index from a map's inner stream (from View.containedItems). */
+  constructor(inner: Uint8Array) {
+    const entries: Array<[Uint8Array, Uint8Array]> = [];
+    const r = new Reader(inner);
+    let k: Uint8Array | null;
+    while ((k = r.nextView()) !== null) {
+      const v = r.nextView();
+      if (v === null) throw new Error("struple: malformed map");
+      entries.push([k, v]);
+    }
+    this.entries = entries;
+  }
+
+  /** Number of entries — O(1). */
+  count(): number {
+    return this.entries.length;
+  }
+
+  /** The [key, value] entry at `index` in canonical (sorted) order — O(1); null
+   *  if out of range. */
+  at(index: number): [Uint8Array, Uint8Array] | null {
+    return index >= 0 && index < this.entries.length ? this.entries[index] : null;
+  }
+
+  /** Look up the value bytes for an encoded key — O(log n) binary search. */
+  get(key: Uint8Array): Uint8Array | null {
+    const i = this.find(key);
+    return i === null ? null : this.entries[i][1];
+  }
+
+  /** The index of `key` in canonical order, or null — O(log n). */
+  find(key: Uint8Array): number | null {
+    let lo = 0;
+    let hi = this.entries.length;
+    while (lo < hi) {
+      const mid = lo + ((hi - lo) >> 1);
+      const c = compare(this.entries[mid][0], key);
+      if (c === 0) return mid;
+      if (c < 0) lo = mid + 1;
+      else hi = mid;
+    }
+    return null;
+  }
+
+  /** Entries in canonical (sorted) order. */
+  [Symbol.iterator](): Iterator<[Uint8Array, Uint8Array]> {
+    return this.entries[Symbol.iterator]();
+  }
 }
 
 // ---------------------------------------------------------------------------

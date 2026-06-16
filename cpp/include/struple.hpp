@@ -888,7 +888,74 @@ public:
         return std::nullopt;
     }
     std::optional<Slice> get(const Bytes& key) const { return get(key.data(), key.size()); }
+
+    /// Materialize a random-access index for O(log n) `get` and O(1) `at` (see
+    /// `IndexedMap`). One O(n) pass; the entry slices borrow this map's inner
+    /// stream, so keep it alive for the index's lifetime.
+    class IndexedMap indexed() const;
 };
+
+/// A map's entries materialized into a random-access index. Building it is one
+/// O(n) pass over the inner stream; thereafter `get` is an O(log n) binary search
+/// (canonical key order means a key memcmp *is* the sort order) and `at` is O(1).
+///
+/// Use `MapView` directly for a single lookup (zero-alloc); reach for `IndexedMap`
+/// when you do many lookups, or need positional access, on the same map. The entry
+/// slices borrow the inner stream, so keep it alive for the index's lifetime.
+class IndexedMap {
+    std::vector<MapView::Entry> entries_;
+
+public:
+    using Entry = MapView::Entry;
+
+    /// Build the index from a map's *inner* stream (the un-escaped body from
+    /// `View::containedItems`). Keep `inner` alive for the index's lifetime.
+    IndexedMap(const uint8_t* inner, size_t len) {
+        MapView::Iterator it(inner, len);
+        while (auto e = it.next()) entries_.push_back(*e);
+    }
+    IndexedMap(const Bytes& b) : IndexedMap(b.data(), b.size()) {}
+    IndexedMap(Slice s) : IndexedMap(s.data, s.size) {}
+    IndexedMap(const MapView& m) : IndexedMap(m.indexed()) {}
+
+    /// Number of entries — O(1).
+    size_t count() const { return entries_.size(); }
+    size_t size() const { return entries_.size(); }
+
+    /// The entry at `index` in canonical (sorted) order — O(1); nullopt if out of range.
+    std::optional<Entry> at(size_t index) const {
+        if (index < entries_.size()) return entries_[index];
+        return std::nullopt;
+    }
+
+    /// The index of `key` in canonical order, or nullopt — O(log n) binary search.
+    std::optional<size_t> find(const uint8_t* key, size_t keylen) const {
+        size_t lo = 0, hi = entries_.size();
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int c = compare(entries_[mid].key.data, entries_[mid].key.size, key, keylen);
+            if (c == 0) return mid;
+            if (c < 0) lo = mid + 1;
+            else hi = mid;
+        }
+        return std::nullopt;
+    }
+    std::optional<size_t> find(const Bytes& key) const { return find(key.data(), key.size()); }
+
+    /// Look up the value bytes for an encoded key — O(log n). Nullopt if absent.
+    std::optional<Slice> get(const uint8_t* key, size_t keylen) const {
+        if (auto i = find(key, keylen)) return entries_[*i].value;
+        return std::nullopt;
+    }
+    std::optional<Slice> get(const Bytes& key) const { return get(key.data(), key.size()); }
+
+    /// Entries in canonical (sorted) order.
+    const std::vector<Entry>& entries() const { return entries_; }
+    std::vector<Entry>::const_iterator begin() const { return entries_.begin(); }
+    std::vector<Entry>::const_iterator end() const { return entries_.end(); }
+};
+
+inline IndexedMap MapView::indexed() const { return IndexedMap(inner_, len_); }
 
 // --------------------------------------------------------- semantic ordering
 

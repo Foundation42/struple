@@ -1009,6 +1009,12 @@ impl<'a> MapView<'a> {
         }
         Ok(None)
     }
+
+    /// Materialize a random-access index for O(log n) `get` and O(1) `at` (see
+    /// [`IndexedMap`]). One O(n) pass; entries borrow `inner`.
+    pub fn indexed(&self) -> Result<IndexedMap<'a>, Error> {
+        IndexedMap::new(self.inner)
+    }
 }
 
 pub struct EntryIter<'a> {
@@ -1023,6 +1029,71 @@ impl<'a> EntryIter<'a> {
         };
         let v = self.r.next_view()?.ok_or(Error::Truncated)?;
         Ok(Some((k, v)))
+    }
+}
+
+/// A map's entries materialized into a random-access index. Building it is one
+/// O(n) pass over the inner stream; thereafter `get` is an O(log n) binary search
+/// (canonical key order means a key byte-compare *is* the sort order) and `at` is
+/// O(1).
+///
+/// Use [`MapView`] directly for a single lookup (zero-alloc); reach for
+/// `IndexedMap` when you do many lookups, or need positional access, on the same
+/// map. The entry slices borrow the inner stream (`'a`), so keep it alive for the
+/// index's lifetime.
+pub struct IndexedMap<'a> {
+    entries: Vec<(&'a [u8], &'a [u8])>,
+}
+
+impl<'a> IndexedMap<'a> {
+    /// Build the index from a map's *inner* stream (the un-escaped body from
+    /// [`View::contained_items`]). Keep `inner` alive for the index's lifetime.
+    pub fn new(inner: &'a [u8]) -> Result<Self, Error> {
+        let mut entries = Vec::new();
+        let mut r = Reader::new(inner);
+        while let Some(k) = r.next_view()? {
+            let v = r.next_view()?.ok_or(Error::Truncated)?;
+            entries.push((k, v));
+        }
+        Ok(IndexedMap { entries })
+    }
+
+    /// Number of entries — O(1).
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Number of entries — O(1). Alias for [`count`](Self::count).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the map has no entries — O(1).
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The entry at `index` in canonical (sorted) order — O(1); None if out of range.
+    pub fn at(&self, index: usize) -> Option<(&'a [u8], &'a [u8])> {
+        self.entries.get(index).copied()
+    }
+
+    /// Look up `key` (an encoded key element) — O(log n) binary search. Returns the
+    /// value's encoded bytes, or None.
+    pub fn get(&self, key: &[u8]) -> Option<&'a [u8]> {
+        self.find(key).map(|i| self.entries[i].1)
+    }
+
+    /// The index of `key` in canonical order, or None — O(log n).
+    pub fn find(&self, key: &[u8]) -> Option<usize> {
+        self.entries
+            .binary_search_by(|(k, _)| k.cmp(&key))
+            .ok()
+    }
+
+    /// Entries in canonical (sorted) order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
+        self.entries.iter().copied()
     }
 }
 

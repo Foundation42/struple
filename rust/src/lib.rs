@@ -20,7 +20,7 @@ pub mod json;
 mod semantic;
 
 pub use codec::{
-    compare, encode, pack, transcode, unpack, view, Decimal, Element, EntryIter, Error, MapView,
-    Reader, Value, View, Writer,
+    compare, encode, pack, transcode, unpack, view, Decimal, Element, EntryIter, Error, IndexedMap,
+    MapView, Reader, Value, View, Writer,
 };
 pub use semantic::{semantic_eq, semantic_order};

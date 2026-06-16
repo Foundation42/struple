@@ -1053,6 +1053,88 @@ int struple_map_get(struple_map m, const uint8_t *key, size_t keylen, struple_vi
     return 0;
 }
 
+/* ------------------------------------------------------------ indexed map */
+
+int struple_indexed_map_init(struple_indexed_map *out, const uint8_t *inner, size_t len) {
+    out->entries = NULL;
+    out->count = 0;
+    struple_reader r;
+    struple_reader_init(&r, inner, len);
+    struple_indexed_entry *entries = NULL;
+    size_t count = 0, cap = 0;
+    const uint8_t *kp;
+    size_t kl;
+    int rc;
+    while ((rc = struple_reader_next_view(&r, &kp, &kl)) == 1) {
+        const uint8_t *vp;
+        size_t vl;
+        if (struple_reader_next_view(&r, &vp, &vl) != 1) { /* truncated: key with no value */
+            free(entries);
+            return -1;
+        }
+        if (count + 1 > cap) {
+            cap = cap ? cap * 2 : 8;
+            struple_indexed_entry *ne = (struple_indexed_entry *)realloc(entries, cap * sizeof *ne);
+            if (!ne) {
+                free(entries);
+                return -1;
+            }
+            entries = ne;
+        }
+        entries[count].key = kp;
+        entries[count].key_len = kl;
+        entries[count].value = vp;
+        entries[count].value_len = vl;
+        count++;
+    }
+    if (rc < 0) { /* malformed element span */
+        free(entries);
+        return -1;
+    }
+    out->entries = entries;
+    out->count = count;
+    return 0;
+}
+
+void struple_indexed_map_free(struple_indexed_map *m) {
+    free(m->entries);
+    m->entries = NULL;
+    m->count = 0;
+}
+
+size_t struple_indexed_map_count(const struple_indexed_map *m) {
+    return m->count;
+}
+
+int struple_indexed_map_at(const struple_indexed_map *m, size_t index, struple_indexed_entry *out) {
+    if (index >= m->count) return 0;
+    *out = m->entries[index];
+    return 1;
+}
+
+int struple_indexed_map_find(const struple_indexed_map *m, const uint8_t *key, size_t keylen, size_t *out_index) {
+    size_t lo = 0, hi = m->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = struple_compare(m->entries[mid].key, m->entries[mid].key_len, key, keylen);
+        if (c == 0) {
+            *out_index = mid;
+            return 1;
+        }
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return 0;
+}
+
+int struple_indexed_map_get(const struple_indexed_map *m, const uint8_t *key, size_t keylen, struple_view *out) {
+    size_t i;
+    if (!struple_indexed_map_find(m, key, keylen, &i)) return 0;
+    out->bytes = m->entries[i].value;
+    out->len = m->entries[i].value_len;
+    return 1;
+}
+
 /* ------------------------------------------------------------ semantic order */
 
 static int sem_class_rank(struple_kind k) {
