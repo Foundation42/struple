@@ -55,6 +55,17 @@ const build_ops = [_][]const u8{
     "{\"uuid\":\"550e8400e29b41d4a716446655440000\"}",
     "{\"uuid\":\"ffffffffffffffffffffffffffffffff\"}",
     "{\"array\":[{\"uuid\":\"00112233445566778899aabbccddeeff\"},{\"string\":\"x\"}]}",
+    // decimals: canonicalization (trailing/leading zeros), both signs, scale extremes
+    "{\"decimal\":\"0\"}",
+    "{\"decimal\":\"12.345\"}",
+    "{\"decimal\":\"-12.345\"}",
+    "{\"decimal\":\"100\"}",
+    "{\"decimal\":\"0.001\"}",
+    "{\"decimal\":\"12.300\"}", // canonicalizes to 12.3
+    "{\"decimal\":\"-0.5\"}",
+    "{\"decimal\":\"123456789012345678901234567890.123456789\"}", // wide coefficient
+    "{\"decimal\":\"1e-9\"}",
+    "{\"array\":[{\"decimal\":\"1.5\"},{\"string\":\"x\"}]}",
 };
 
 pub fn main() !void {
@@ -138,6 +149,14 @@ fn sundef(a: std.mem.Allocator) []const u8 {
     p.appendUndefined() catch unreachable;
     return p.toOwnedSlice() catch unreachable;
 }
+fn sdec(a: std.mem.Allocator, s: []const u8) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendDecimalString(s) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn sjson(a: std.mem.Allocator, text: []const u8) []const u8 {
+    return struple.fromJson(a, text) catch unreachable;
+}
 fn sarr(a: std.mem.Allocator, elems: []const []const u8) []const u8 {
     var child = std.ArrayList(u8).init(a);
     for (elems) |e| child.appendSlice(e) catch unreachable;
@@ -192,6 +211,18 @@ fn emitSemantic(a: std.mem.Allocator) !void {
     // plain integer ordering (incl. big-int vs fixed)
     P.add(&pairs, sp(a, @as(i64, -5)), sp(a, @as(i64, 5))); // lt
     P.add(&pairs, sbig(a, false, &m200), sp(a, @as(i128, 1) << 120)); // gt (big > fixed)
+    // decimals join the number class and compare by exact value
+    P.add(&pairs, sdec(a, "5"), sp(a, @as(i64, 5))); // eq (decimal == int)
+    P.add(&pairs, sdec(a, "5.0"), sf64(a, 5.0)); // eq (decimal == float)
+    P.add(&pairs, sdec(a, "1.50"), sdec(a, "1.5")); // eq (canonical decimal-decimal)
+    P.add(&pairs, sdec(a, "1.5"), sdec(a, "1.6")); // lt
+    P.add(&pairs, sdec(a, "0.1"), sf64(a, 0.1)); // lt (0.1 is not exactly representable in f64)
+    P.add(&pairs, sdec(a, "2.5"), sf64(a, 2.5)); // eq (2.5 is exact in binary)
+    P.add(&pairs, sdec(a, "123.5"), sp(a, @as(i64, 123))); // gt
+    P.add(&pairs, sdec(a, "-7.25"), sf64(a, -7.25)); // eq
+    P.add(&pairs, sdec(a, "1e30"), sdec(a, "1000000000000000000000000000000")); // eq (decimal-decimal, exp form)
+    P.add(&pairs, sdec(a, "1e40"), sjson(a, "10000000000000000000000000000000000000000")); // eq (decimal == big-int 10^40)
+    P.add(&pairs, sdec(a, "1e308"), sf64(a, 1.0e308)); // exact decimal 10^308 vs the nearest f64
     // cross-type classes
     P.add(&pairs, sp(a, null), sp(a, false)); // nil < bool
     P.add(&pairs, sundef(a), sp(a, true)); // undefined < bool
@@ -276,6 +307,8 @@ fn buildInto(a: std.mem.Allocator, p: *struple.Packer, op: std.json.Value) !void
     } else if (std.mem.eql(u8, key, "uuid")) {
         const raw = try hexDecode(a, val.string);
         try p.appendUuid(raw[0..16].*);
+    } else if (std.mem.eql(u8, key, "decimal")) {
+        try p.appendDecimalString(val.string);
     } else if (std.mem.eql(u8, key, "string")) {
         try p.appendString(val.string);
     } else if (std.mem.eql(u8, key, "bytes")) {

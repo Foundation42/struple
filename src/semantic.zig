@@ -25,6 +25,7 @@ const Reader = struple.Reader;
 const Element = struple.Element;
 const Kind = struple.Kind;
 const BigInt = struple.BigInt;
+const Decimal = struple.Decimal;
 const DecodeError = struple.DecodeError;
 const Order = std.math.Order;
 const Allocator = std.mem.Allocator;
@@ -60,7 +61,7 @@ fn classRank(k: Kind) u8 {
         .nil => 0,
         .undef => 1,
         .boolean => 2,
-        .int, .big_int, .float32, .float64 => 3, // unified "number" class
+        .int, .big_int, .float32, .float64, .decimal => 3, // unified "number" class
         .timestamp => 4,
         .uuid => 5,
         .string => 6,
@@ -78,7 +79,7 @@ fn compareElements(allocator: Allocator, a: Element, b: Element) SemanticError!O
     return switch (a) {
         .nil, .undef => .eq,
         .boolean => |x| std.math.order(@intFromBool(x), @intFromBool(b.boolean)),
-        .int, .big_int, .float32, .float64 => compareNumbers(allocator, a, b),
+        .int, .big_int, .float32, .float64, .decimal => compareNumbers(allocator, a, b),
         .timestamp => |x| std.math.order(x, b.timestamp),
         .uuid => |x| std.mem.order(u8, &x, &b.uuid),
         // string/bytes content order == framed-byte order (the wire format is
@@ -106,7 +107,7 @@ fn semanticOrderContainer(allocator: Allocator, fa: []const u8, fb: []const u8) 
 // Rank within the number class: -inf < finite < +inf < NaN.
 fn numClass(e: Element) u8 {
     const f: f64 = switch (e) {
-        .int, .big_int => return 1, // integers are always finite
+        .int, .big_int, .decimal => return 1, // integers and decimals are always finite
         .float32 => |x| x,
         .float64 => |x| x,
         else => unreachable,
@@ -138,6 +139,7 @@ fn floatVal(e: Element) f64 {
 }
 
 fn compareFinite(allocator: Allocator, a: Element, b: Element) SemanticError!Order {
+    if (a == .decimal or b == .decimal) return compareWithDecimal(allocator, a, b);
     const ai = isIntKind(a);
     const bi = isIntKind(b);
     if (ai and bi) return compareIntInt(a, b);
@@ -281,6 +283,109 @@ fn compareMagToScaled(allocator: Allocator, mag: []const u8, mant: u64, exp: i32
 }
 
 // ---------------------------------------------------------------------------
+// Decimal vs the rest of the number class
+// ---------------------------------------------------------------------------
+
+// An exact base-10 value `sign · mag · 10^exp10` (mag big-endian; empty mag == 0).
+const B10 = struct { sign: i8, mag: []u8, exp10: i64 };
+
+/// Decompose an int / big-int / decimal into its exact base-10 value (allocates `mag`).
+fn numToB10(allocator: Allocator, e: Element) SemanticError!B10 {
+    switch (e) {
+        .int => |v| {
+            if (v == 0) return .{ .sign = 0, .mag = try allocator.alloc(u8, 0), .exp10 = 0 };
+            const N: u128 = if (v < 0) @as(u128, @intCast(-(v + 1))) + 1 else @intCast(v);
+            var buf: [16]u8 = undefined;
+            std.mem.writeInt(u128, &buf, N, .big);
+            return .{ .sign = if (v < 0) -1 else 1, .mag = try allocator.dupe(u8, trimLeadingZeros(&buf)), .exp10 = 0 };
+        },
+        .big_int => |bi| return .{ .sign = if (bi.negative) -1 else 1, .mag = try bi.magnitudeAlloc(allocator), .exp10 = 0 },
+        .decimal => |d| {
+            if (d.isZero()) return .{ .sign = 0, .mag = try allocator.alloc(u8, 0), .exp10 = 0 };
+            const digbuf = try allocator.alloc(u8, d.coeff_stored.len * 2);
+            defer allocator.free(digbuf);
+            const mag = try decDigitsToMag(allocator, d.coefficientDigits(digbuf));
+            return .{ .sign = if (d.negative) -1 else 1, .mag = mag, .exp10 = d.exponent() };
+        },
+        else => unreachable,
+    }
+}
+
+fn isExactKind(e: Element) bool {
+    return e == .int or e == .big_int or e == .decimal;
+}
+
+fn compareWithDecimal(allocator: Allocator, a: Element, b: Element) SemanticError!Order {
+    if (isExactKind(a) and isExactKind(b)) {
+        const va = try numToB10(allocator, a);
+        defer allocator.free(va.mag);
+        const vb = try numToB10(allocator, b);
+        defer allocator.free(vb.mag);
+        if (va.sign != vb.sign) return std.math.order(va.sign, vb.sign);
+        if (va.sign == 0) return .eq;
+        const c = try compareB10Mag(allocator, va, vb);
+        return if (va.sign < 0) c.invert() else c;
+    }
+    // exactly one side is a finite float
+    if (isExactKind(a)) {
+        const va = try numToB10(allocator, a);
+        defer allocator.free(va.mag);
+        return compareB10Float(allocator, va, floatVal(b));
+    }
+    const vb = try numToB10(allocator, b);
+    defer allocator.free(vb.mag);
+    return (try compareB10Float(allocator, vb, floatVal(a))).invert();
+}
+
+/// Compare two same-sign, nonzero base-10 magnitudes (`mag · 10^exp10`), exactly.
+fn compareB10Mag(allocator: Allocator, a: B10, b: B10) SemanticError!Order {
+    const e = @min(a.exp10, b.exp10);
+    const sa = try mulPow10(allocator, a.mag, @intCast(a.exp10 - e));
+    defer allocator.free(sa);
+    const sb = try mulPow10(allocator, b.mag, @intCast(b.exp10 - e));
+    defer allocator.free(sb);
+    return compareMag(sa, sb);
+}
+
+fn compareB10Float(allocator: Allocator, v: B10, f: f64) SemanticError!Order {
+    const sf = signRank(f);
+    if (v.sign != sf) return std.math.order(v.sign, sf);
+    if (v.sign == 0) return .eq; // both zero
+    const d = decompose(@abs(f));
+    const c = try compareB10MagToFloat(allocator, v.mag, v.exp10, d.mant, d.exp);
+    return if (v.sign < 0) c.invert() else c;
+}
+
+/// Compare `mag · 10^exp10` to `mant · 2^e2` (both > 0), exactly. Splits `10^exp10`
+/// into `2^exp10 · 5^exp10` and scales both sides up to integers before comparing.
+fn compareB10MagToFloat(allocator: Allocator, mag: []const u8, exp10: i64, mant: u64, e2: i32) SemanticError!Order {
+    const a_pow2: i64 = @max(@as(i64, 0), @max(-exp10, -@as(i64, e2))); // common 2^ multiplier
+    const b_pow5: i64 = @max(@as(i64, 0), -exp10); // common 5^ multiplier
+
+    // LHS' = mag · 5^(exp10 + b_pow5) · 2^(exp10 + a_pow2)
+    var lhs = try mulPow5(allocator, mag, @intCast(exp10 + b_pow5));
+    {
+        const sh = try shiftLeftBytes(allocator, lhs, @intCast(exp10 + a_pow2));
+        allocator.free(lhs);
+        lhs = sh;
+    }
+    defer allocator.free(lhs);
+
+    // RHS' = mant · 5^(b_pow5) · 2^(e2 + a_pow2)
+    var mant_buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &mant_buf, mant, .big);
+    var rhs = try mulPow5(allocator, trimLeadingZeros(&mant_buf), @intCast(b_pow5));
+    {
+        const sh = try shiftLeftBytes(allocator, rhs, @intCast(e2 + a_pow2));
+        allocator.free(rhs);
+        rhs = sh;
+    }
+    defer allocator.free(rhs);
+
+    return compareMag(lhs, rhs);
+}
+
+// ---------------------------------------------------------------------------
 // Magnitude byte helpers
 // ---------------------------------------------------------------------------
 
@@ -320,4 +425,65 @@ fn shiftLeftBytes(allocator: Allocator, src: []const u8, bits: usize) Allocator.
     @memcpy(out[0..tmp.len], tmp);
     @memset(out[tmp.len..], 0);
     return out;
+}
+
+/// Decimal digits (each 0–9, most-significant first) -> big-endian base-256 magnitude.
+fn decDigitsToMag(allocator: Allocator, digits: []const u8) Allocator.Error![]u8 {
+    var bytes = std.ArrayList(u8).init(allocator);
+    errdefer bytes.deinit();
+    for (digits) |dch| {
+        var carry: u16 = dch; // already 0–9
+        var i = bytes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const v = @as(u16, bytes.items[i]) * 10 + carry;
+            bytes.items[i] = @truncate(v);
+            carry = v >> 8;
+        }
+        while (carry > 0) {
+            try bytes.insert(0, @truncate(carry));
+            carry >>= 8;
+        }
+    }
+    return bytes.toOwnedSlice();
+}
+
+/// `mag · m` (small `m`) as new big-endian bytes, trimmed.
+fn mulSmall(allocator: Allocator, mag: []const u8, m: u16) Allocator.Error![]u8 {
+    var bytes = std.ArrayList(u8).init(allocator);
+    errdefer bytes.deinit();
+    try bytes.appendSlice(mag);
+    var carry: u32 = 0;
+    var i = bytes.items.len;
+    while (i > 0) {
+        i -= 1;
+        const v = @as(u32, bytes.items[i]) * m + carry;
+        bytes.items[i] = @truncate(v);
+        carry = v >> 8;
+    }
+    while (carry > 0) {
+        try bytes.insert(0, @truncate(carry));
+        carry >>= 8;
+    }
+    // Pre-trimmed inputs + front-inserted carries never yield a leading zero.
+    return bytes.toOwnedSlice();
+}
+
+fn mulPow(allocator: Allocator, mag: []const u8, base: u16, k: usize) Allocator.Error![]u8 {
+    var cur = try allocator.dupe(u8, mag);
+    var j: usize = 0;
+    while (j < k) : (j += 1) {
+        const nx = try mulSmall(allocator, cur, base);
+        allocator.free(cur);
+        cur = nx;
+    }
+    return cur;
+}
+
+fn mulPow10(allocator: Allocator, mag: []const u8, k: usize) Allocator.Error![]u8 {
+    return mulPow(allocator, mag, 10, k);
+}
+
+fn mulPow5(allocator: Allocator, mag: []const u8, k: usize) Allocator.Error![]u8 {
+    return mulPow(allocator, mag, 5, k);
 }

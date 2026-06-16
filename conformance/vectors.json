@@ -48,5 +48,15 @@
   { "build": {"array":[{"timestamp":"1000000"},{"bytes":"01"},{"undef":null}]}, "bytes": "50408000ff00ff00ff00ff0f4240490100ff0200" },
   { "build": {"uuid":"550e8400e29b41d4a716446655440000"}, "bytes": "44550e8400e29b41d4a716446655440000" },
   { "build": {"uuid":"ffffffffffffffffffffffffffffffff"}, "bytes": "44ffffffffffffffffffffffffffffffff" },
-  { "build": {"array":[{"uuid":"00112233445566778899aabbccddeeff"},{"string":"x"}]}, "bytes": "504400ff112233445566778899aabbccddeeff487800ff00" }
+  { "build": {"array":[{"uuid":"00112233445566778899aabbccddeeff"},{"string":"x"}]}, "bytes": "504400ff112233445566778899aabbccddeeff487800ff00" },
+  { "build": {"decimal":"0"}, "bytes": "3802" },
+  { "build": {"decimal":"12.345"}, "bytes": "380321020d233300" },
+  { "build": {"decimal":"-12.345"}, "bytes": "3801defdf2dcccff" },
+  { "build": {"decimal":"100"}, "bytes": "380321030b00" },
+  { "build": {"decimal":"0.001"}, "bytes": "38031ffe0b00" },
+  { "build": {"decimal":"12.300"}, "bytes": "380321020d1f00" },
+  { "build": {"decimal":"-0.5"}, "bytes": "3801dfccff" },
+  { "build": {"decimal":"123456789012345678901234567890.123456789"}, "bytes": "3803211e0d23394f5b0d23394f5b0d23394f5b0d23394f5b00" },
+  { "build": {"decimal":"1e-9"}, "bytes": "38031ff80b00" },
+  { "build": {"array":[{"decimal":"1.5"},{"string":"x"}]}, "bytes": "50380321011000ff487800ff00" }
 ]

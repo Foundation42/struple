@@ -108,8 +108,11 @@ pub const View = struct {
         const t = self.headType() orelse return false;
         return t == tc.float32 or t == tc.float64;
     }
+    pub fn isDecimal(self: View) bool {
+        return self.headType() == tc.decimal;
+    }
     pub fn isNumber(self: View) bool {
-        return self.isInt() or self.isFloat();
+        return self.isInt() or self.isFloat() or self.isDecimal();
     }
     pub fn isTimestamp(self: View) bool {
         return self.headType() == tc.timestamp;

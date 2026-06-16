@@ -116,6 +116,86 @@ test "golden: big integers (beyond i128)" {
     }
 }
 
+test "golden: decimals" {
+    const a = testing.allocator;
+    const cases = [_]struct { s: []const u8, hex: []const u8 }{
+        .{ .s = "0", .hex = &.{ 0x38, 0x02 } },
+        .{ .s = "12.345", .hex = &.{ 0x38, 0x03, 0x21, 0x02, 0x0D, 0x23, 0x33, 0x00 } },
+        .{ .s = "-12.345", .hex = &.{ 0x38, 0x01, 0xDE, 0xFD, 0xF2, 0xDC, 0xCC, 0xFF } },
+        .{ .s = "100", .hex = &.{ 0x38, 0x03, 0x21, 0x03, 0x0B, 0x00 } },
+        .{ .s = "0.001", .hex = &.{ 0x38, 0x03, 0x1F, 0xFE, 0x0B, 0x00 } },
+        .{ .s = "12.300", .hex = &.{ 0x38, 0x03, 0x21, 0x02, 0x0D, 0x1F, 0x00 } }, // canonicalizes to 12.3
+    };
+    for (cases) |c| {
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendDecimalString(c.s);
+        try testing.expectEqualSlices(u8, c.hex, p.bytes());
+    }
+}
+
+test "ordering: decimals sort between floats and timestamps, by value" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const decs = [_][]const u8{ "-100", "-1.5", "-0.001", "0", "0.001", "1.5", "100", "1e30" };
+    var prev: ?[]const u8 = null;
+    for (decs) |s| {
+        var p = struple.Packer.init(a);
+        try p.appendDecimalString(s);
+        const cur = try p.toOwnedSlice();
+        if (prev) |pr| try testing.expectEqual(std.math.Order.lt, struple.order(pr, cur));
+        prev = cur;
+    }
+
+    // a decimal sits above any float and below any timestamp in raw byte order
+    var fbuf = struple.Packer.init(a);
+    try fbuf.appendF64(std.math.inf(f64));
+    var dbuf = struple.Packer.init(a);
+    try dbuf.appendDecimalString("-1e9");
+    var tbuf = struple.Packer.init(a);
+    try tbuf.appendTimestamp(std.math.minInt(i64));
+    try testing.expectEqual(std.math.Order.lt, struple.order(fbuf.bytes(), dbuf.bytes())); // float < decimal
+    try testing.expectEqual(std.math.Order.lt, struple.order(dbuf.bytes(), tbuf.bytes())); // decimal < timestamp
+}
+
+test "round-trip: decimals" {
+    const a = testing.allocator;
+    const samples = [_][]const u8{ "0", "5", "-5", "12.345", "-12.345", "0.001", "100", "9.99", "1e30", "1e-9", "-0.5" };
+    for (samples) |s| {
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendDecimalString(s);
+
+        var r = struple.reader(p.bytes());
+        const d = (try r.next()).?.decimal;
+        try testing.expect(try r.next() == null);
+
+        // re-pack from the decoded (sign, digits, exponent) -> byte-identical
+        var dig: [64]u8 = undefined;
+        const digs = d.coefficientDigits(&dig);
+        var q = struple.Packer.init(a);
+        defer q.deinit();
+        try q.appendDecimal(d.negative, digs, @intCast(d.exponent()));
+        try testing.expectEqualSlices(u8, p.bytes(), q.bytes());
+    }
+
+    // a fully-specified decode: 12.345 = +12345 x 10^-3
+    {
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendDecimalString("12.345");
+        var r = struple.reader(p.bytes());
+        const d = (try r.next()).?.decimal;
+        try testing.expect(!d.negative and !d.isZero());
+        try testing.expectEqual(@as(usize, 5), d.digitCount());
+        try testing.expectEqual(@as(i64, -3), d.exponent());
+        var dig: [16]u8 = undefined;
+        try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5 }, d.coefficientDigits(&dig));
+    }
+}
+
 test "golden: floats" {
     try expectBytes(@as(f32, 1.0), &.{ 0x34, 0xBF, 0x80, 0x00, 0x00 });
     try expectBytes(@as(f32, -1.0), &.{ 0x34, 0x40, 0x7F, 0xFF, 0xFF });
@@ -598,6 +678,28 @@ test "json: round-trips (canonical form is byte-stable)" {
     try expectJsonRoundtrip("-99999999999999999999999999999999");
 }
 
+test "json: decimals render as exact number literals (one-way)" {
+    const a = testing.allocator;
+    const cases = [_]struct { s: []const u8, want: []const u8 }{
+        .{ .s = "0", .want = "0" },
+        .{ .s = "12.345", .want = "12.345" },
+        .{ .s = "-12.345", .want = "-12.345" },
+        .{ .s = "100", .want = "100" },
+        .{ .s = "0.001", .want = "0.001" },
+        .{ .s = "12.300", .want = "12.3" }, // canonical
+        .{ .s = "-0.5", .want = "-0.5" },
+        .{ .s = "1e3", .want = "1000" },
+    };
+    for (cases) |c| {
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendDecimalString(c.s);
+        const json = try struple.toJson(a, p.bytes());
+        defer a.free(json);
+        try testing.expectEqualStrings(c.want, json);
+    }
+}
+
 test "json: object keys are canonicalized (sorted)" {
     const a = testing.allocator;
     const encoded = try struple.fromJson(a, "{\"b\":1,\"a\":2,\"c\":3}");
@@ -771,6 +873,11 @@ fn semBig(a: std.mem.Allocator, neg: bool, mag: []const u8) ![]u8 {
     try p.appendBigInt(neg, mag);
     return p.toOwnedSlice();
 }
+fn semDec(a: std.mem.Allocator, s: []const u8) ![]u8 {
+    var p = struple.Packer.init(a);
+    try p.appendDecimalString(s);
+    return p.toOwnedSlice();
+}
 
 test "semantic: numbers compare by exact value across representations" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -815,6 +922,39 @@ test "semantic: numbers compare by exact value across representations" {
     try testing.expectEqual(gt, try struple.semanticOrder(a, try semF64(a, std.math.nan(f64)), try semF64(a, std.math.inf(f64))));
     try testing.expectEqual(eq, try struple.semanticOrder(a, try semF64(a, std.math.nan(f64)), try semF32(a, std.math.nan(f32))));
     try testing.expectEqual(lt, try struple.semanticOrder(a, try semF64(a, -std.math.inf(f64)), try packOne(a, @as(i64, -999999))));
+}
+
+test "semantic: decimals compare by exact value across representations" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const lt = std.math.Order.lt;
+    const eq = std.math.Order.eq;
+    const gt = std.math.Order.gt;
+    const so = struple.semanticOrder;
+
+    // decimal vs int / float / decimal, by value
+    try testing.expectEqual(eq, try so(a, try semDec(a, "5"), try packOne(a, @as(i64, 5))));
+    try testing.expectEqual(eq, try so(a, try semDec(a, "5.0"), try semF64(a, 5.0)));
+    try testing.expectEqual(eq, try so(a, try semDec(a, "1.50"), try semDec(a, "1.5")));
+    try testing.expectEqual(lt, try so(a, try semDec(a, "1.5"), try semDec(a, "1.6")));
+    try testing.expectEqual(gt, try so(a, try semDec(a, "123.5"), try packOne(a, @as(i64, 123))));
+    try testing.expectEqual(eq, try so(a, try semDec(a, "-7.25"), try semF64(a, -7.25)));
+    try testing.expectEqual(eq, try so(a, try semDec(a, "0"), try semF64(a, -0.0)));
+
+    // exactness: 0.1 is not representable in f64, so decimal 0.1 < float 0.1
+    try testing.expectEqual(lt, try so(a, try semDec(a, "0.1"), try semF64(a, 0.1)));
+    try testing.expectEqual(eq, try so(a, try semDec(a, "2.5"), try semF64(a, 2.5))); // 2.5 is exact
+
+    // decimal vs big-int (beyond i128) by exact value: 10^40
+    const big1e40 = try struple.fromJson(a, "10000000000000000000000000000000000000000");
+    try testing.expectEqual(eq, try so(a, try semDec(a, "1e40"), big1e40));
+    try testing.expectEqual(gt, try so(a, try semDec(a, "1.0000000000000000000000000000000000000001e40"), big1e40));
+
+    // decimal is in the number class: a huge decimal still sorts below a timestamp
+    var ts = struple.Packer.init(a);
+    try ts.appendTimestamp(0);
+    try testing.expectEqual(lt, try so(a, try semDec(a, "1e1000"), try ts.toOwnedSlice()));
 }
 
 test "semantic: cross-type classes and container recursion" {

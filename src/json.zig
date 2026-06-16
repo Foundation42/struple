@@ -14,8 +14,8 @@
 //!   object            <-> map  (canonical: keys come back sorted)
 //!
 //! struple types with no JSON equivalent degrade on `toJson`: undefined -> null,
-//! timestamp -> number (µs), uuid -> hyphenated string, bytes -> base64 string,
-//! set -> array.
+//! decimal -> number (exact decimal literal), timestamp -> number (µs),
+//! uuid -> hyphenated string, bytes -> base64 string, set -> array.
 
 const std = @import("std");
 const struple = @import("struple.zig");
@@ -112,6 +112,7 @@ fn writeValue(arena: std.mem.Allocator, writer: anytype, elem: struple.Element) 
         .big_int => |bi| try writeBigInt(arena, writer, bi),
         .float32 => |f| try writeFloat(writer, f),
         .float64 => |f| try writeFloat(writer, f),
+        .decimal => |d| try writeDecimal(arena, writer, d),
         .timestamp => |t| try writer.print("{d}", .{t}),
         .uuid => |u| try writeUuid(writer, u),
         .string => |framed| try writeJsonString(arena, writer, framed),
@@ -192,6 +193,38 @@ fn writeBase64(arena: std.mem.Allocator, writer: anytype, framed: []const u8) !v
     const enc = std.base64.standard.Encoder;
     const buf = try arena.alloc(u8, enc.calcSize(raw.len));
     try writeQuoted(writer, enc.encode(buf, raw));
+}
+
+/// Render a decimal as an exact JSON number literal (plain notation, no exponent).
+fn writeDecimal(arena: std.mem.Allocator, writer: anytype, d: struple.Decimal) !void {
+    if (d.isZero()) {
+        try writer.writeByte('0');
+        return;
+    }
+    const digbuf = try arena.alloc(u8, d.coeff_stored.len * 2);
+    const digs = d.coefficientDigits(digbuf); // 0–9 values, most-significant first
+    const k: i64 = @intCast(digs.len);
+    const exp10 = d.exponent(); // value = C · 10^exp10
+
+    if (d.negative) try writer.writeByte('-');
+    if (exp10 >= 0) {
+        for (digs) |dd| try writer.writeByte('0' + dd);
+        var z: i64 = 0;
+        while (z < exp10) : (z += 1) try writer.writeByte('0');
+        return;
+    }
+    const point_pos = k + exp10; // number of integer-part digits
+    if (point_pos > 0) {
+        const pp: usize = @intCast(point_pos);
+        for (digs[0..pp]) |dd| try writer.writeByte('0' + dd);
+        try writer.writeByte('.');
+        for (digs[pp..]) |dd| try writer.writeByte('0' + dd);
+    } else {
+        try writer.writeAll("0.");
+        var z: i64 = point_pos;
+        while (z < 0) : (z += 1) try writer.writeByte('0');
+        for (digs) |dd| try writer.writeByte('0' + dd);
+    }
 }
 
 fn writeUuid(writer: anytype, u: [16]u8) !void {

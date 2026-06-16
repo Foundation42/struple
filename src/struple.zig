@@ -10,8 +10,8 @@
 //! comparator. This is the FoundationDB tuple idea, rebuilt clean in Zig.
 //!
 //! v2 covers the union of the Python and JavaScript data models: null,
-//! undefined, bool, arbitrary-precision integers, float32/64, (decimal —
-//! reserved), timestamp, UUID, string, bytes, array, map and set.
+//! undefined, bool, arbitrary-precision integers, float32/64, decimal,
+//! timestamp, UUID, string, bytes, array, map and set.
 //!
 //! ## How ordering is achieved
 //!
@@ -79,7 +79,7 @@ pub const tc = struct {
     pub const float32: u8 = 0x34;
     pub const float64: u8 = 0x35;
 
-    pub const decimal: u8 = 0x38; // RESERVED — not yet implemented
+    pub const decimal: u8 = 0x38; // arbitrary-precision base-10 number
 
     pub const timestamp: u8 = 0x40;
 
@@ -96,6 +96,15 @@ pub const tc = struct {
 /// Companion byte written after a literal 0x00 inside variable-length payloads.
 const escape_byte: u8 = 0xFF;
 
+/// Leading marker inside a decimal payload, isolating the three sign groups so
+/// `memcmp` keeps `negative < zero < positive`. For negatives the rest of the
+/// payload is bit-complemented, so a larger magnitude sorts earlier.
+const dec_sign_neg: u8 = 0x01;
+const dec_sign_zero: u8 = 0x02;
+const dec_sign_pos: u8 = 0x03;
+
+pub const DecimalError = error{InvalidDecimal};
+
 pub const EncodeError = std.mem.Allocator.Error;
 pub const DecodeError = error{ Truncated, InvalidType, UnsupportedType };
 
@@ -111,6 +120,7 @@ pub const Kind = enum {
     big_int,
     float32,
     float64,
+    decimal,
     timestamp,
     uuid,
     string,
@@ -133,6 +143,7 @@ pub const Element = union(Kind) {
     big_int: BigInt, // arbitrary-precision integers (beyond i128)
     float32: f32,
     float64: f64,
+    decimal: Decimal, // arbitrary-precision base-10 number
     timestamp: i64, // microseconds since the Unix epoch, UTC
     uuid: [16]u8, // 128-bit identifier (raw bytes, big-endian/network order)
     string: []const u8,
@@ -168,6 +179,55 @@ pub const BigInt = struct {
         }
         if (mag > std.math.maxInt(i128)) return null;
         return @intCast(mag);
+    }
+};
+
+/// A decoded decimal: value = `(-1)^negative · coefficient · 10^exponent`, with the
+/// coefficient's significant digits carried base-100 packed (two digits per byte).
+/// `adj_exp` is the adjusted exponent (the power of ten of the most-significant
+/// digit, i.e. the `E` in `0.d₁d₂… · 10^E`); the zero value has an empty coefficient.
+pub const Decimal = struct {
+    negative: bool,
+    adj_exp: i64,
+    /// Base-100 packed digit bytes *as stored* — each pair is `value+1` (1–100),
+    /// and bit-complemented when `negative`. Empty for the canonical zero.
+    coeff_stored: []const u8,
+
+    pub fn isZero(self: Decimal) bool {
+        return self.coeff_stored.len == 0;
+    }
+
+    /// Number of significant decimal digits in the coefficient.
+    pub fn digitCount(self: Decimal) usize {
+        if (self.coeff_stored.len == 0) return 0;
+        const last = self.coeff_stored[self.coeff_stored.len - 1];
+        const pair: u8 = (if (self.negative) ~last else last) - 1;
+        // An odd digit count pads the final pair's low digit with a (canonical) zero.
+        return self.coeff_stored.len * 2 - @as(usize, if (pair % 10 == 0) 1 else 0);
+    }
+
+    /// The power of ten applied to the integer coefficient: `value = ±coefficient · 10^exponent`.
+    pub fn exponent(self: Decimal) i64 {
+        return self.adj_exp - @as(i64, @intCast(self.digitCount()));
+    }
+
+    /// Unpack the coefficient's decimal digits (each 0–9, most-significant first)
+    /// into `out` (which must hold at least `2 · coeff_stored.len` bytes), returning
+    /// the written slice.
+    pub fn coefficientDigits(self: Decimal, out: []u8) []u8 {
+        var w: usize = 0;
+        for (self.coeff_stored, 0..) |raw, idx| {
+            const pair: u8 = (if (self.negative) ~raw else raw) - 1;
+            out[w] = pair / 10;
+            w += 1;
+            const lo = pair % 10;
+            const is_last = idx + 1 == self.coeff_stored.len;
+            if (!(is_last and lo == 0)) { // skip only the synthetic trailing pad
+                out[w] = lo;
+                w += 1;
+            }
+        }
+        return out[0..w];
     }
 };
 
@@ -266,6 +326,91 @@ pub const Packer = struct {
         std.mem.writeInt(u64, &buf, orderableF64Bits(value), .big);
         try self.list.append(tc.float64);
         try self.list.appendSlice(&buf);
+    }
+
+    /// Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`, where
+    /// `digits` are the coefficient `C`'s decimal digits (each 0–9, most-significant
+    /// first). Canonicalized on the way in: leading/trailing zeros are stripped and
+    /// any all-zero coefficient collapses to the single zero form.
+    pub fn appendDecimal(self: *Packer, negative: bool, digits: []const u8, exp: i32) EncodeError!void {
+        var lead: usize = 0;
+        while (lead < digits.len and digits[lead] == 0) lead += 1;
+        const sig = digits[lead..];
+
+        try self.list.append(tc.decimal);
+        if (sig.len == 0) { // canonical zero — one form regardless of scale
+            try self.list.append(dec_sign_zero);
+            return;
+        }
+
+        // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+        // Trailing zeros change neither the value nor E, so drop them for storage.
+        const adj_exp: i128 = @as(i128, @intCast(sig.len)) + exp;
+        var end: usize = sig.len;
+        while (end > 0 and sig[end - 1] == 0) end -= 1;
+        const store = sig[0..end];
+
+        // Order-bearing tail: [E as a struple int][base-100 digits][terminator].
+        var tail = std.ArrayList(u8).init(self.list.allocator);
+        defer tail.deinit();
+        try encodeFixedInt(&tail, adj_exp);
+        var i: usize = 0;
+        while (i < store.len) : (i += 2) {
+            const hi: u16 = store[i];
+            const lo: u16 = if (i + 1 < store.len) store[i + 1] else 0; // pad odd tail with 0
+            try tail.append(@intCast(hi * 10 + lo + 1)); // pair 0–99 -> byte 1–100
+        }
+        try tail.append(tc.terminator);
+
+        try self.list.append(if (negative) dec_sign_neg else dec_sign_pos);
+        for (tail.items) |b| try self.list.append(if (negative) ~b else b);
+    }
+
+    /// Append a decimal parsed from text: `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`.
+    pub fn appendDecimalString(self: *Packer, s: []const u8) (EncodeError || DecimalError)!void {
+        var i: usize = 0;
+        var negative = false;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+            negative = s[i] == '-';
+            i += 1;
+        }
+        var digits = std.ArrayList(u8).init(self.list.allocator);
+        defer digits.deinit();
+        var exp: i32 = 0;
+        var seen_point = false;
+        var any = false;
+        while (i < s.len) : (i += 1) {
+            const c = s[i];
+            if (c == '.') {
+                if (seen_point) return error.InvalidDecimal;
+                seen_point = true;
+                continue;
+            }
+            if (c == 'e' or c == 'E') break;
+            if (c < '0' or c > '9') return error.InvalidDecimal;
+            try digits.append(c - '0');
+            if (seen_point) exp -= 1;
+            any = true;
+        }
+        if (!any) return error.InvalidDecimal;
+        if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+            i += 1;
+            var esign: i32 = 1;
+            if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+                if (s[i] == '-') esign = -1;
+                i += 1;
+            }
+            var ev: i32 = 0;
+            var edig = false;
+            while (i < s.len) : (i += 1) {
+                if (s[i] < '0' or s[i] > '9') return error.InvalidDecimal;
+                ev = ev * 10 + (s[i] - '0');
+                edig = true;
+            }
+            if (!edig) return error.InvalidDecimal;
+            exp += esign * ev;
+        }
+        try self.appendDecimal(negative, digits.items, exp);
     }
 
     /// Microseconds since the Unix epoch, UTC.
@@ -437,6 +582,7 @@ pub const Reader = struct {
             },
             tc.float32 => return .{ .float32 = decodeF32((try self.take(4))[0..4]) },
             tc.float64 => return .{ .float64 = decodeF64((try self.take(8))[0..8]) },
+            tc.decimal => return .{ .decimal = try self.takeDecimal() },
             tc.timestamp => {
                 const raw = std.mem.readInt(u64, (try self.take(8))[0..8], .big);
                 return .{ .timestamp = @bitCast(raw ^ (@as(u64, 1) << 63)) };
@@ -472,6 +618,42 @@ pub const Reader = struct {
     /// Advance past the next element; returns false at end of stream.
     pub fn skip(self: *Reader) DecodeError!bool {
         return (try self.nextView()) != null;
+    }
+
+    fn takeDecimal(self: *Reader) DecodeError!Decimal {
+        const sign = (try self.take(1))[0];
+        if (sign == dec_sign_zero) return .{ .negative = false, .adj_exp = 0, .coeff_stored = self.buf[self.pos..self.pos] };
+        if (sign != dec_sign_neg and sign != dec_sign_pos) return error.InvalidType;
+        const negative = sign == dec_sign_neg;
+        const adj_exp = try self.readDecExponent(negative);
+        // Digit bytes are 1–100 (positive) or their complement (negative), and never
+        // collide with the terminator (0x00, or 0xFF when complemented).
+        const term: u8 = if (negative) 0xFF else 0x00;
+        const start = self.pos;
+        var i = self.pos;
+        while (i < self.buf.len and self.buf[i] != term) i += 1;
+        if (i >= self.buf.len) return error.Truncated;
+        if (i == start) return error.InvalidType; // a nonzero decimal must carry digits
+        self.pos = i + 1; // consume the terminator
+        return .{ .negative = negative, .adj_exp = adj_exp, .coeff_stored = self.buf[start..i] };
+    }
+
+    /// Read the embedded exponent (a struple integer), un-complementing each byte
+    /// for negatives. Big-int exponent codes are rejected (far beyond any real use).
+    fn readDecExponent(self: *Reader, complement: bool) DecodeError!i64 {
+        const tb = decodeByte((try self.take(1))[0], complement);
+        if (tb == tc.int_zero) return 0;
+        if ((tb >= tc.int_neg_min and tb <= tc.int_neg_max) or (tb >= tc.int_pos_min and tb <= tc.int_pos_max)) {
+            const positive = tb > tc.int_zero;
+            const n: usize = if (positive) tb - tc.int_zero else tc.int_zero - tb;
+            var tmp: [16]u8 = undefined;
+            for (try self.take(n), 0..) |b, k| tmp[k] = decodeByte(b, complement);
+            if (n == 16 and ((positive and tmp[0] >= 0x80) or (!positive and tmp[0] < 0x80))) return error.InvalidType;
+            const v = decodeIntPayload(positive, tmp[0..n]);
+            if (v > std.math.maxInt(i64) or v < std.math.minInt(i64)) return error.InvalidType;
+            return @intCast(v);
+        }
+        return error.InvalidType;
     }
 
     fn take(self: *Reader, n: usize) DecodeError![]const u8 {
