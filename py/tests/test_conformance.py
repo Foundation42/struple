@@ -10,8 +10,9 @@ Two entry shapes:
 import json
 import os
 import unittest
+from decimal import Decimal
 
-from struple import Writer, from_json, semantic_order, to_json, transcode
+from struple import Writer, encode, from_json, semantic_order, to_json, transcode, unpack
 
 _CORPUS = os.path.join(os.path.dirname(__file__), "..", "..", "conformance", "vectors.json")
 with open(_CORPUS, encoding="utf-8") as _f:
@@ -42,6 +43,8 @@ def _build_into(w, op):
         w.append_float64(val)
     elif key == "float32":
         w.append_float32(val)
+    elif key == "decimal":
+        w.append_decimal_string(val)
     elif key == "timestamp":
         w.append_timestamp(int(val))
     elif key == "uuid":
@@ -106,6 +109,54 @@ class Conformance(unittest.TestCase):
             a, b = bytes.fromhex(sv["a"]), bytes.fromhex(sv["b"])
             with self.subTest(a=sv["a"], b=sv["b"]):
                 self.assertEqual(semantic_order(a, b), sv["order"])
+
+
+class DecimalUnit(unittest.TestCase):
+    """Python-specific decimal behaviour beyond the shared corpus."""
+
+    SANITY = {"12.345": "380321020d233300", "-12.345": "3801defdf2dcccff", "0": "3802"}
+
+    def test_sanity_hex(self):
+        for s, hexv in self.SANITY.items():
+            self.assertEqual(Writer().append_decimal_string(s).bytes().hex(), hexv)
+
+    def test_native_decimal_dispatch(self):
+        # A native decimal.Decimal passed to the generic encode is detected.
+        for s, hexv in self.SANITY.items():
+            self.assertEqual(encode(Decimal(s)).hex(), hexv)
+
+    def test_append_decimal_forms(self):
+        # native Decimal, and the explicit (negative, digits, exp) triple
+        self.assertEqual(Writer().append_decimal(Decimal("100")).bytes().hex(), "380321030b00")
+        self.assertEqual(Writer().append_decimal(False, [1, 2, 3, 4, 5], -3).bytes().hex(), "380321020d233300")
+        self.assertEqual(Writer().append_decimal(True, [1, 2, 3, 4, 5], -3).bytes().hex(), "3801defdf2dcccff")
+
+    def test_round_trip(self):
+        for s in ("12.345", "-12.345", "0", "100", "0.001", "12.300", "-0.5", "1e-9",
+                  "123456789012345678901234567890.123456789"):
+            enc = encode(Decimal(s))
+            got = unpack(enc)[0]
+            self.assertIsInstance(got, Decimal)
+            self.assertEqual(got, Decimal(s))
+            self.assertEqual(transcode(enc), enc)  # identity on canonical buffers
+
+    def test_canonicalization(self):
+        # 12.300 == 12.3 in value and in bytes (trailing zeros stripped)
+        self.assertEqual(encode(Decimal("12.300")), encode(Decimal("12.3")))
+
+    def test_json_render_one_way(self):
+        cases = {"12.345": "12.345", "12.300": "12.3", "100": "100", "0.001": "0.001",
+                 "-0.5": "-0.5", "0": "0", "1e-9": "0.000000001"}
+        for s, want in cases.items():
+            self.assertEqual(to_json(encode(Decimal(s))), want)
+
+    def test_semantic_cross_type(self):
+        # decimal joins the unified number class; exact via Fraction
+        self.assertEqual(semantic_order(encode(Decimal("0.1")), encode(0.1)), -1)
+        self.assertEqual(semantic_order(encode(Decimal("2.5")), encode(2.5)), 0)
+        self.assertEqual(semantic_order(encode(Decimal("5")), encode(5)), 0)
+        self.assertEqual(semantic_order(encode(Decimal("0")), encode(0)), 0)
+        self.assertEqual(semantic_order(encode(Decimal("-0")), encode(-0.0)), 0)
 
 
 if __name__ == "__main__":

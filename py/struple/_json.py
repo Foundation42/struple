@@ -37,6 +37,8 @@ def _render(e: tuple) -> str:
         return str(val)
     if kind in ("float32", "float64"):
         return repr(val) if math.isfinite(val) else "null"
+    if kind == "decimal":
+        return _render_decimal(val)
     if kind == "timestamp":
         return str(val)
     if kind == "uuid":
@@ -50,6 +52,27 @@ def _render(e: tuple) -> str:
     if kind == "map":
         return _render_map(val)
     raise ValueError(f"struple/json: unknown element kind {kind!r}")
+
+
+def _render_decimal(value) -> str:
+    """An exact plain decimal number literal (no exponent), mirroring the Zig
+    ``writeDecimal``. One-way: JSON has no decimal type."""
+    if value.is_zero():
+        return "0"
+    sign, digits, exp = value.as_tuple()
+    # Canonicalize: strip trailing zeros (value-preserving) so "12.300" -> "12.3".
+    k = len(digits)
+    while k > 0 and digits[k - 1] == 0:
+        exp += 1
+        k -= 1
+    digs = "".join(str(d) for d in digits[:k])
+    neg = "-" if sign else ""
+    if exp >= 0:
+        return neg + digs + "0" * exp
+    point_pos = k + exp  # number of integer-part digits
+    if point_pos > 0:
+        return neg + digs[:point_pos] + "." + digs[point_pos:]
+    return neg + "0." + "0" * (-point_pos) + digs
 
 
 def _render_array(body: bytes) -> str:

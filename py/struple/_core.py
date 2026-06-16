@@ -9,6 +9,7 @@ languages.
 from __future__ import annotations
 
 import datetime as _dt
+import decimal as _decimal
 import math as _math
 import struct
 import uuid as _uuid
@@ -34,6 +35,13 @@ BYTES = 0x49
 ARRAY = 0x50
 MAP = 0x52
 SET = 0x54
+
+# Leading sign markers inside a decimal payload, isolating the three sign groups so
+# memcmp keeps negative < zero < positive. For negatives the rest of the payload is
+# bit-complemented, so a larger magnitude sorts earlier.
+DEC_SIGN_NEG = 0x01
+DEC_SIGN_ZERO = 0x02
+DEC_SIGN_POS = 0x03
 
 _MASK64 = (1 << 64) - 1
 _SIGN64 = 1 << 63
@@ -96,6 +104,29 @@ class Writer:
         _append_float32(self.buf, v)
         return self
 
+    def append_decimal(self, value, digits=None, exp=None) -> "Writer":
+        """Append an arbitrary-precision decimal.
+
+        Either pass a native ``decimal.Decimal`` (the recommended form) as the
+        sole argument, or the explicit ``(negative, digits, exp)`` triple where
+        ``digits`` is an iterable of the coefficient's decimal digits (0–9,
+        most-significant first) and ``exp`` the power-of-ten scale.
+        """
+        if digits is None and exp is None:
+            if not isinstance(value, _decimal.Decimal):
+                value = _decimal.Decimal(value)
+            negative, digs, dexp = _decimal_to_components(value)
+        else:
+            negative = bool(value)
+            digs = list(digits)
+            dexp = exp
+        _append_decimal(self.buf, negative, digs, dexp)
+        return self
+
+    def append_decimal_string(self, s: str) -> "Writer":
+        _append_decimal_string(self.buf, s)
+        return self
+
     def append_timestamp(self, micros: int) -> "Writer":
         _append_timestamp(self.buf, micros)
         return self
@@ -151,6 +182,9 @@ def _append_value(out: bytearray, value: Any) -> None:
         _append_map(out, ((encode(k), encode(v)) for k, v in value.items()))
     elif isinstance(value, (set, frozenset)):
         _append_set(out, (encode(e) for e in value))
+    elif isinstance(value, _decimal.Decimal):
+        negative, digits, exp = _decimal_to_components(value)
+        _append_decimal(out, negative, digits, exp)
     elif isinstance(value, _uuid.UUID):
         _append_uuid(out, value.bytes)
     elif isinstance(value, _dt.datetime):
@@ -228,6 +262,106 @@ def _append_uuid(out: bytearray, raw: bytes) -> None:
     out += raw
 
 
+def _decimal_to_components(value: _decimal.Decimal) -> tuple[bool, list[int], int]:
+    """A native ``Decimal`` -> ``(negative, digits, exp)`` (digits most-significant
+    first), via ``Decimal.as_tuple()`` which maps 1:1 onto the wire model."""
+    if not value.is_finite():
+        raise ValueError("struple: cannot encode non-finite decimal")
+    sign, digits, exp = value.as_tuple()
+    return bool(sign), list(digits), int(exp)
+
+
+def _append_decimal(out: bytearray, negative: bool, digits, exp: int) -> None:
+    """Append ``(-1)^negative · C · 10^exp`` where ``digits`` are C's decimal digits
+    (0–9, most-significant first). Canonicalized: leading/trailing zeros are
+    stripped and any all-zero coefficient collapses to the single zero form."""
+    digits = list(digits)
+    lead = 0
+    while lead < len(digits) and digits[lead] == 0:
+        lead += 1
+    sig = digits[lead:]
+
+    out.append(DECIMAL)
+    if not sig:  # canonical zero — one form regardless of scale
+        out.append(DEC_SIGN_ZERO)
+        return
+
+    # Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+    # Trailing zeros change neither the value nor E, so drop them for storage.
+    adj_exp = len(sig) + exp
+    end = len(sig)
+    while end > 0 and sig[end - 1] == 0:
+        end -= 1
+    store = sig[:end]
+
+    # Order-bearing tail: [E as a struple int][base-100 digits][terminator].
+    tail = bytearray()
+    _append_integer(tail, adj_exp)
+    for i in range(0, len(store), 2):
+        hi = store[i]
+        lo = store[i + 1] if i + 1 < len(store) else 0  # pad odd tail with 0
+        tail.append(hi * 10 + lo + 1)  # pair 0–99 -> byte 1–100
+    tail.append(TERMINATOR)
+
+    out.append(DEC_SIGN_NEG if negative else DEC_SIGN_POS)
+    if negative:
+        out += bytes(b ^ 0xFF for b in tail)
+    else:
+        out += tail
+
+
+def _append_decimal_string(out: bytearray, s: str) -> None:
+    """Parse ``[+/-] digits [. digits] [ (e|E) [+/-] digits ]`` and append it."""
+    i = 0
+    n = len(s)
+    negative = False
+    if i < n and s[i] in "+-":
+        negative = s[i] == "-"
+        i += 1
+    digits: list[int] = []
+    exp = 0
+    seen_point = False
+    any_digit = False
+    while i < n:
+        c = s[i]
+        if c == ".":
+            if seen_point:
+                raise ValueError("struple: invalid decimal")
+            seen_point = True
+            i += 1
+            continue
+        if c in "eE":
+            break
+        if not ("0" <= c <= "9"):
+            raise ValueError("struple: invalid decimal")
+        digits.append(ord(c) - 48)
+        if seen_point:
+            exp -= 1
+        any_digit = True
+        i += 1
+    if not any_digit:
+        raise ValueError("struple: invalid decimal")
+    if i < n and s[i] in "eE":
+        i += 1
+        esign = 1
+        if i < n and s[i] in "+-":
+            if s[i] == "-":
+                esign = -1
+            i += 1
+        ev = 0
+        edig = False
+        while i < n:
+            if not ("0" <= s[i] <= "9"):
+                raise ValueError("struple: invalid decimal")
+            ev = ev * 10 + (ord(s[i]) - 48)
+            edig = True
+            i += 1
+        if not edig:
+            raise ValueError("struple: invalid decimal")
+        exp += esign * ev
+    _append_decimal(out, negative, digits, exp)
+
+
 def _append_map(out: bytearray, entries: Iterable[tuple[bytes, bytes]]) -> None:
     items = sorted(entries, key=lambda kv: kv[0])
     out.append(MAP)
@@ -302,6 +436,8 @@ class Reader:
             return ("float32", self._read_f32())
         if t == FLOAT64:
             return ("float64", self._read_f64())
+        if t == DECIMAL:
+            return ("decimal", self._read_decimal())
         if t == TIMESTAMP:
             return ("timestamp", self._read_timestamp())
         if t == UUID:
@@ -388,6 +524,59 @@ class Reader:
             mag = (mag << 8) | comp(b)
         return ("int", -mag if negative else mag)
 
+    def _read_decimal(self) -> _decimal.Decimal:
+        sign = self._take(1)[0]
+        if sign == DEC_SIGN_ZERO:
+            return _decimal.Decimal(0)
+        if sign not in (DEC_SIGN_NEG, DEC_SIGN_POS):
+            raise ValueError("struple: invalid decimal sign")
+        negative = sign == DEC_SIGN_NEG
+        adj_exp = self._read_dec_exponent(negative)
+        # Digit bytes are 1–100 (positive) or their complement (negative), and never
+        # collide with the terminator (0x00, or 0xFF when complemented).
+        term = 0xFF if negative else 0x00
+        start = self.pos
+        i = self.pos
+        buf = self.buf
+        n = len(buf)
+        while i < n and buf[i] != term:
+            i += 1
+        if i >= n:
+            raise ValueError("struple: truncated decimal")
+        if i == start:
+            raise ValueError("struple: nonzero decimal must carry digits")
+        coeff_stored = buf[start:i]
+        self.pos = i + 1  # consume the terminator
+
+        # Unpack the base-100 coefficient into decimal digits (most-significant first).
+        digits: list[int] = []
+        last = len(coeff_stored) - 1
+        for idx, raw in enumerate(coeff_stored):
+            pair = ((raw ^ 0xFF) if negative else raw) - 1
+            digits.append(pair // 10)
+            lo = pair % 10
+            if not (idx == last and lo == 0):  # skip the synthetic trailing pad
+                digits.append(lo)
+        exp = adj_exp - len(digits)
+        return _decimal.Decimal((1 if negative else 0, tuple(digits), exp))
+
+    def _read_dec_exponent(self, complement: bool) -> int:
+        """Read the embedded exponent (a struple integer), un-complementing each byte
+        for negatives. Big-int exponent codes are rejected."""
+        comp = (lambda b: b ^ 0xFF) if complement else (lambda b: b)
+        tb = comp(self._take(1)[0])
+        if tb == INT_ZERO:
+            return 0
+        if (0x10 <= tb <= 0x1F) or (0x21 <= tb <= 0x30):
+            positive = tb > INT_ZERO
+            n = (tb - INT_ZERO) if positive else (INT_ZERO - tb)
+            payload = bytes(comp(b) for b in self._take(n))
+            if n == 16 and ((positive and payload[0] >= 0x80) or (not positive and payload[0] < 0x80)):
+                raise ValueError("struple: non-canonical 16-byte decimal exponent")
+            raw = int.from_bytes(payload, "big")
+            return raw if positive else raw - (1 << (8 * n))
+        raise ValueError("struple: invalid decimal exponent")
+
     def _read_f64(self) -> float:
         bits = int.from_bytes(self._take(8), "big")
         bits = (bits ^ _SIGN64) if (bits & _SIGN64) else (~bits & _MASK64)
@@ -417,6 +606,8 @@ def _element_to_value(e: Element) -> Any:
     if kind == "nil" or kind == "undef":
         return None
     if kind == "bool" or kind == "int" or kind in ("float32", "float64"):
+        return val
+    if kind == "decimal":
         return val
     if kind == "timestamp":
         return _EPOCH + _dt.timedelta(microseconds=val)
@@ -476,6 +667,9 @@ def _append_element(out: bytearray, e: Element) -> None:
         _append_float32(out, val)
     elif kind == "float64":
         _append_float64(out, val)
+    elif kind == "decimal":
+        negative, digits, exp = _decimal_to_components(val)
+        _append_decimal(out, negative, digits, exp)
     elif kind == "timestamp":
         _append_timestamp(out, val)
     elif kind == "uuid":
@@ -576,8 +770,11 @@ class View:
     def is_float(self) -> bool:
         return self.head_type() in (FLOAT32, FLOAT64)
 
+    def is_decimal(self) -> bool:
+        return self.head_type() == DECIMAL
+
     def is_number(self) -> bool:
-        return self.is_int() or self.is_float()
+        return self.is_int() or self.is_float() or self.is_decimal()
 
     def is_timestamp(self) -> bool:
         return self.head_type() == TIMESTAMP
@@ -654,7 +851,7 @@ class MapView:
 # ---------------------------------------------------------------------------
 
 _CLASS_RANK = {
-    "nil": 0, "undef": 1, "bool": 2, "int": 3, "float32": 3, "float64": 3,
+    "nil": 0, "undef": 1, "bool": 2, "int": 3, "float32": 3, "float64": 3, "decimal": 3,
     "timestamp": 4, "uuid": 5, "string": 6, "bytes": 7, "array": 8, "map": 9, "set": 10,
 }
 
@@ -695,7 +892,7 @@ def _compare_elements(ea: tuple, eb: tuple) -> int:
         return 0
     if ka == "bool":
         return _sign(int(va) - int(vb))
-    if ka in ("int", "float32", "float64"):
+    if ka in ("int", "float32", "float64", "decimal"):
         return _compare_numbers(ea, eb)
     if ka == "timestamp":
         return _sign(va - vb)
@@ -709,9 +906,11 @@ def _compare_elements(ea: tuple, eb: tuple) -> int:
     raise ValueError(f"struple: unknown element kind {ka!r}")
 
 
+# Rank within the number class: -inf < finite < +inf < NaN. Ints and decimals
+# are always finite.
 def _num_class(e: tuple) -> int:
     k, v = e
-    if k == "int":
+    if k == "int" or k == "decimal":
         return 1
     if _math.isnan(v):
         return 3
@@ -733,8 +932,13 @@ def _compare_numbers(ea: tuple, eb: tuple) -> int:
     ai, bi = ka == "int", kb == "int"
     if ai and bi:
         return _sign(va - vb)
-    if not ai and not bi:
-        return (va > vb) - (va < vb)
-    # one int, one finite float — compare exactly via rationals (Fraction(float)
-    # is exact, so no precision is lost even for huge integers)
+    if not _is_exact(ea) and not _is_exact(eb):
+        return (va > vb) - (va < vb)  # both finite floats
+    # At least one exact (int/decimal) operand — compare exactly via rationals.
+    # Fraction is exact for int, Decimal and float (a float's true binary value),
+    # so no precision is lost even for huge values.
     return _sign(_Fraction(va) - _Fraction(vb))
+
+
+def _is_exact(e: tuple) -> bool:
+    return e[0] == "int" or e[0] == "decimal"

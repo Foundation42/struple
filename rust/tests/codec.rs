@@ -1,5 +1,52 @@
-use struple::{compare, encode, pack, unpack, Value, Writer};
+use struple::{compare, encode, pack, semantic_order, unpack, Value, Writer};
 use std::cmp::Ordering;
+
+fn dec(s: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.append_decimal_string(s).unwrap();
+    w.into_bytes()
+}
+
+#[test]
+fn decimal_golden_and_roundtrip() {
+    // Sanity hex values pinned by the cross-language corpus.
+    assert_eq!(hex(&dec("12.345")), "380321020d233300");
+    assert_eq!(hex(&dec("-12.345")), "3801defdf2dcccff");
+    assert_eq!(hex(&dec("0")), "3802");
+    // Canonicalization: trailing/leading zeros collapse; scaled forms agree.
+    assert_eq!(dec("12.300"), dec("12.3"));
+    assert_eq!(dec("0.5"), dec("000.5000"));
+    assert_eq!(dec("1e30"), dec("1000000000000000000000000000000"));
+
+    // Round-trip through Value::Decimal.
+    for s in ["12.345", "-12.345", "0", "100", "0.001", "-0.5", "1e-9"] {
+        let bytes = dec(s);
+        match &unpack(&bytes).unwrap()[0] {
+            Value::Decimal { .. } => {}
+            other => panic!("expected decimal, got {other:?}"),
+        }
+        // Re-encoding the decoded value reproduces the canonical bytes.
+        assert_eq!(encode(&unpack(&bytes).unwrap()[0]), bytes, "reencode {s}");
+    }
+}
+
+#[test]
+fn decimal_byte_order_and_semantics() {
+    // memcmp byte order: negatives < zero < positives, magnitude-correct.
+    let ordered = ["-12.345", "-0.5", "0", "0.001", "1.5", "12.345", "100", "1e30"];
+    let enc: Vec<Vec<u8>> = ordered.iter().map(|s| dec(s)).collect();
+    for i in 1..enc.len() {
+        assert!(enc[i - 1] < enc[i], "decimal byte order at {i}");
+    }
+    // Semantic cross-type equality: decimal == int == float for the same value.
+    let five_i = encode(&Value::Int(5));
+    let five_f = encode(&Value::F64(5.0));
+    assert_eq!(semantic_order(&dec("5"), &five_i).unwrap(), Ordering::Equal);
+    assert_eq!(semantic_order(&dec("5.0"), &five_f).unwrap(), Ordering::Equal);
+    assert_eq!(semantic_order(&dec("1.50"), &dec("1.5")).unwrap(), Ordering::Equal);
+    // -0.0 == 0 == decimal 0.
+    assert_eq!(semantic_order(&dec("0"), &encode(&Value::F64(-0.0))).unwrap(), Ordering::Equal);
+}
 
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::new();

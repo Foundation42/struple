@@ -18,7 +18,7 @@ const I128_MIN = -(1n << 127n);
 const TYPE_NAME = {
   0x01: "nil", 0x02: "undefined", 0x05: "false", 0x06: "true", 0x20: "int 0",
   0x0f: "big −int", 0x31: "big +int", 0x34: "float32", 0x35: "float64",
-  0x40: "timestamp", 0x44: "uuid", 0x48: "string", 0x49: "bytes", 0x50: "array", 0x52: "map", 0x54: "set",
+  0x38: "decimal", 0x40: "timestamp", 0x44: "uuid", 0x48: "string", 0x49: "bytes", 0x50: "array", 0x52: "map", 0x54: "set",
 };
 export function typeName(b) {
   if (TYPE_NAME[b]) return TYPE_NAME[b];

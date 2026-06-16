@@ -45,6 +45,15 @@ void struple_append_uint(struple_writer *w, uint64_t v);
 void struple_append_big_int(struple_writer *w, bool negative, const uint8_t *magnitude, size_t mag_len);
 void struple_append_f32(struple_writer *w, float v);
 void struple_append_f64(struple_writer *w, double v);
+/* Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`, where
+ * `digits` are the coefficient C's decimal digits (each 0–9, most-significant
+ * first). Canonicalized on the way in: leading/trailing zeros are stripped and
+ * any all-zero coefficient collapses to the single zero form. */
+void struple_append_decimal(struple_writer *w, bool negative, const uint8_t *digits, size_t ndigits, int32_t exp);
+/* Append a decimal parsed from text:
+ * `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`. Returns 0 on success, -1 on
+ * a malformed literal. */
+int struple_append_decimal_string(struple_writer *w, const char *s, size_t len);
 void struple_append_timestamp(struple_writer *w, int64_t micros);
 /* `uuid16` points to 16 raw bytes (network/big-endian order). */
 void struple_append_uuid(struple_writer *w, const uint8_t *uuid16);
@@ -78,6 +87,7 @@ typedef enum {
     STRUPLE_BIGINT,     /* sign + big-endian magnitude in `data` */
     STRUPLE_F32,
     STRUPLE_F64,
+    STRUPLE_DECIMAL,    /* dec_negative + dec_exponent + coefficient digits in `data` */
     STRUPLE_TIMESTAMP,  /* int_val = microseconds since the Unix epoch */
     STRUPLE_UUID,       /* `data` = 16 raw bytes */
     STRUPLE_STRING,     /* `data` = UTF-8 (NUL-terminated past data_len) */
@@ -91,10 +101,15 @@ typedef struct {
     struple_kind kind;
     bool bool_val;
     bool big_negative;
+    bool dec_negative;   /* DECIMAL: sign of the value */
     int64_t int_val;
+    int64_t dec_exponent; /* DECIMAL: power of ten — value = ±coefficient · 10^dec_exponent */
     float f32_val;
     double f64_val;
-    const uint8_t *data; /* STRING/BYTES/ARRAY/MAP/SET/BIGINT — valid until the next next() call */
+    /* STRING/BYTES/ARRAY/MAP/SET/BIGINT — valid until the next next() call.
+     * For DECIMAL: the coefficient's significant digits (each byte 0–9,
+     * most-significant first); empty for the canonical zero. */
+    const uint8_t *data;
     size_t data_len;
 } struple_element;
 
@@ -138,6 +153,7 @@ bool struple_view_is_undefined(struple_view v);
 bool struple_view_is_bool(struple_view v);
 bool struple_view_is_int(struple_view v);
 bool struple_view_is_float(struple_view v);
+bool struple_view_is_decimal(struple_view v);
 bool struple_view_is_number(struple_view v);
 bool struple_view_is_timestamp(struple_view v);
 bool struple_view_is_uuid(struple_view v);

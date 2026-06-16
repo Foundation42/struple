@@ -32,9 +32,17 @@ struct Error : std::runtime_error {
 
 namespace tc {
 constexpr uint8_t TERMINATOR = 0x00, NIL = 0x01, UNDEF = 0x02, BOOL_FALSE = 0x05, BOOL_TRUE = 0x06,
-                  INT_NEG_BIG = 0x0f, INT_ZERO = 0x20, INT_POS_BIG = 0x31, FLOAT32 = 0x34,
-                  FLOAT64 = 0x35, TIMESTAMP = 0x40, UUID = 0x44, STRING = 0x48, BYTES = 0x49,
-                  ARRAY = 0x50, MAP = 0x52, SET = 0x54;
+                  INT_NEG_BIG = 0x0f, INT_NEG_MIN = 0x10, INT_NEG_MAX = 0x1f, INT_ZERO = 0x20,
+                  INT_POS_MIN = 0x21, INT_POS_MAX = 0x30, INT_POS_BIG = 0x31, FLOAT32 = 0x34,
+                  FLOAT64 = 0x35, DECIMAL = 0x38, TIMESTAMP = 0x40, UUID = 0x44, STRING = 0x48,
+                  BYTES = 0x49, ARRAY = 0x50, MAP = 0x52, SET = 0x54;
+}
+
+// Leading marker inside a decimal payload, isolating the three sign groups so
+// memcmp keeps negative < zero < positive. For negatives the rest of the payload
+// is bit-complemented, so a larger magnitude sorts earlier.
+namespace dec_sign {
+constexpr uint8_t NEG = 0x01, ZERO = 0x02, POS = 0x03;
 }
 
 namespace detail {
@@ -142,6 +150,88 @@ inline void append_big(Bytes& b, bool neg, const uint8_t* mag, size_t mlen) {
     append_magnitude(b, neg, mag, mlen);
 }
 
+// Append an arbitrary-precision decimal `(-1)^neg · C · 10^exp`, where `digits`
+// are the coefficient `C`'s decimal digits (each 0–9, most-significant first).
+// Canonicalized on the way in: leading/trailing zeros are stripped and any
+// all-zero coefficient collapses to the single zero form.
+inline void append_decimal(Bytes& b, bool neg, const uint8_t* digits, size_t dlen, int64_t exp) {
+    size_t lead = 0;
+    while (lead < dlen && digits[lead] == 0) lead++;
+    const uint8_t* sig = digits + lead;
+    size_t slen = dlen - lead;
+
+    b.push_back(tc::DECIMAL);
+    if (slen == 0) {  // canonical zero — one form regardless of scale
+        b.push_back(dec_sign::ZERO);
+        return;
+    }
+
+    // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+    // Trailing zeros change neither the value nor E, so drop them for storage.
+    int64_t adj_exp = int64_t(slen) + exp;
+    size_t end = slen;
+    while (end > 0 && sig[end - 1] == 0) end--;
+
+    // Order-bearing tail: [E as a struple int][base-100 digits][terminator].
+    Bytes tail;
+    append_integer(tail, adj_exp);
+    for (size_t i = 0; i < end; i += 2) {
+        unsigned hi = sig[i];
+        unsigned lo = (i + 1 < end) ? sig[i + 1] : 0;  // pad odd tail with 0
+        tail.push_back(uint8_t(hi * 10 + lo + 1));      // pair 0–99 -> byte 1–100
+    }
+    tail.push_back(tc::TERMINATOR);
+
+    b.push_back(neg ? dec_sign::NEG : dec_sign::POS);
+    for (uint8_t x : tail) b.push_back(neg ? uint8_t(~x) : x);
+}
+
+// Parse a decimal from text: `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`.
+inline void append_decimal_string(Bytes& b, std::string_view s) {
+    size_t i = 0;
+    bool neg = false;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) {
+        neg = s[i] == '-';
+        i++;
+    }
+    std::vector<uint8_t> digits;
+    int64_t exp = 0;
+    bool seen_point = false;
+    bool any = false;
+    for (; i < s.size(); i++) {
+        char c = s[i];
+        if (c == '.') {
+            if (seen_point) throw Error("struple: invalid decimal");
+            seen_point = true;
+            continue;
+        }
+        if (c == 'e' || c == 'E') break;
+        if (c < '0' || c > '9') throw Error("struple: invalid decimal");
+        digits.push_back(uint8_t(c - '0'));
+        if (seen_point) exp -= 1;
+        any = true;
+    }
+    if (!any) throw Error("struple: invalid decimal");
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        int64_t esign = 1;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) {
+            if (s[i] == '-') esign = -1;
+            i++;
+        }
+        int64_t ev = 0;
+        bool edig = false;
+        for (; i < s.size(); i++) {
+            if (s[i] < '0' || s[i] > '9') throw Error("struple: invalid decimal");
+            ev = ev * 10 + (s[i] - '0');
+            edig = true;
+        }
+        if (!edig) throw Error("struple: invalid decimal");
+        exp += esign * ev;
+    }
+    append_decimal(b, neg, digits.data(), digits.size(), exp);
+}
+
 inline Bytes unescape(const uint8_t* framed, size_t flen) {
     Bytes out;
     out.reserve(flen);
@@ -206,6 +296,20 @@ public:
         bits = (bits & detail::SIGN32) ? ~bits : (bits ^ detail::SIGN32);
         buf_.push_back(tc::FLOAT32);
         for (int i = 3; i >= 0; i--) buf_.push_back(uint8_t((bits >> (8 * i)) & 0xff));
+        return *this;
+    }
+    // Append a decimal `(-1)^negative · C · 10^exp`, where `digits` are the
+    // coefficient `C`'s decimal digits (each 0–9, most-significant first).
+    Writer& append_decimal(bool negative, const uint8_t* digits, size_t len, int64_t exp) {
+        detail::append_decimal(buf_, negative, digits, len, exp);
+        return *this;
+    }
+    Writer& append_decimal(bool negative, const Bytes& digits, int64_t exp) {
+        return append_decimal(negative, digits.data(), digits.size(), exp);
+    }
+    // Append a decimal parsed from text, e.g. "12.345", "-0.5", "1e-9".
+    Writer& appendDecimalString(std::string_view s) {
+        detail::append_decimal_string(buf_, s);
         return *this;
     }
     Writer& append_timestamp(int64_t micros) {
@@ -288,17 +392,22 @@ inline Bytes pack(Ts&&... vs) {
 
 // ----------------------------------------------------------------- Reader
 
-enum class Kind { Nil, Undefined, Bool, Int, BigInt, F32, F64, Timestamp, Uuid, String, Bytes, Array, Map, Set };
+enum class Kind { Nil, Undefined, Bool, Int, BigInt, F32, F64, Decimal, Timestamp, Uuid, String, Bytes, Array, Map, Set };
 
 struct Element {
     Kind kind{};
     bool boolean = false;
     int64_t integer = 0;       // Int, Timestamp (micros)
-    bool big_negative = false; // BigInt sign
+    bool big_negative = false; // BigInt sign; Decimal sign
     float f32 = 0;
     double f64 = 0;
     std::string str;           // String
-    Bytes data;                // Bytes; BigInt magnitude; Array/Map/Set body
+    Bytes data;                // Bytes; BigInt magnitude; Array/Map/Set body;
+                               //   Decimal coefficient digits (each 0–9, MSD first)
+    int64_t dec_exp = 0;       // Decimal: power of ten, value = ±(C·10^dec_exp)
+
+    // Decimal helpers (the coefficient digits live in `data`; zero has none).
+    bool decIsZero() const { return data.empty(); }
 };
 
 /// A non-owning byte span — a sub-view of a buffer.
@@ -333,6 +442,7 @@ public:
             case tc::INT_POS_BIG: read_big_int(t, e); return e;
             case tc::FLOAT32: { uint32_t b = uint32_t(detail::be_to_u64(take(4), 4)); b = (b & detail::SIGN32) ? (b ^ detail::SIGN32) : ~b; std::memcpy(&e.f32, &b, 4); e.kind = Kind::F32; return e; }
             case tc::FLOAT64: { uint64_t b = detail::be_to_u64(take(8), 8); b = (b & detail::SIGN64) ? (b ^ detail::SIGN64) : ~b; std::memcpy(&e.f64, &b, 8); e.kind = Kind::F64; return e; }
+            case tc::DECIMAL: read_decimal(e); return e;
             case tc::TIMESTAMP: { uint64_t b = detail::be_to_u64(take(8), 8) ^ detail::SIGN64; e.kind = Kind::Timestamp; e.integer = int64_t(b); return e; }
             case tc::UUID: { const uint8_t* p = take(16); e.kind = Kind::Uuid; e.data.assign(p, p + 16); return e; }
             case tc::STRING: { Bytes u = take_framed(); e.kind = Kind::String; e.str.assign(reinterpret_cast<const char*>(u.data()), u.size()); return e; }
@@ -428,6 +538,7 @@ private:
             case tc::FLOAT32: take(4); break;
             case tc::FLOAT64:
             case tc::TIMESTAMP: take(8); break;
+            case tc::DECIMAL: skip_decimal(); break;
             case tc::UUID: take(16); break;
             case tc::STRING:
             case tc::BYTES:
@@ -507,6 +618,92 @@ private:
         e.data.resize(n);
         for (size_t i = 0; i < n; i++) e.data[i] = comp(mag[i]);
     }
+
+    // Read the embedded exponent (a struple integer), un-complementing each byte
+    // for negatives. Big-int exponent codes are rejected (beyond any real use).
+    int64_t read_dec_exponent(bool complement) {
+        auto comp = [complement](uint8_t b) { return complement ? uint8_t(~b) : b; };
+        uint8_t tb = comp(take(1)[0]);
+        if (tb == tc::INT_ZERO) return 0;
+        if ((tb >= tc::INT_NEG_MIN && tb <= tc::INT_NEG_MAX) ||
+            (tb >= tc::INT_POS_MIN && tb <= tc::INT_POS_MAX)) {
+            bool positive = tb > tc::INT_ZERO;
+            size_t n = positive ? size_t(tb - tc::INT_ZERO) : size_t(tc::INT_ZERO - tb);
+            const uint8_t* p = take(n);
+            uint8_t tmp[16];
+            for (size_t k = 0; k < n; k++) tmp[k] = comp(p[k]);
+            if (n == 16 && ((positive && tmp[0] >= 0x80) || (!positive && tmp[0] < 0x80)))
+                throw Error("struple: non-canonical decimal exponent");
+            // n <= 8 always here for any realistic exponent; reject wider as out of i64.
+            if (n > 8) throw Error("struple: decimal exponent out of range");
+            uint64_t raw = detail::be_to_u64(tmp, n);
+            if (positive) {
+                if (raw > uint64_t(INT64_MAX)) throw Error("struple: decimal exponent out of range");
+                return int64_t(raw);
+            }
+            // negative excess form over n bytes: value = raw - 2^(8n)
+            if (n == 8) {
+                uint64_t m = uint64_t(0) - raw;  // magnitude
+                if (m > uint64_t(INT64_MAX) + 1) throw Error("struple: decimal exponent out of range");
+                return (m == uint64_t(INT64_MAX) + 1) ? INT64_MIN : -int64_t(m);
+            }
+            return -int64_t((uint64_t(1) << (8 * n)) - raw);
+        }
+        throw Error("struple: invalid decimal exponent");
+    }
+
+    void read_decimal(Element& e) {
+        e.kind = Kind::Decimal;
+        uint8_t sign = take(1)[0];
+        if (sign == dec_sign::ZERO) {
+            e.big_negative = false;
+            e.dec_exp = 0;
+            e.data.clear();  // canonical zero — no coefficient digits
+            return;
+        }
+        if (sign != dec_sign::NEG && sign != dec_sign::POS)
+            throw Error("struple: invalid decimal sign");
+        bool neg = (sign == dec_sign::NEG);
+        e.big_negative = neg;
+        int64_t adj_exp = read_dec_exponent(neg);
+
+        // Digit bytes are 1–100 (positive) or their complement (negative), and never
+        // collide with the terminator (0x00, or 0xFF when complemented).
+        uint8_t term = neg ? 0xff : 0x00;
+        size_t start = pos_, i = pos_;
+        while (i < len_ && buf_[i] != term) i++;
+        if (i >= len_) throw Error("struple: truncated decimal");
+        if (i == start) throw Error("struple: empty decimal coefficient");
+        pos_ = i + 1;  // consume the terminator
+
+        // Unpack base-100 pairs into individual digits (0–9, MSD first). An odd
+        // digit count padded its final pair's low digit with a (canonical) zero.
+        e.data.clear();
+        e.data.reserve((i - start) * 2);
+        for (size_t k = start; k < i; k++) {
+            uint8_t pair = uint8_t((neg ? uint8_t(~buf_[k]) : buf_[k]) - 1);  // 0–99
+            e.data.push_back(uint8_t(pair / 10));
+            uint8_t lo = uint8_t(pair % 10);
+            bool is_last = (k + 1 == i);
+            if (!(is_last && lo == 0)) e.data.push_back(lo);  // skip synthetic trailing pad
+        }
+        // exponent = adjusted exponent - significant digit count (value = C·10^exp).
+        e.dec_exp = adj_exp - int64_t(e.data.size());
+    }
+
+    void skip_decimal() {
+        uint8_t sign = take(1)[0];
+        if (sign == dec_sign::ZERO) return;
+        if (sign != dec_sign::NEG && sign != dec_sign::POS)
+            throw Error("struple: invalid decimal sign");
+        bool neg = (sign == dec_sign::NEG);
+        read_dec_exponent(neg);
+        uint8_t term = neg ? 0xff : 0x00;
+        size_t i = pos_;
+        while (i < len_ && buf_[i] != term) i++;
+        if (i >= len_) throw Error("struple: truncated decimal");
+        pos_ = i + 1;
+    }
 };
 
 // --------------------------------------------------------- transcode / order
@@ -520,6 +717,7 @@ inline void append_element(Writer& w, const Element& e) {
         case Kind::BigInt: w.append_big_int(e.big_negative, e.data); break;
         case Kind::F32: w.append_f32(e.f32); break;
         case Kind::F64: w.append_f64(e.f64); break;
+        case Kind::Decimal: w.append_decimal(e.big_negative, e.data, e.dec_exp); break;
         case Kind::Timestamp: w.append_timestamp(e.integer); break;
         case Kind::Uuid: w.append_uuid(e.data.data()); break;
         case Kind::String: w.append_string(e.str); break;
@@ -619,7 +817,8 @@ public:
         auto t = headType();
         return t == tc::FLOAT32 || t == tc::FLOAT64;
     }
-    bool isNumber() const { return isInt() || isFloat(); }
+    bool isDecimal() const { return headType() == tc::DECIMAL; }
+    bool isNumber() const { return isInt() || isFloat() || isDecimal(); }
     bool isTimestamp() const { return headType() == tc::TIMESTAMP; }
     bool isUuid() const { return headType() == tc::UUID; }
     bool isString() const { return headType() == tc::STRING; }
@@ -705,7 +904,8 @@ inline int sem_class_rank(Kind k) {
         case Kind::Int:
         case Kind::BigInt:
         case Kind::F32:
-        case Kind::F64: return 3;
+        case Kind::F64:
+        case Kind::Decimal: return 3;  // unified "number" class
         case Kind::Timestamp: return 4;
         case Kind::Uuid: return 5;
         case Kind::String: return 6;
@@ -811,6 +1011,122 @@ inline int sem_bigint_float(bool neg, const uint8_t* mag, size_t mlen, double f)
     return si < 0 ? -c : c;
 }
 
+// -- decimal vs the rest of the number class ---------------------------------
+
+// `mag · m` (small m) as new big-endian bytes, trimmed. Pre-trimmed input plus
+// front-inserted carries never yield a leading zero.
+inline Bytes sem_mul_small(const Bytes& mag, unsigned m) {
+    Bytes out = mag;
+    uint32_t carry = 0;
+    for (size_t i = out.size(); i-- > 0;) {
+        uint32_t v = uint32_t(out[i]) * m + carry;
+        out[i] = uint8_t(v & 0xff);
+        carry = v >> 8;
+    }
+    while (carry) {
+        out.insert(out.begin(), uint8_t(carry & 0xff));
+        carry >>= 8;
+    }
+    return out;
+}
+
+inline Bytes sem_mul_pow(const Bytes& mag, unsigned base, size_t k) {
+    Bytes cur = mag;
+    for (size_t j = 0; j < k; j++) cur = sem_mul_small(cur, base);
+    return cur;
+}
+inline Bytes sem_mul_pow10(const Bytes& mag, size_t k) { return sem_mul_pow(mag, 10, k); }
+inline Bytes sem_mul_pow5(const Bytes& mag, size_t k) { return sem_mul_pow(mag, 5, k); }
+
+// Decimal digits (each 0–9, MSD first) -> big-endian base-256 magnitude.
+inline Bytes sem_dec_digits_to_mag(const Bytes& digits) {
+    Bytes bytes;
+    for (uint8_t dch : digits) {  // already 0–9
+        uint16_t carry = dch;
+        for (size_t i = bytes.size(); i-- > 0;) {
+            uint16_t v = uint16_t(bytes[i]) * 10 + carry;
+            bytes[i] = uint8_t(v & 0xff);
+            carry = v >> 8;
+        }
+        while (carry) {
+            bytes.insert(bytes.begin(), uint8_t(carry & 0xff));
+            carry >>= 8;
+        }
+    }
+    return bytes;
+}
+
+// An exact base-10 value `sign · mag · 10^exp10` (mag big-endian; empty == 0).
+struct B10 {
+    int sign;
+    Bytes mag;
+    int64_t exp10;
+};
+
+inline bool sem_is_exact(const Element& e) {
+    return e.kind == Kind::Int || e.kind == Kind::BigInt || e.kind == Kind::Decimal;
+}
+
+// Decompose an int / big-int / decimal into its exact base-10 value.
+inline B10 sem_num_to_b10(const Element& e) {
+    if (e.kind == Kind::Int) {
+        if (e.integer == 0) return {0, Bytes{}, 0};
+        uint64_t N = e.integer < 0 ? (~uint64_t(e.integer) + 1) : uint64_t(e.integer);
+        uint8_t buf[8];
+        size_t n = u64_to_be(N, buf);
+        return {e.integer < 0 ? -1 : 1, Bytes(buf, buf + n), 0};
+    }
+    if (e.kind == Kind::BigInt) {
+        return {e.big_negative ? -1 : 1, e.data, 0};  // data already un-complemented
+    }
+    // Decimal: data holds the coefficient digits (0–9, MSD first); empty == zero.
+    if (e.decIsZero()) return {0, Bytes{}, 0};
+    return {e.big_negative ? -1 : 1, sem_dec_digits_to_mag(e.data), e.dec_exp};
+}
+
+// Compare two same-sign, nonzero base-10 magnitudes (mag · 10^exp10), exactly.
+inline int sem_cmp_b10_mag(const B10& a, const B10& b) {
+    int64_t e = a.exp10 < b.exp10 ? a.exp10 : b.exp10;
+    Bytes sa = sem_mul_pow10(a.mag, size_t(a.exp10 - e));
+    Bytes sb = sem_mul_pow10(b.mag, size_t(b.exp10 - e));
+    return sem_cmp_mag(sa.data(), sa.size(), sb.data(), sb.size());
+}
+
+// Compare `mag · 10^exp10` to `mant · 2^e2` (both > 0), exactly. Splits 10^exp10
+// into 2^exp10 · 5^exp10 and scales both sides up to integers before comparing.
+inline int sem_cmp_b10_mag_to_float(const Bytes& mag, int64_t exp10, uint64_t mant, int e2) {
+    int64_t a_pow2 = std::max<int64_t>(0, std::max<int64_t>(-exp10, -int64_t(e2)));  // common 2^
+    int64_t b_pow5 = std::max<int64_t>(0, -exp10);                                    // common 5^
+
+    // LHS' = mag · 5^(exp10 + b_pow5) · 2^(exp10 + a_pow2)
+    Bytes lhs = sem_mul_pow5(mag, size_t(exp10 + b_pow5));
+    lhs = sem_shl(lhs.data(), lhs.size(), size_t(exp10 + a_pow2));
+
+    // RHS' = mant · 5^(b_pow5) · 2^(e2 + a_pow2)
+    uint8_t mb[8];
+    for (int i = 0; i < 8; i++) mb[i] = uint8_t(mant >> (8 * (7 - i)));
+    Bytes mant_bytes(mb, mb + 8);
+    while (mant_bytes.size() > 1 && mant_bytes[0] == 0) mant_bytes.erase(mant_bytes.begin());
+    Bytes rhs = sem_mul_pow5(mant_bytes, size_t(b_pow5));
+    rhs = sem_shl(rhs.data(), rhs.size(), size_t(e2 + a_pow2));
+
+    return sem_cmp_mag(lhs.data(), lhs.size(), rhs.data(), rhs.size());
+}
+
+inline int sem_cmp_b10_float(const B10& v, double f) {
+    int sf = sem_sign(f);
+    if (v.sign != sf) return (v.sign > sf) - (v.sign < sf);
+    if (v.sign == 0) return 0;  // both zero
+    uint64_t mant;
+    int exp;
+    sem_decompose(std::fabs(f), mant, exp);
+    int c = sem_cmp_b10_mag_to_float(v.mag, v.exp10, mant, exp);
+    return v.sign < 0 ? -c : c;
+}
+
+// Compare two finite numbers when at least one side is a decimal.
+inline int sem_cmp_with_decimal(const Element& a, const Element& b);
+
 inline bool sem_is_int(const Element& e) { return e.kind == Kind::Int || e.kind == Kind::BigInt; }
 inline double sem_float(const Element& e) { return e.kind == Kind::F32 ? double(e.f32) : e.f64; }
 inline int sem_int_sign(const Element& e) {
@@ -818,7 +1134,7 @@ inline int sem_int_sign(const Element& e) {
     return e.big_negative ? -1 : 1;
 }
 inline int sem_num_class(const Element& e) {
-    if (sem_is_int(e)) return 1;
+    if (sem_is_int(e) || e.kind == Kind::Decimal) return 1;  // exact values are finite
     double f = sem_float(e);
     if (std::isnan(f)) return 3;
     if (std::isinf(f)) return f > 0 ? 2 : 0;
@@ -847,11 +1163,26 @@ inline int sem_numbers(const Element& a, const Element& b) {
     int ca = sem_num_class(a), cb = sem_num_class(b);
     if (ca != cb) return (ca > cb) - (ca < cb);
     if (ca != 1) return 0;
+    if (a.kind == Kind::Decimal || b.kind == Kind::Decimal) return sem_cmp_with_decimal(a, b);
     bool ai = sem_is_int(a), bi = sem_is_int(b);
     if (ai && bi) return sem_int_int(a, b);
     if (!ai && !bi) return sem_dcmp(sem_float(a), sem_float(b));
     if (ai) return sem_int_finite(a, sem_float(b));
     return -sem_int_finite(b, sem_float(a));
+}
+
+inline int sem_cmp_with_decimal(const Element& a, const Element& b) {
+    if (sem_is_exact(a) && sem_is_exact(b)) {
+        B10 va = sem_num_to_b10(a);
+        B10 vb = sem_num_to_b10(b);
+        if (va.sign != vb.sign) return (va.sign > vb.sign) - (va.sign < vb.sign);
+        if (va.sign == 0) return 0;
+        int c = sem_cmp_b10_mag(va, vb);
+        return va.sign < 0 ? -c : c;
+    }
+    // exactly one side is a finite float
+    if (sem_is_exact(a)) return sem_cmp_b10_float(sem_num_to_b10(a), sem_float(b));
+    return -sem_cmp_b10_float(sem_num_to_b10(b), sem_float(a));
 }
 
 inline int sem_elements(const Element& a, const Element& b) {
@@ -864,7 +1195,8 @@ inline int sem_elements(const Element& a, const Element& b) {
         case Kind::Int:
         case Kind::BigInt:
         case Kind::F32:
-        case Kind::F64: return sem_numbers(a, b);
+        case Kind::F64:
+        case Kind::Decimal: return sem_numbers(a, b);
         case Kind::Timestamp: return (a.integer > b.integer) - (a.integer < b.integer);
         case Kind::Uuid:
         case Kind::String:

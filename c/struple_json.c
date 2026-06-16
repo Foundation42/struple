@@ -540,6 +540,34 @@ static char *base64(const uint8_t *data, size_t len) {
     return out;
 }
 
+/* Render a decimal as an exact JSON number literal (plain notation, no exponent). */
+static void render_decimal(struple_writer *out, const struple_element *e) {
+    const uint8_t *digs = e->data;
+    size_t k = e->data_len;
+    if (k == 0) { /* canonical zero */
+        jc(out, '0');
+        return;
+    }
+    int64_t exp10 = e->dec_exponent; /* value = C · 10^exp10 */
+    if (e->dec_negative) jc(out, '-');
+    if (exp10 >= 0) {
+        for (size_t i = 0; i < k; i++) jc(out, (char)('0' + digs[i]));
+        for (int64_t z = 0; z < exp10; z++) jc(out, '0');
+        return;
+    }
+    int64_t point_pos = (int64_t)k + exp10; /* number of integer-part digits */
+    if (point_pos > 0) {
+        size_t pp = (size_t)point_pos;
+        for (size_t i = 0; i < pp; i++) jc(out, (char)('0' + digs[i]));
+        jc(out, '.');
+        for (size_t i = pp; i < k; i++) jc(out, (char)('0' + digs[i]));
+    } else {
+        jw(out, "0.");
+        for (int64_t z = point_pos; z < 0; z++) jc(out, '0');
+        for (size_t i = 0; i < k; i++) jc(out, (char)('0' + digs[i]));
+    }
+}
+
 static int render(struple_writer *out, const struple_element *e);
 
 static int render_array(struple_writer *out, const uint8_t *body, size_t blen) {
@@ -620,6 +648,7 @@ static int render(struple_writer *out, const struple_element *e) {
         }
         case STRUPLE_F32: render_float(out, (double)e->f32_val); return 0;
         case STRUPLE_F64: render_float(out, e->f64_val); return 0;
+        case STRUPLE_DECIMAL: render_decimal(out, e); return 0;
         case STRUPLE_UUID: {
             static const char hexd[] = "0123456789abcdef";
             char u[37];

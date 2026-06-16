@@ -8,7 +8,7 @@
 //! i128; fractional/exponent numbers become f64. Objects encode to canonical
 //! (key-sorted) maps.
 
-use crate::codec::{Element, Error, Reader, Writer};
+use crate::codec::{Decimal, Element, Error, Reader, Writer};
 
 /// A parsed JSON value (also used by the conformance tests to read the corpus).
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +104,7 @@ fn render(out: &mut String, e: &Element) -> Result<(), Error> {
         }
         Element::F32(f) => render_float(out, *f as f64),
         Element::F64(f) => render_float(out, *f),
+        Element::Decimal(d) => render_decimal(out, d),
         Element::Timestamp(t) => out.push_str(&t.to_string()),
         Element::Uuid(u) => render_string(out, &render_uuid(u)),
         Element::Str(s) => render_string(out, s),
@@ -123,6 +124,49 @@ fn render_uuid(u: &[u8; 16]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// Render a decimal as an exact JSON number literal (plain notation, no exponent).
+fn render_decimal(out: &mut String, d: &Decimal) {
+    if d.is_zero() {
+        out.push('0');
+        return;
+    }
+    let digs = d.coefficient_digits(); // 0–9 values, most-significant first
+    let k = digs.len() as i64;
+    let exp10 = d.exponent(); // value = C · 10^exp10
+
+    if d.negative {
+        out.push('-');
+    }
+    if exp10 >= 0 {
+        for dd in &digs {
+            out.push((b'0' + dd) as char);
+        }
+        for _ in 0..exp10 {
+            out.push('0');
+        }
+        return;
+    }
+    let point_pos = k + exp10; // number of integer-part digits
+    if point_pos > 0 {
+        let pp = point_pos as usize;
+        for dd in &digs[..pp] {
+            out.push((b'0' + dd) as char);
+        }
+        out.push('.');
+        for dd in &digs[pp..] {
+            out.push((b'0' + dd) as char);
+        }
+    } else {
+        out.push_str("0.");
+        for _ in point_pos..0 {
+            out.push('0');
+        }
+        for dd in &digs {
+            out.push((b'0' + dd) as char);
+        }
+    }
 }
 
 fn render_float(out: &mut String, f: f64) {

@@ -75,6 +75,8 @@ static void build_into(struple_writer *w, const sj_value *op) {
         struple_append_f64(w, sj_as_f64(val));
     } else if (strcmp(key, "float32") == 0) {
         struple_append_f32(w, (float)sj_as_f64(val));
+    } else if (strcmp(key, "decimal") == 0) {
+        struple_append_decimal_string(w, val->str, strlen(val->str));
     } else if (strcmp(key, "timestamp") == 0) {
         struple_append_timestamp(w, strtoll(val->str, NULL, 10));
     } else if (strcmp(key, "string") == 0) {

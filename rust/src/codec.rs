@@ -19,6 +19,7 @@ pub const INT_ZERO: u8 = 0x20;
 pub const INT_POS_BIG: u8 = 0x31;
 pub const FLOAT32: u8 = 0x34;
 pub const FLOAT64: u8 = 0x35;
+pub const DECIMAL: u8 = 0x38;
 pub const TIMESTAMP: u8 = 0x40;
 pub const UUID: u8 = 0x44;
 pub const STRING: u8 = 0x48;
@@ -30,12 +31,20 @@ pub const SET: u8 = 0x54;
 const SIGN64: u64 = 1 << 63;
 const SIGN32: u32 = 1 << 31;
 
+// Leading marker inside a decimal payload, isolating the three sign groups so
+// `memcmp` keeps `negative < zero < positive`. For negatives the rest of the
+// payload is bit-complemented, so a larger magnitude sorts earlier.
+const DEC_SIGN_NEG: u8 = 0x01;
+const DEC_SIGN_ZERO: u8 = 0x02;
+const DEC_SIGN_POS: u8 = 0x03;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Truncated,
     InvalidType(u8),
     UnsupportedWidth(usize),
     Utf8,
+    InvalidDecimal,
 }
 
 impl fmt::Display for Error {
@@ -45,11 +54,61 @@ impl fmt::Display for Error {
             Error::InvalidType(t) => write!(f, "struple: invalid type code {t:#x}"),
             Error::UnsupportedWidth(n) => write!(f, "struple: unsupported integer width {n}"),
             Error::Utf8 => write!(f, "struple: invalid UTF-8 in string"),
+            Error::InvalidDecimal => write!(f, "struple: invalid decimal literal"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// A decoded decimal: value = `(-1)^negative · coefficient · 10^exponent()`, with the
+/// coefficient's significant digits carried base-100 packed (two digits per byte).
+/// `adj_exp` is the adjusted exponent (the power of ten of the most-significant
+/// digit); the canonical zero has an empty coefficient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decimal {
+    pub negative: bool,
+    pub adj_exp: i64,
+    /// Base-100 packed digit bytes, *un-complemented* — each pair stored as
+    /// `value+1` (1–100). Empty for the canonical zero.
+    pub coeff: Vec<u8>,
+}
+
+impl Decimal {
+    pub fn is_zero(&self) -> bool {
+        self.coeff.is_empty()
+    }
+
+    /// Number of significant decimal digits in the coefficient.
+    pub fn digit_count(&self) -> usize {
+        if self.coeff.is_empty() {
+            return 0;
+        }
+        let pair = self.coeff[self.coeff.len() - 1] - 1;
+        // An odd digit count pads the final pair's low digit with a (canonical) zero.
+        self.coeff.len() * 2 - if pair % 10 == 0 { 1 } else { 0 }
+    }
+
+    /// The power of ten applied to the integer coefficient: `value = ±coefficient · 10^exponent`.
+    pub fn exponent(&self) -> i64 {
+        self.adj_exp - self.digit_count() as i64
+    }
+
+    /// The coefficient's decimal digits (each 0–9, most-significant first).
+    pub fn coefficient_digits(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.coeff.len() * 2);
+        for (idx, &raw) in self.coeff.iter().enumerate() {
+            let pair = raw - 1;
+            out.push(pair / 10);
+            let lo = pair % 10;
+            let is_last = idx + 1 == self.coeff.len();
+            if !(is_last && lo == 0) {
+                out.push(lo);
+            }
+        }
+        out
+    }
+}
 
 /// A native value for the high-level `pack`/`unpack` API.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +120,9 @@ pub enum Value {
     BigInt { negative: bool, magnitude: Vec<u8> },
     F32(f32),
     F64(f64),
+    /// Arbitrary-precision base-10 number: `(-1)^negative · C · 10^exp`, where
+    /// `digits` are the coefficient `C`'s decimal digits (0–9, most-significant first).
+    Decimal { negative: bool, digits: Vec<u8>, exp: i32 },
     Timestamp(i64),
     Uuid([u8; 16]),
     Str(String),
@@ -81,6 +143,7 @@ pub enum Element {
     BigInt { negative: bool, magnitude: Vec<u8> },
     F32(f32),
     F64(f64),
+    Decimal(Decimal),
     Timestamp(i64),
     Uuid([u8; 16]),
     Str(String),
@@ -136,6 +199,18 @@ impl Writer {
     pub fn append_f64(&mut self, v: f64) -> &mut Self {
         append_f64(&mut self.buf, v);
         self
+    }
+    /// Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`, where
+    /// `digits` are the coefficient `C`'s decimal digits (each 0–9, most-significant
+    /// first). Canonicalized: leading/trailing zeros stripped, all-zero -> zero form.
+    pub fn append_decimal(&mut self, negative: bool, digits: &[u8], exp: i32) -> &mut Self {
+        append_decimal(&mut self.buf, negative, digits, exp);
+        self
+    }
+    /// Append a decimal parsed from text: `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`.
+    pub fn append_decimal_string(&mut self, s: &str) -> Result<&mut Self, Error> {
+        append_decimal_string(&mut self.buf, s)?;
+        Ok(self)
     }
     pub fn append_timestamp(&mut self, micros: i64) -> &mut Self {
         append_timestamp(&mut self.buf, micros);
@@ -196,6 +271,7 @@ fn append_value(out: &mut Vec<u8>, value: &Value) {
         Value::BigInt { negative, magnitude } => append_big(out, *negative, magnitude),
         Value::F32(f) => append_f32(out, *f),
         Value::F64(f) => append_f64(out, *f),
+        Value::Decimal { negative, digits, exp } => append_decimal(out, *negative, digits, *exp),
         Value::Timestamp(t) => append_timestamp(out, *t),
         Value::Uuid(u) => append_uuid(out, u),
         Value::Str(s) => write_framed(out, STRING, s.as_bytes()),
@@ -292,6 +368,116 @@ fn append_f32(out: &mut Vec<u8>, value: f32) {
     let bits = if bits & SIGN32 != 0 { !bits } else { bits ^ SIGN32 };
     out.push(FLOAT32);
     out.extend_from_slice(&bits.to_be_bytes());
+}
+
+/// Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`. `digits` are
+/// the coefficient's decimal digits (0–9, most-significant first). Canonicalized:
+/// leading/trailing zeros stripped; an all-zero coefficient collapses to zero form.
+fn append_decimal(out: &mut Vec<u8>, negative: bool, digits: &[u8], exp: i32) {
+    let mut lead = 0;
+    while lead < digits.len() && digits[lead] == 0 {
+        lead += 1;
+    }
+    let sig = &digits[lead..];
+
+    out.push(DECIMAL);
+    if sig.is_empty() {
+        out.push(DEC_SIGN_ZERO); // canonical zero — one form regardless of scale
+        return;
+    }
+
+    // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+    // Trailing zeros change neither the value nor E, so drop them for storage.
+    let adj_exp = sig.len() as i128 + exp as i128;
+    let mut end = sig.len();
+    while end > 0 && sig[end - 1] == 0 {
+        end -= 1;
+    }
+    let store = &sig[..end];
+
+    // Order-bearing tail: [E as a struple int][base-100 digits][terminator].
+    let mut tail = Vec::new();
+    append_integer(&mut tail, adj_exp);
+    let mut i = 0;
+    while i < store.len() {
+        let hi = store[i] as u16;
+        let lo = if i + 1 < store.len() { store[i + 1] as u16 } else { 0 }; // pad odd tail with 0
+        tail.push((hi * 10 + lo + 1) as u8); // pair 0–99 -> byte 1–100
+        i += 2;
+    }
+    tail.push(TERMINATOR);
+
+    out.push(if negative { DEC_SIGN_NEG } else { DEC_SIGN_POS });
+    for b in tail {
+        out.push(if negative { !b } else { b });
+    }
+}
+
+/// Parse a decimal literal and append it. Mirrors the Zig `appendDecimalString`.
+fn append_decimal_string(out: &mut Vec<u8>, s: &str) -> Result<(), Error> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut negative = false;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        negative = b[i] == b'-';
+        i += 1;
+    }
+    let mut digits: Vec<u8> = Vec::new();
+    let mut exp: i32 = 0;
+    let mut seen_point = false;
+    let mut any = false;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'.' {
+            if seen_point {
+                return Err(Error::InvalidDecimal);
+            }
+            seen_point = true;
+            i += 1;
+            continue;
+        }
+        if c == b'e' || c == b'E' {
+            break;
+        }
+        if !c.is_ascii_digit() {
+            return Err(Error::InvalidDecimal);
+        }
+        digits.push(c - b'0');
+        if seen_point {
+            exp -= 1;
+        }
+        any = true;
+        i += 1;
+    }
+    if !any {
+        return Err(Error::InvalidDecimal);
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        let mut esign: i32 = 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            if b[i] == b'-' {
+                esign = -1;
+            }
+            i += 1;
+        }
+        let mut ev: i32 = 0;
+        let mut edig = false;
+        while i < b.len() {
+            if !b[i].is_ascii_digit() {
+                return Err(Error::InvalidDecimal);
+            }
+            ev = ev * 10 + (b[i] - b'0') as i32;
+            edig = true;
+            i += 1;
+        }
+        if !edig {
+            return Err(Error::InvalidDecimal);
+        }
+        exp += esign * ev;
+    }
+    append_decimal(out, negative, &digits, exp);
+    Ok(())
 }
 
 fn append_timestamp(out: &mut Vec<u8>, micros: i64) {
@@ -395,6 +581,7 @@ impl<'a> Reader<'a> {
             INT_NEG_BIG | INT_POS_BIG => self.read_big_int(t)?,
             FLOAT32 => Element::F32(self.read_f32()?),
             FLOAT64 => Element::F64(self.read_f64()?),
+            DECIMAL => Element::Decimal(self.take_decimal()?),
             TIMESTAMP => Element::Timestamp(self.read_timestamp()?),
             UUID => Element::Uuid(self.take(16)?.try_into().unwrap()),
             STRING => Element::Str(String::from_utf8(unescape(self.take_framed()?)).map_err(|_| Error::Utf8)?),
@@ -491,6 +678,72 @@ impl<'a> Reader<'a> {
         Ok(Element::BigInt { negative, magnitude })
     }
 
+    fn take_decimal(&mut self) -> Result<Decimal, Error> {
+        let sign = self.take(1)?[0];
+        if sign == DEC_SIGN_ZERO {
+            return Ok(Decimal { negative: false, adj_exp: 0, coeff: Vec::new() });
+        }
+        if sign != DEC_SIGN_NEG && sign != DEC_SIGN_POS {
+            return Err(Error::InvalidType(sign));
+        }
+        let negative = sign == DEC_SIGN_NEG;
+        let adj_exp = self.read_dec_exponent(negative)?;
+        // Digit bytes are 1–100 (positive) or their complement (negative), and never
+        // collide with the terminator (0x00, or 0xFF when complemented).
+        let term: u8 = if negative { 0xff } else { 0x00 };
+        let start = self.pos;
+        let mut i = self.pos;
+        while i < self.buf.len() && self.buf[i] != term {
+            i += 1;
+        }
+        if i >= self.buf.len() {
+            return Err(Error::Truncated);
+        }
+        if i == start {
+            return Err(Error::InvalidType(sign)); // a nonzero decimal must carry digits
+        }
+        // Store the un-complemented base-100 bytes (each value+1, 1..100).
+        let coeff: Vec<u8> = self.buf[start..i].iter().map(|&b| if negative { !b } else { b }).collect();
+        self.pos = i + 1; // consume the terminator
+        Ok(Decimal { negative, adj_exp, coeff })
+    }
+
+    /// Read the embedded exponent (a struple integer), un-complementing each byte
+    /// for negatives. Big-int exponent codes are rejected.
+    fn read_dec_exponent(&mut self, complement: bool) -> Result<i64, Error> {
+        let comp = |b: u8| if complement { !b } else { b };
+        let tb = comp(self.take(1)?[0]);
+        if tb == INT_ZERO {
+            return Ok(0);
+        }
+        let in_fixed = (0x10..=0x1f).contains(&tb) || (0x21..=0x30).contains(&tb);
+        if !in_fixed {
+            return Err(Error::InvalidType(tb));
+        }
+        let positive = tb > INT_ZERO;
+        let n = if positive { (tb - INT_ZERO) as usize } else { (INT_ZERO - tb) as usize };
+        let mut tmp = [0u8; 16];
+        for (k, &b) in self.take(n)?.iter().enumerate() {
+            tmp[k] = comp(b);
+        }
+        let payload = &tmp[..n];
+        if n == 16 && ((positive && payload[0] >= 0x80) || (!positive && payload[0] < 0x80)) {
+            return Err(Error::InvalidType(tb));
+        }
+        let raw = be_to_u128(payload);
+        let v: i128 = if positive {
+            raw as i128
+        } else if n == 16 {
+            raw as i128
+        } else {
+            raw as i128 - (1i128 << (8 * n))
+        };
+        if v > i64::MAX as i128 || v < i64::MIN as i128 {
+            return Err(Error::InvalidType(tb));
+        }
+        Ok(v as i64)
+    }
+
     fn read_f64(&mut self) -> Result<f64, Error> {
         let bits = u64::from_be_bytes(self.take(8)?.try_into().unwrap());
         let bits = if bits & SIGN64 != 0 { bits ^ SIGN64 } else { !bits };
@@ -528,6 +781,11 @@ fn element_to_value(e: Element) -> Result<Value, Error> {
         Element::BigInt { negative, magnitude } => Value::BigInt { negative, magnitude },
         Element::F32(f) => Value::F32(f),
         Element::F64(f) => Value::F64(f),
+        Element::Decimal(d) => Value::Decimal {
+            negative: d.negative,
+            digits: d.coefficient_digits(),
+            exp: d.exponent() as i32,
+        },
         Element::Timestamp(t) => Value::Timestamp(t),
         Element::Uuid(u) => Value::Uuid(u),
         Element::Str(s) => Value::Str(s),
@@ -566,6 +824,7 @@ fn append_element(out: &mut Vec<u8>, e: &Element) {
         Element::BigInt { negative, magnitude } => append_big(out, *negative, magnitude),
         Element::F32(f) => append_f32(out, *f),
         Element::F64(f) => append_f64(out, *f),
+        Element::Decimal(d) => append_decimal(out, d.negative, &d.coefficient_digits(), d.exponent() as i32),
         Element::Timestamp(t) => append_timestamp(out, *t),
         Element::Uuid(u) => append_uuid(out, u),
         Element::Str(s) => write_framed(out, STRING, s.as_bytes()),
@@ -678,8 +937,11 @@ impl<'a> View<'a> {
     pub fn is_float(&self) -> bool {
         matches!(self.head_type(), Some(FLOAT32) | Some(FLOAT64))
     }
+    pub fn is_decimal(&self) -> bool {
+        self.head_type() == Some(DECIMAL)
+    }
     pub fn is_number(&self) -> bool {
-        self.is_int() || self.is_float()
+        self.is_int() || self.is_float() || self.is_decimal()
     }
     pub fn is_timestamp(&self) -> bool {
         self.head_type() == Some(TIMESTAMP)

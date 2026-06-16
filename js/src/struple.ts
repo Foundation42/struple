@@ -30,6 +30,12 @@ export const TypeCode = {
 } as const;
 
 const T = TypeCode;
+// Leading sign markers inside a decimal payload, isolating the three sign groups
+// so memcmp keeps negative < zero < positive. For negatives the rest of the
+// payload is bit-complemented, so a larger magnitude sorts earlier.
+const DEC_SIGN_NEG = 0x01;
+const DEC_SIGN_ZERO = 0x02;
+const DEC_SIGN_POS = 0x03;
 const MASK64 = 0xffffffffffffffffn;
 const SIGN64 = 0x8000000000000000n;
 // The fixed integer slots span the i128 range; values beyond use the big-int codes.
@@ -57,6 +63,10 @@ export type Element =
   | { kind: "int"; value: bigint }
   | { kind: "float32"; value: number }
   | { kind: "float64"; value: number }
+  // Arbitrary-precision base-10 number: value = (-1)^negative · C · 10^exp,
+  // where C is the integer formed by `digits` (each 0–9, most-significant first,
+  // with leading and trailing zeros stripped). The canonical zero has digits: [].
+  | { kind: "decimal"; negative: boolean; digits: number[]; exp: number }
   | { kind: "timestamp"; micros: bigint }
   | { kind: "uuid"; value: Uint8Array }
   | { kind: "string"; value: string }
@@ -101,6 +111,18 @@ export class Writer {
   }
   appendFloat32(v: number): this {
     appendFloat32Into(this.buf, v);
+    return this;
+  }
+  /** Append a decimal `(-1)^negative · C · 10^exp`, where `digits` are the
+   *  coefficient C's decimal digits (each 0–9, most-significant first). */
+  appendDecimal(negative: boolean, digits: number[], exp: number): this {
+    appendDecimalInto(this.buf, negative, digits, exp);
+    return this;
+  }
+  /** Append a decimal parsed from text:
+   *  `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`. */
+  appendDecimalString(s: string): this {
+    appendDecimalStringInto(this.buf, s);
     return this;
   }
   appendTimestamp(micros: bigint): this {
@@ -189,6 +211,8 @@ export class Reader {
         return { kind: "float32", value: decodeFloat32(this.take(4)) };
       case T.float64:
         return { kind: "float64", value: decodeFloat64(this.take(8)) };
+      case T.decimal:
+        return this.readDecimal();
       case T.timestamp:
         return this.readTimestamp();
       case T.uuid:
@@ -286,6 +310,62 @@ export class Reader {
     const raw = dv.getBigUint64(0, false) ^ SIGN64;
     return { kind: "timestamp", micros: BigInt.asIntN(64, raw) };
   }
+
+  readDecimal(): Element {
+    const sign = this.take(1)[0];
+    if (sign === DEC_SIGN_ZERO) return { kind: "decimal", negative: false, digits: [], exp: 0 };
+    if (sign !== DEC_SIGN_NEG && sign !== DEC_SIGN_POS)
+      throw new Error("struple: invalid decimal sign byte");
+    const negative = sign === DEC_SIGN_NEG;
+    const comp = (b: number): number => (negative ? ~b & 0xff : b);
+    const adjExp = this.readDecExponent(negative);
+    // Digit bytes are 1–100 (positive) or their complement (negative), and never
+    // collide with the terminator (0x00, or 0xFF when complemented).
+    const term = negative ? 0xff : 0x00;
+    const start = this.pos;
+    let i = this.pos;
+    while (i < this.buf.length && this.buf[i] !== term) i++;
+    if (i >= this.buf.length) throw new Error("struple: truncated decimal");
+    if (i === start) throw new Error("struple: nonzero decimal must carry digits");
+    this.pos = i + 1; // consume terminator
+    // Unpack base-100 pairs into 0–9 digits, MSD first.
+    const digits: number[] = [];
+    for (let j = start; j < i; j++) {
+      const pair = comp(this.buf[j]) - 1; // 0–99
+      digits.push(Math.floor(pair / 10));
+      const lo = pair % 10;
+      const isLast = j + 1 === i;
+      if (!(isLast && lo === 0)) digits.push(lo); // skip the synthetic trailing pad
+    }
+    // adj_exp is the power of ten of the most-significant digit; the coefficient's
+    // power-of-ten exponent is adj_exp - digitCount.
+    return { kind: "decimal", negative, digits, exp: adjExp - digits.length };
+  }
+
+  /** Read the embedded exponent (a struple integer), un-complementing for
+   *  negatives. Big-int exponent codes are rejected. Returns a JS number. */
+  readDecExponent(complement: boolean): number {
+    const comp = (b: number): number => (complement ? ~b & 0xff : b);
+    const tb = comp(this.take(1)[0]);
+    if (tb === T.intZero) return 0;
+    const inNeg = tb >= 0x10 && tb <= 0x1f;
+    const inPos = tb >= 0x21 && tb <= 0x30;
+    if (!inNeg && !inPos) throw new Error("struple: invalid decimal exponent");
+    const positive = tb > T.intZero;
+    const n = positive ? tb - T.intZero : T.intZero - tb;
+    const payload = this.take(n);
+    if (n === 16) {
+      const top = comp(payload[0]);
+      if ((positive && top >= 0x80) || (!positive && top < 0x80))
+        throw new Error("struple: non-canonical decimal exponent");
+    }
+    let raw = 0n;
+    for (const b of payload) raw = (raw << 8n) | BigInt(comp(b));
+    const v = positive ? raw : raw - (1n << BigInt(8 * n));
+    if (v > 9007199254740991n || v < -9007199254740991n)
+      throw new Error("struple: decimal exponent out of range");
+    return Number(v);
+  }
 }
 
 /** Decode a whole stream into native values. */
@@ -310,6 +390,9 @@ function elementToValue(e: Element): Value {
     case "float32":
     case "float64":
       return e.value;
+    case "decimal":
+      // No native decimal in the Value model — surface the exact decimal literal.
+      return decimalToPlainString(e);
     case "timestamp":
       return new Date(Number(e.micros / 1000n));
     case "uuid":
@@ -366,6 +449,9 @@ function appendElement(out: number[], e: Element): void {
       break;
     case "float64":
       appendFloat64Into(out, e.value);
+      break;
+    case "decimal":
+      appendDecimalInto(out, e.negative, e.digits, e.exp);
       break;
     case "timestamp":
       appendTimestampInto(out, e.micros);
@@ -465,7 +551,8 @@ export class View {
     return t !== null && (t === T.intZero || t === T.intNegBig || t === T.intPosBig || (t >= 0x10 && t <= 0x1f) || (t >= 0x21 && t <= 0x30));
   }
   isFloat(): boolean { const t = this.headType(); return t === T.float32 || t === T.float64; }
-  isNumber(): boolean { return this.isInt() || this.isFloat(); }
+  isDecimal(): boolean { return this.headType() === T.decimal; }
+  isNumber(): boolean { return this.isInt() || this.isFloat() || this.isDecimal(); }
   isTimestamp(): boolean { return this.headType() === T.timestamp; }
   isUuid(): boolean { return this.headType() === T.uuid; }
   isString(): boolean { return this.headType() === T.string; }
@@ -545,7 +632,7 @@ export function semanticEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 const CLASS_RANK: Record<Element["kind"], number> = {
-  nil: 0, undef: 1, bool: 2, int: 3, float32: 3, float64: 3,
+  nil: 0, undef: 1, bool: 2, int: 3, float32: 3, float64: 3, decimal: 3,
   timestamp: 4, uuid: 5, string: 6, bytes: 7, array: 8, map: 9, set: 10,
 };
 
@@ -566,6 +653,7 @@ function compareElements(a: Element, b: Element): number {
     case "int":
     case "float32":
     case "float64":
+    case "decimal":
       return compareNumbers(a, b);
     case "timestamp":
       return cmp3(a.micros, (b as { micros: bigint }).micros);
@@ -584,7 +672,7 @@ function compareElements(a: Element, b: Element): number {
 
 // Rank within the number class: -inf < finite < +inf < NaN.
 function numClass(e: Element): number {
-  if (e.kind === "int") return 1;
+  if (e.kind === "int" || e.kind === "decimal") return 1; // exact, always finite
   const f = (e as { value: number }).value;
   if (Number.isNaN(f)) return 3;
   if (f === Infinity) return 2;
@@ -592,29 +680,69 @@ function numClass(e: Element): number {
   return 1;
 }
 
+function isExactKind(e: Element): boolean {
+  return e.kind === "int" || e.kind === "decimal";
+}
+
 function compareNumbers(a: Element, b: Element): number {
   const ca = numClass(a);
   const cb = numClass(b);
   if (ca !== cb) return cmp3(ca, cb);
   if (ca !== 1) return 0; // both -inf, both +inf, or both NaN
-  const ai = a.kind === "int";
-  const bi = b.kind === "int";
-  if (ai && bi) return cmp3((a as { value: bigint }).value, (b as { value: bigint }).value);
+  const ai = isExactKind(a);
+  const bi = isExactKind(b);
+  if (ai && bi) return compareExact(a, b); // int/decimal vs int/decimal — exact
   if (!ai && !bi) return cmp3((a as { value: number }).value, (b as { value: number }).value);
-  if (ai) return compareIntFloat((a as { value: bigint }).value, (b as { value: number }).value);
-  return -compareIntFloat((b as { value: bigint }).value, (a as { value: number }).value);
+  if (ai) return compareExactFloat(a, (b as { value: number }).value);
+  return -compareExactFloat(b, (a as { value: number }).value);
 }
 
-// Exact comparison of a big integer to a finite double, via BigInt arithmetic.
-function compareIntFloat(I: bigint, f: number): number {
-  if (f === 0) return I > 0n ? 1 : I < 0n ? -1 : 0;
-  const signI = I > 0n ? 1 : I < 0n ? -1 : 0;
-  const signF = f > 0 ? 1 : -1;
-  if (signI !== signF) return cmp3(signI, signF);
-  const N = I < 0n ? -I : I;
-  const { mant, exp } = decomposeDouble(Math.abs(f));
-  const c = exp >= 0 ? cmp3(N, mant << BigInt(exp)) : cmp3(N << BigInt(-exp), mant);
-  return signI < 0 ? -c : c;
+// An exact base-10 value `sign · mag · 10^exp10` (mag a non-negative BigInt).
+type B10 = { sign: number; mag: bigint; exp10: number };
+
+// Decompose an int or decimal into its exact base-10 value.
+function exactToB10(e: Element): B10 {
+  if (e.kind === "int") {
+    const v = (e as { value: bigint }).value;
+    if (v === 0n) return { sign: 0, mag: 0n, exp10: 0 };
+    return { sign: v < 0n ? -1 : 1, mag: v < 0n ? -v : v, exp10: 0 };
+  }
+  // decimal: value = (-1)^negative · C · 10^exp
+  const d = e as { negative: boolean; digits: number[]; exp: number };
+  if (d.digits.length === 0) return { sign: 0, mag: 0n, exp10: 0 };
+  let mag = 0n;
+  for (const dig of d.digits) mag = mag * 10n + BigInt(dig);
+  return { sign: d.negative ? -1 : 1, mag, exp10: d.exp };
+}
+
+// Exact comparison of two base-10 (int/decimal) values via BigInt cross-scaling.
+function compareExact(a: Element, b: Element): number {
+  const va = exactToB10(a);
+  const vb = exactToB10(b);
+  if (va.sign !== vb.sign) return cmp3(va.sign, vb.sign);
+  if (va.sign === 0) return 0;
+  const e = Math.min(va.exp10, vb.exp10);
+  const sa = va.mag * 10n ** BigInt(va.exp10 - e);
+  const sb = vb.mag * 10n ** BigInt(vb.exp10 - e);
+  const c = cmp3(sa, sb);
+  return va.sign < 0 ? -c : c;
+}
+
+// Exact comparison of an int/decimal to a finite double, via BigInt arithmetic.
+function compareExactFloat(e: Element, f: number): number {
+  const v = exactToB10(e);
+  const signF = f > 0 ? 1 : f < 0 ? -1 : 0;
+  if (v.sign !== signF) return cmp3(v.sign, signF);
+  if (v.sign === 0) return 0; // both zero (-0 included)
+  const { mant, exp } = decomposeDouble(Math.abs(f)); // f = ±mant·2^exp
+  // Compare mag·10^exp10 to mant·2^exp, scaling both to integers.
+  // 10^exp10 = 2^exp10 · 5^exp10. Clear the negative powers with common factors.
+  const aPow2 = Math.max(0, Math.max(-v.exp10, -exp)); // common 2^ multiplier
+  const bPow5 = Math.max(0, -v.exp10); // common 5^ multiplier
+  const lhs = v.mag * 5n ** BigInt(v.exp10 + bPow5) * 2n ** BigInt(v.exp10 + aPow2);
+  const rhs = mant * 5n ** BigInt(bPow5) * 2n ** BigInt(exp + aPow2);
+  const c = cmp3(lhs, rhs);
+  return v.sign < 0 ? -c : c;
 }
 
 // Decompose a finite, nonzero magnitude into `mant * 2^exp` (mant a BigInt).
@@ -751,6 +879,99 @@ function appendFloat32Into(buf: number[], value: number): void {
   }
   bits = bits & 0x80000000 ? ~bits >>> 0 : (bits ^ 0x80000000) >>> 0;
   buf.push(T.float32, (bits >>> 24) & 0xff, (bits >>> 16) & 0xff, (bits >>> 8) & 0xff, bits & 0xff);
+}
+
+// Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`, where
+// `digits` are the coefficient C's decimal digits (each 0–9, most-significant
+// first). Canonicalized on the way in: leading/trailing zeros are stripped and
+// any all-zero coefficient collapses to the single zero form.
+function appendDecimalInto(buf: number[], negative: boolean, digits: number[], exp: number): void {
+  let lead = 0;
+  while (lead < digits.length && digits[lead] === 0) lead++;
+  let end = digits.length;
+  while (end > lead && digits[end - 1] === 0) end--;
+  const sig = digits.slice(lead, end);
+
+  buf.push(T.decimal);
+  if (sig.length === 0) {
+    // canonical zero — one form regardless of scale
+    buf.push(DEC_SIGN_ZERO);
+    return;
+  }
+
+  // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+  // Trailing zeros (already stripped) change neither the value nor E.
+  const adjExp = digits.length - lead + exp; // == sig.length (post-trailing-strip) + (exp + trailing)
+  // Order-bearing tail: [E as a struple int][base-100 digits][terminator].
+  const tail: number[] = [];
+  appendInteger(tail, BigInt(adjExp));
+  for (let i = 0; i < sig.length; i += 2) {
+    const hi = sig[i];
+    const lo = i + 1 < sig.length ? sig[i + 1] : 0; // pad odd tail with 0
+    tail.push(hi * 10 + lo + 1); // pair 0–99 -> byte 1–100
+  }
+  tail.push(T.terminator);
+
+  buf.push(negative ? DEC_SIGN_NEG : DEC_SIGN_POS);
+  for (const b of tail) buf.push(negative ? ~b & 0xff : b);
+}
+
+// Parse `[+/-] digits [. digits] [ (e|E) [+/-] digits ]` and append it.
+function appendDecimalStringInto(buf: number[], s: string): void {
+  let i = 0;
+  let negative = false;
+  if (i < s.length && (s[i] === "+" || s[i] === "-")) {
+    negative = s[i] === "-";
+    i++;
+  }
+  const digits: number[] = [];
+  let exp = 0;
+  let seenPoint = false;
+  let any = false;
+  for (; i < s.length; i++) {
+    const c = s[i];
+    if (c === ".") {
+      if (seenPoint) throw new Error("struple: invalid decimal");
+      seenPoint = true;
+      continue;
+    }
+    if (c === "e" || c === "E") break;
+    if (c < "0" || c > "9") throw new Error("struple: invalid decimal");
+    digits.push(c.charCodeAt(0) - 48);
+    if (seenPoint) exp -= 1;
+    any = true;
+  }
+  if (!any) throw new Error("struple: invalid decimal");
+  if (i < s.length && (s[i] === "e" || s[i] === "E")) {
+    i++;
+    let esign = 1;
+    if (i < s.length && (s[i] === "+" || s[i] === "-")) {
+      if (s[i] === "-") esign = -1;
+      i++;
+    }
+    let ev = 0;
+    let edig = false;
+    for (; i < s.length; i++) {
+      if (s[i] < "0" || s[i] > "9") throw new Error("struple: invalid decimal");
+      ev = ev * 10 + (s.charCodeAt(i) - 48);
+      edig = true;
+    }
+    if (!edig) throw new Error("struple: invalid decimal");
+    exp += esign * ev;
+  }
+  appendDecimalInto(buf, negative, digits, exp);
+}
+
+// Render a decoded decimal as an exact plain decimal literal (no exponent).
+function decimalToPlainString(d: { negative: boolean; digits: number[]; exp: number }): string {
+  if (d.digits.length === 0) return "0";
+  const k = d.digits.length;
+  const sign = d.negative ? "-" : "";
+  const ds = d.digits.map((x) => String(x)).join("");
+  if (d.exp >= 0) return sign + ds + "0".repeat(d.exp);
+  const pointPos = k + d.exp; // number of integer-part digits
+  if (pointPos > 0) return sign + ds.slice(0, pointPos) + "." + ds.slice(pointPos);
+  return sign + "0." + "0".repeat(-pointPos) + ds;
 }
 
 function appendTimestampInto(buf: number[], micros: bigint): void {

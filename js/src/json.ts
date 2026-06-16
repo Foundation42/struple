@@ -86,6 +86,8 @@ function renderElement(e: Element): string {
     case "float32":
     case "float64":
       return Number.isFinite(e.value) ? e.value.toString() : "null";
+    case "decimal":
+      return renderDecimal(e);
     case "timestamp":
       return e.micros.toString();
     case "uuid":
@@ -121,6 +123,19 @@ function renderMap(body: Uint8Array): string {
     parts.push(key + ":" + renderElement(v));
   }
   return "{" + parts.join(",") + "}";
+}
+
+// Render a decimal as an exact JSON number literal (plain notation, no exponent).
+// One-way: fromJson never produces decimals (non-integer JSON numbers stay float64).
+function renderDecimal(d: { negative: boolean; digits: number[]; exp: number }): string {
+  if (d.digits.length === 0) return "0";
+  const k = d.digits.length;
+  const sign = d.negative ? "-" : "";
+  const ds = d.digits.join("");
+  if (d.exp >= 0) return sign + ds + "0".repeat(d.exp);
+  const pointPos = k + d.exp; // number of integer-part digits
+  if (pointPos > 0) return sign + ds.slice(0, pointPos) + "." + ds.slice(pointPos);
+  return sign + "0." + "0".repeat(-pointPos) + ds;
 }
 
 function toUuidString(u: Uint8Array): string {

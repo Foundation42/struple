@@ -133,7 +133,7 @@ so they agree on every byte in both directions.
 | boolean | `bool` | `boolean` | bool |
 | integer (**unbounded**) | `int` | `BigInt` / integral `number` | int (fixed + arbitrary-precision) |
 | float | `float` | `number` | float32 / float64 |
-| decimal | `Decimal` | — | *(type code reserved; not yet implemented)* |
+| decimal | `Decimal` | *(explicit)* | decimal (arbitrary precision) |
 | text | `str` | `string` | string (UTF-8) |
 | binary | `bytes` | `Uint8Array` | bytes |
 | sequence | `list`/`tuple` | `Array` | array |
@@ -166,7 +166,7 @@ nil < undefined < false < true
 | int +fixed | `0x21–0x30` | big-endian magnitude, 1–16 byte width in the code |
 | int +big | `0x31` | `[m][n][magnitude]` (beyond i128) |
 | float32 / float64 | `0x34` / `0x35` | 4 / 8 bytes, order-transformed |
-| decimal | `0x38` | *reserved* |
+| decimal | `0x38` | `[sign][exponent][base-100 digits]`, canonical |
 | timestamp | `0x40` | 8 bytes: order-preserving signed µs since Unix epoch |
 | uuid | `0x44` | 16 raw bytes (no framing) |
 | string / bytes | `0x48` / `0x49` | content, `0x00`-terminated, `0x00→0x00 0xFF` |
@@ -175,7 +175,7 @@ nil < undefined < false < true
 | set | `0x54` | canonical (sorted, de-duped) elements, terminated + escaped |
 
 (`0x32–0x33`, `0x36–0x3F` (less `0x38`), `0x41–0x47` (less `0x44`), `0x4A–0x4F`,
-and `0x53/0x55+` are reserved for the tower: decimal, float128, date/time-only,
+and `0x53/0x55+` are reserved for the tower: float128, date/time-only,
 intervals, …)
 
 **Integers.** Width is carried by the type code, so cross-width order is free.
@@ -200,6 +200,20 @@ them lexicographically, which also makes UUIDv7 (time-prefixed) sort in time
 order. Python maps it to/from `uuid.UUID` natively; elsewhere it's an explicit
 `appendUuid`. JSON has no UUID type, so `toJson` renders the canonical hyphenated
 string (one-way — strings stay strings on the way back).
+
+**Decimal.** Arbitrary-precision base-10, stored as
+`[sign][adjusted exponent][significant digits]`. The sign byte keeps
+`negative < zero < positive`; the exponent is itself a struple integer (so it's
+self-delimiting and unbounded); the digits are the coefficient's significant
+figures, leading/trailing zeros stripped and packed base-100 (two per byte),
+`0x00`-terminated. For negatives the whole tail is bit-complemented so a larger
+magnitude sorts earlier. `memcmp` of the payload equals decimal value order, and
+the encoding is **canonical** — `12.300` and `12.3` produce identical bytes, and
+zero has one form. Python maps it to/from `decimal.Decimal` natively (the
+`Decimal.as_tuple()` model is the wire model); elsewhere it's an explicit
+`appendDecimal` / `appendDecimalString`. JSON has no decimal type, so `toJson`
+renders an exact number literal (one-way — `fromJson` keeps non-integer JSON
+numbers as float64).
 
 **Variable-length (string / bytes / array / map / set).** Terminated by `0x00`,
 with any real `0x00` escaped as `0x00 0xFF`. Because `0x00` is below every content
@@ -226,9 +240,10 @@ try struple.semanticOrder(alloc, a, b); // value order:    int 5 == float 5.0
 ```
 
 `semanticOrder` compares two encoded streams by mathematical value: `int`,
-big-integers, `float32` and `float64` all compare by their **exact** value, with
-no precision loss even where a `double` can't represent the integer (`int 2^53+1
-> float 2^53`, `big-int 2^200 == float 2^200`). `NaN` sorts as the greatest
+big-integers, `float32`, `float64` and `decimal` all compare by their **exact**
+value, with no precision loss even where a `double` can't represent the number
+(`int 2^53+1 > float 2^53`, `big-int 2^200 == float 2^200`, `decimal 0.1 < float
+0.1`, `decimal 5.0 == int 5`). `NaN` sorts as the greatest
 number; `-0.0 == 0.0 == int 0`. Non-numbers keep the wire family order (`nil <
 bool < number < timestamp < uuid < string < bytes < array < map < set`, with all
 numbers unified into one class); containers recurse element-wise.

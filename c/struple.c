@@ -16,7 +16,15 @@
 #define INT_POS_BIG 0x31
 #define FLOAT32 0x34
 #define FLOAT64 0x35
+#define DECIMAL 0x38
 #define TIMESTAMP 0x40
+
+/* Leading marker inside a decimal payload, isolating the three sign groups so
+ * memcmp keeps negative < zero < positive. For negatives the rest of the payload
+ * is bit-complemented, so a larger magnitude sorts earlier. */
+#define DEC_SIGN_NEG 0x01
+#define DEC_SIGN_ZERO 0x02
+#define DEC_SIGN_POS 0x03
 #define UUID 0x44
 #define STRING 0x48
 #define BYTES 0x49
@@ -225,6 +233,109 @@ void struple_append_f32(struple_writer *w, float v) {
     bits = (bits & SIGN32) ? ~bits : (bits ^ SIGN32);
     sw_push(w, FLOAT32);
     for (int i = 3; i >= 0; i--) sw_push(w, (uint8_t)((bits >> (8 * i)) & 0xff));
+}
+
+void struple_append_decimal(struple_writer *w, bool negative, const uint8_t *digits, size_t ndigits, int32_t exp) {
+    /* Strip leading zeros: they shift neither the value nor the adjusted exponent. */
+    size_t lead = 0;
+    while (lead < ndigits && digits[lead] == 0) lead++;
+    const uint8_t *sig = digits + lead;
+    size_t sig_len = ndigits - lead;
+
+    sw_push(w, DECIMAL);
+    if (sig_len == 0) { /* canonical zero — one form regardless of scale */
+        sw_push(w, DEC_SIGN_ZERO);
+        return;
+    }
+
+    /* Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+     * Trailing zeros change neither the value nor E, so drop them for storage. */
+    int64_t adj_exp = (int64_t)sig_len + (int64_t)exp;
+    size_t end = sig_len;
+    while (end > 0 && sig[end - 1] == 0) end--;
+
+    /* Order-bearing tail: [E as a struple int][base-100 digits][terminator]. */
+    struple_writer tail;
+    struple_writer_init(&tail);
+    /* The exponent reuses the int codec; adj_exp fits int64 (exp is int32). */
+    struple_append_int(&tail, adj_exp);
+    for (size_t i = 0; i < end; i += 2) {
+        unsigned hi = sig[i];
+        unsigned lo = (i + 1 < end) ? sig[i + 1] : 0; /* pad odd tail with 0 */
+        sw_push(&tail, (uint8_t)(hi * 10 + lo + 1)); /* pair 0–99 -> byte 1–100 */
+    }
+    sw_push(&tail, TERMINATOR);
+
+    sw_push(w, negative ? DEC_SIGN_NEG : DEC_SIGN_POS);
+    for (size_t i = 0; i < tail.len; i++) sw_push(w, negative ? (uint8_t)~tail.data[i] : tail.data[i]);
+    struple_writer_free(&tail);
+}
+
+int struple_append_decimal_string(struple_writer *w, const char *s, size_t len) {
+    size_t i = 0;
+    bool negative = false;
+    if (i < len && (s[i] == '+' || s[i] == '-')) {
+        negative = s[i] == '-';
+        i++;
+    }
+    uint8_t *digits = NULL;
+    size_t ndigits = 0, dcap = 0;
+    int32_t exp = 0;
+    bool seen_point = false;
+    bool any = false;
+    for (; i < len; i++) {
+        char c = s[i];
+        if (c == '.') {
+            if (seen_point) {
+                free(digits);
+                return -1;
+            }
+            seen_point = true;
+            continue;
+        }
+        if (c == 'e' || c == 'E') break;
+        if (c < '0' || c > '9') {
+            free(digits);
+            return -1;
+        }
+        if (ndigits + 1 > dcap) {
+            dcap = dcap ? dcap * 2 : 16;
+            digits = (uint8_t *)realloc(digits, dcap);
+        }
+        digits[ndigits++] = (uint8_t)(c - '0');
+        if (seen_point) exp -= 1;
+        any = true;
+    }
+    if (!any) {
+        free(digits);
+        return -1;
+    }
+    if (i < len && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        int32_t esign = 1;
+        if (i < len && (s[i] == '+' || s[i] == '-')) {
+            if (s[i] == '-') esign = -1;
+            i++;
+        }
+        int32_t ev = 0;
+        bool edig = false;
+        for (; i < len; i++) {
+            if (s[i] < '0' || s[i] > '9') {
+                free(digits);
+                return -1;
+            }
+            ev = ev * 10 + (s[i] - '0');
+            edig = true;
+        }
+        if (!edig) {
+            free(digits);
+            return -1;
+        }
+        exp += esign * ev;
+    }
+    struple_append_decimal(w, negative, digits, ndigits, exp);
+    free(digits);
+    return 0;
 }
 
 void struple_append_timestamp(struple_writer *w, int64_t micros) {
@@ -488,6 +599,98 @@ static int read_f32(struple_reader *r, struple_element *out) {
     return 0;
 }
 
+/* Read the embedded exponent (a struple integer), un-complementing each byte for
+ * negatives. Big-int exponent codes are rejected (far beyond any real use). Sets
+ * *out_exp and returns 0, or returns -1 on a malformed/out-of-range exponent. */
+static int read_dec_exponent(struple_reader *r, bool complement, int64_t *out_exp) {
+    const uint8_t *tp = take(r, 1);
+    if (!tp) return -1;
+    uint8_t tb = complement ? (uint8_t)~tp[0] : tp[0];
+    if (tb == INT_ZERO) {
+        *out_exp = 0;
+        return 0;
+    }
+    bool fixed_neg = (tb >= 0x10 && tb <= 0x1f);
+    bool fixed_pos = (tb >= 0x21 && tb <= 0x30);
+    if (!fixed_neg && !fixed_pos) return -1;
+    bool positive = tb > INT_ZERO;
+    size_t n = positive ? (size_t)(tb - INT_ZERO) : (size_t)(INT_ZERO - tb);
+    const uint8_t *raw = take(r, n);
+    if (!raw) return -1;
+    uint8_t tmp[16];
+    for (size_t i = 0; i < n; i++) tmp[i] = complement ? (uint8_t)~raw[i] : raw[i];
+    if (n == 16 && ((positive && tmp[0] >= 0x80) || (!positive && tmp[0] < 0x80))) return -1;
+    /* The exponent must fit i64; any payload wider than 8 bytes overflows. */
+    if (n > 8) return -1;
+    uint64_t mag = be_to_u64(tmp, n);
+    if (positive) {
+        if (mag > (uint64_t)INT64_MAX) return -1;
+        *out_exp = (int64_t)mag;
+        return 0;
+    }
+    /* negative: value = raw - 2^(8n) = -(2^(8n) - raw) */
+    if (n < 8) {
+        *out_exp = -(int64_t)((1ULL << (8 * n)) - mag);
+        return 0;
+    }
+    /* n == 8: value = mag - 2^64. Reject anything below INT64_MIN. */
+    uint64_t neg_mag = (uint64_t)0 - mag; /* 2^64 - mag */
+    if (neg_mag > (uint64_t)INT64_MAX + 1) return -1;
+    *out_exp = (neg_mag == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)neg_mag;
+    return 0;
+}
+
+static int read_decimal(struple_reader *r, struple_element *out) {
+    const uint8_t *sp = take(r, 1);
+    if (!sp) return -1;
+    uint8_t sign = sp[0];
+    if (sign == DEC_SIGN_ZERO) {
+        out->kind = STRUPLE_DECIMAL;
+        out->dec_negative = false;
+        out->dec_exponent = 0;
+        out->data = r->buf + r->pos; /* empty coefficient */
+        out->data_len = 0;
+        return 0;
+    }
+    if (sign != DEC_SIGN_NEG && sign != DEC_SIGN_POS) return -1;
+    bool negative = (sign == DEC_SIGN_NEG);
+    int64_t adj_exp;
+    if (read_dec_exponent(r, negative, &adj_exp) != 0) return -1;
+
+    /* Digit bytes are 1–100 (positive) or their complement (negative); they never
+     * collide with the terminator (0x00, or 0xFF when complemented). */
+    uint8_t term = negative ? 0xff : 0x00;
+    size_t start = r->pos;
+    size_t i = r->pos;
+    while (i < r->len && r->buf[i] != term) i++;
+    if (i >= r->len) return -1;          /* truncated: no terminator */
+    if (i == start) return -1;           /* a nonzero decimal must carry digits */
+    size_t nbytes = i - start;
+    r->pos = i + 1;                       /* consume the terminator */
+
+    /* Unpack base-100 pairs into 0–9 digits in the scratch buffer. */
+    uint8_t *digs = r_scratch(r, nbytes * 2);
+    if (!digs) return -1;
+    size_t w = 0;
+    for (size_t k = 0; k < nbytes; k++) {
+        uint8_t raw = r->buf[start + k];
+        uint8_t pair = (uint8_t)((negative ? (uint8_t)~raw : raw) - 1);
+        if (pair > 99) return -1; /* invalid base-100 byte */
+        digs[w++] = (uint8_t)(pair / 10);
+        uint8_t lo = (uint8_t)(pair % 10);
+        bool is_last = (k + 1 == nbytes);
+        if (!(is_last && lo == 0)) digs[w++] = lo; /* skip only the synthetic pad */
+    }
+
+    out->kind = STRUPLE_DECIMAL;
+    out->dec_negative = negative;
+    /* value = ±coefficient · 10^exponent, exponent = adj_exp − digitCount. */
+    out->dec_exponent = adj_exp - (int64_t)w;
+    out->data = digs;
+    out->data_len = w;
+    return 0;
+}
+
 static int read_timestamp(struple_reader *r, struple_element *out) {
     const uint8_t *p = take(r, 8);
     if (!p) return -1;
@@ -511,6 +714,7 @@ int struple_reader_next(struple_reader *r, struple_element *out) {
         case INT_POS_BIG: return read_big_int(r, t, out) == 0 ? 1 : -1;
         case FLOAT32: return read_f32(r, out) == 0 ? 1 : -1;
         case FLOAT64: return read_f64(r, out) == 0 ? 1 : -1;
+        case DECIMAL: return read_decimal(r, out) == 0 ? 1 : -1;
         case TIMESTAMP: return read_timestamp(r, out) == 0 ? 1 : -1;
         case UUID: {
             const uint8_t *p = take(r, 16);
@@ -558,6 +762,9 @@ static void append_element(struple_writer *w, const struple_element *e) {
         case STRUPLE_BIGINT: struple_append_big_int(w, e->big_negative, e->data, e->data_len); break;
         case STRUPLE_F32: struple_append_f32(w, e->f32_val); break;
         case STRUPLE_F64: struple_append_f64(w, e->f64_val); break;
+        case STRUPLE_DECIMAL:
+            struple_append_decimal(w, e->dec_negative, e->data, e->data_len, (int32_t)e->dec_exponent);
+            break;
         case STRUPLE_TIMESTAMP: struple_append_timestamp(w, e->int_val); break;
         case STRUPLE_UUID: struple_append_uuid(w, e->data); break;
         case STRUPLE_STRING: struple_append_string(w, (const char *)e->data, e->data_len); break;
@@ -616,6 +823,33 @@ static int element_span(const uint8_t *buf, size_t len, size_t pos, size_t *out)
         p += 4;
     } else if (t == FLOAT64 || t == TIMESTAMP) {
         p += 8;
+    } else if (t == DECIMAL) {
+        if (p >= len) return -1;
+        uint8_t sign = buf[p++];
+        if (sign == DEC_SIGN_ZERO) {
+            /* no further payload */
+        } else if (sign == DEC_SIGN_NEG || sign == DEC_SIGN_POS) {
+            bool neg = (sign == DEC_SIGN_NEG);
+            /* Self-delimiting exponent: one type byte, then its fixed payload. */
+            if (p >= len) return -1;
+            uint8_t tb = neg ? (uint8_t)~buf[p] : buf[p];
+            p++;
+            if (tb != INT_ZERO) {
+                if ((tb >= 0x10 && tb <= 0x1f) || (tb >= 0x21 && tb <= 0x30)) {
+                    size_t en = (tb < INT_ZERO) ? (size_t)(INT_ZERO - tb) : (size_t)(tb - INT_ZERO);
+                    p += en;
+                } else {
+                    return -1;
+                }
+            }
+            /* Scan the digit region to the terminator (0x00, or 0xFF for negatives). */
+            uint8_t term = neg ? 0xff : 0x00;
+            while (p < len && buf[p] != term) p++;
+            if (p >= len) return -1;
+            p++; /* consume the terminator */
+        } else {
+            return -1;
+        }
     } else if (t == UUID) {
         p += 16;
     } else if (t == STRING || t == BYTES || t == ARRAY || t == MAP || t == SET) {
@@ -744,7 +978,10 @@ bool struple_view_is_float(struple_view v) {
     int t = struple_view_head_type(v);
     return t == FLOAT32 || t == FLOAT64;
 }
-bool struple_view_is_number(struple_view v) { return struple_view_is_int(v) || struple_view_is_float(v); }
+bool struple_view_is_decimal(struple_view v) { return struple_view_head_type(v) == DECIMAL; }
+bool struple_view_is_number(struple_view v) {
+    return struple_view_is_int(v) || struple_view_is_float(v) || struple_view_is_decimal(v);
+}
 bool struple_view_is_timestamp(struple_view v) { return struple_view_head_type(v) == TIMESTAMP; }
 bool struple_view_is_uuid(struple_view v) { return struple_view_head_type(v) == UUID; }
 bool struple_view_is_string(struple_view v) { return struple_view_head_type(v) == STRING; }
@@ -826,7 +1063,8 @@ static int sem_class_rank(struple_kind k) {
         case STRUPLE_INT:
         case STRUPLE_BIGINT:
         case STRUPLE_F32:
-        case STRUPLE_F64: return 3;
+        case STRUPLE_F64:
+        case STRUPLE_DECIMAL: return 3;
         case STRUPLE_TIMESTAMP: return 4;
         case STRUPLE_UUID: return 5;
         case STRUPLE_STRING: return 6;
@@ -962,7 +1200,7 @@ static int sem_int_sign(const struple_element *e) {
     return e->big_negative ? -1 : 1;
 }
 static int sem_num_class(const struple_element *e) {
-    if (sem_is_int(e)) return 1;
+    if (sem_is_int(e) || e->kind == STRUPLE_DECIMAL) return 1; /* always finite */
     double f = sem_float(e);
     if (isnan(f)) return 3;
     if (isinf(f)) return f > 0 ? 2 : 0;
@@ -987,10 +1225,245 @@ static int sem_int_int(const struple_element *a, const struple_element *b) {
     return sa < 0 ? -c : c;
 }
 
+/* ------------------------------------------------------ decimal vs the rest */
+
+/* An exact base-10 value: sign · mag · 10^exp10 (mag big-endian, malloc'd; an
+ * empty/NULL mag means 0). All helpers below work in big-endian base-256 bytes,
+ * mirroring the big-int-vs-float path; no 128-bit type or bignum library. */
+typedef struct {
+    int sign;       /* -1, 0, +1 */
+    uint8_t *mag;   /* big-endian magnitude, malloc'd (may be NULL when sign == 0) */
+    size_t mlen;
+    int64_t exp10;
+} sem_b10;
+
+/* Decimal digits (each 0–9, MSD first) -> big-endian base-256 magnitude. */
+static uint8_t *sem_dec_digits_to_mag(const uint8_t *digits, size_t n, size_t *outlen) {
+    uint8_t *buf = NULL;
+    size_t len = 0, cap = 0;
+    for (size_t k = 0; k < n; k++) {
+        unsigned carry = digits[k]; /* 0–9 */
+        for (size_t i = len; i-- > 0;) {
+            unsigned v = (unsigned)buf[i] * 10 + carry;
+            buf[i] = (uint8_t)(v & 0xff);
+            carry = v >> 8;
+        }
+        while (carry) {
+            if (len + 1 > cap) {
+                cap = cap ? cap * 2 : 16;
+                uint8_t *nb = (uint8_t *)realloc(buf, cap);
+                if (!nb) { free(buf); return NULL; }
+                buf = nb;
+            }
+            memmove(buf + 1, buf, len);
+            buf[0] = (uint8_t)(carry & 0xff);
+            len++;
+            carry >>= 8;
+        }
+    }
+    *outlen = len;
+    /* len may be 0 only for an all-zero digit string, which never reaches here. */
+    return buf ? buf : (uint8_t *)calloc(1, 1); /* non-NULL even when len == 0 */
+}
+
+/* mag · m (small m) -> new big-endian bytes (trimmed); NULL on OOM. */
+static uint8_t *sem_mul_small(const uint8_t *mag, size_t mlen, uint16_t m, size_t *outlen) {
+    size_t cap = mlen + 4;
+    uint8_t *buf = (uint8_t *)calloc(cap ? cap : 1, 1);
+    if (!buf) return NULL;
+    size_t off = 4; /* leave room at the front for carry growth */
+    memcpy(buf + off, mag, mlen);
+    size_t len = mlen;
+    uint32_t carry = 0;
+    for (size_t i = off + len; i-- > off;) {
+        uint32_t v = (uint32_t)buf[i] * m + carry;
+        buf[i] = (uint8_t)(v & 0xff);
+        carry = v >> 8;
+    }
+    while (carry && off > 0) {
+        off--;
+        buf[off] = (uint8_t)(carry & 0xff);
+        len++;
+        carry >>= 8;
+    }
+    /* Shift the result down to the buffer start. */
+    if (off > 0) memmove(buf, buf + off, len);
+    *outlen = len;
+    return buf;
+}
+
+/* mag · base^k -> new big-endian bytes; NULL on OOM. */
+static uint8_t *sem_mul_pow(const uint8_t *mag, size_t mlen, uint16_t base, size_t k, size_t *outlen) {
+    uint8_t *cur = (uint8_t *)malloc(mlen ? mlen : 1);
+    if (!cur) return NULL;
+    memcpy(cur, mag, mlen);
+    size_t curlen = mlen;
+    for (size_t j = 0; j < k; j++) {
+        size_t nl;
+        uint8_t *nx = sem_mul_small(cur, curlen, base, &nl);
+        free(cur);
+        if (!nx) return NULL;
+        cur = nx;
+        curlen = nl;
+    }
+    *outlen = curlen;
+    return cur;
+}
+
+static bool sem_is_exact(const struple_element *e) {
+    return e->kind == STRUPLE_INT || e->kind == STRUPLE_BIGINT || e->kind == STRUPLE_DECIMAL;
+}
+
+/* Decompose an int / big-int / decimal into its exact base-10 value (allocates
+ * mag). Returns 0 on success, -1 on OOM. */
+static int sem_num_to_b10(const struple_element *e, sem_b10 *out) {
+    out->mag = NULL;
+    out->mlen = 0;
+    out->exp10 = 0;
+    if (e->kind == STRUPLE_INT) {
+        int64_t v = e->int_val;
+        if (v == 0) {
+            out->sign = 0;
+            return 0;
+        }
+        uint64_t N = v < 0 ? (~(uint64_t)v + 1) : (uint64_t)v;
+        uint8_t buf[8];
+        size_t n = u64_to_be(N, buf);
+        out->mag = (uint8_t *)malloc(n ? n : 1);
+        if (!out->mag) return -1;
+        memcpy(out->mag, buf, n);
+        out->mlen = n;
+        out->sign = v < 0 ? -1 : 1;
+        return 0;
+    }
+    if (e->kind == STRUPLE_BIGINT) {
+        out->mag = (uint8_t *)malloc(e->data_len ? e->data_len : 1);
+        if (!out->mag) return -1;
+        memcpy(out->mag, e->data, e->data_len);
+        out->mlen = e->data_len;
+        out->sign = e->big_negative ? -1 : 1;
+        return 0;
+    }
+    /* decimal */
+    if (e->data_len == 0) { /* canonical zero */
+        out->sign = 0;
+        return 0;
+    }
+    size_t ml;
+    uint8_t *mag = sem_dec_digits_to_mag(e->data, e->data_len, &ml);
+    if (!mag) return -1;
+    out->mag = mag;
+    out->mlen = ml;
+    out->sign = e->dec_negative ? -1 : 1;
+    out->exp10 = e->dec_exponent;
+    return 0;
+}
+
+/* Compare two same-sign, nonzero base-10 magnitudes (mag · 10^exp10). Returns
+ * -1/0/1, or -2 on OOM. */
+static int sem_b10_mag(const sem_b10 *a, const sem_b10 *b) {
+    int64_t e = a->exp10 < b->exp10 ? a->exp10 : b->exp10;
+    size_t sal, sbl;
+    uint8_t *sa = sem_mul_pow(a->mag, a->mlen, 10, (size_t)(a->exp10 - e), &sal);
+    if (!sa) return -2;
+    uint8_t *sb = sem_mul_pow(b->mag, b->mlen, 10, (size_t)(b->exp10 - e), &sbl);
+    if (!sb) { free(sa); return -2; }
+    int c = sem_cmp_mag(sa, sal, sb, sbl);
+    free(sa);
+    free(sb);
+    return c;
+}
+
+/* Compare mag · 10^exp10 to mant · 2^e2 (both > 0). Splits 10^exp10 into
+ * 2^exp10 · 5^exp10 and scales both sides up to integers. -1/0/1, or -2 on OOM. */
+static int sem_b10_mag_to_float(const uint8_t *mag, size_t mlen, int64_t exp10,
+                                uint64_t mant, int e2) {
+    int64_t a_pow2 = 0;
+    if (-exp10 > a_pow2) a_pow2 = -exp10;
+    if (-(int64_t)e2 > a_pow2) a_pow2 = -(int64_t)e2;
+    int64_t b_pow5 = -exp10 > 0 ? -exp10 : 0;
+
+    /* LHS' = mag · 5^(exp10 + b_pow5) · 2^(exp10 + a_pow2) */
+    size_t lhs5l;
+    uint8_t *lhs5 = sem_mul_pow(mag, mlen, 5, (size_t)(exp10 + b_pow5), &lhs5l);
+    if (!lhs5) return -2;
+    size_t lhsl;
+    uint8_t *lhs = sem_shl(lhs5, lhs5l, (size_t)(exp10 + a_pow2), &lhsl);
+    free(lhs5);
+    if (!lhs) return -2;
+
+    /* RHS' = mant · 5^(b_pow5) · 2^(e2 + a_pow2) */
+    uint8_t mb[8];
+    for (int i = 0; i < 8; i++) mb[i] = (uint8_t)(mant >> (8 * (7 - i)));
+    size_t rhs5l;
+    uint8_t *rhs5 = sem_mul_pow(mb, 8, 5, (size_t)b_pow5, &rhs5l);
+    if (!rhs5) { free(lhs); return -2; }
+    size_t rhsl;
+    uint8_t *rhs = sem_shl(rhs5, rhs5l, (size_t)((int64_t)e2 + a_pow2), &rhsl);
+    free(rhs5);
+    if (!rhs) { free(lhs); return -2; }
+
+    int c = sem_cmp_mag(lhs, lhsl, rhs, rhsl);
+    free(lhs);
+    free(rhs);
+    return c;
+}
+
+/* Compare an exact base-10 value v to a finite float f. -1/0/1, or -2 on OOM. */
+static int sem_b10_float(const sem_b10 *v, double f) {
+    int sf = sem_sign(f);
+    if (v->sign != sf) return (v->sign > sf) - (v->sign < sf);
+    if (v->sign == 0) return 0; /* both zero */
+    uint64_t mant;
+    int exp;
+    sem_decompose(fabs(f), &mant, &exp);
+    int c = sem_b10_mag_to_float(v->mag, v->mlen, v->exp10, mant, exp);
+    if (c == -2) return -2;
+    return v->sign < 0 ? -c : c;
+}
+
+/* Compare when at least one operand is a decimal. Returns -1/0/1; sets *err on OOM. */
+static int sem_with_decimal(const struple_element *a, const struple_element *b, int *err) {
+    if (sem_is_exact(a) && sem_is_exact(b)) {
+        sem_b10 va, vb;
+        if (sem_num_to_b10(a, &va) != 0) { *err = 1; return 0; }
+        if (sem_num_to_b10(b, &vb) != 0) { *err = 1; free(va.mag); return 0; }
+        int result;
+        if (va.sign != vb.sign) {
+            result = (va.sign > vb.sign) - (va.sign < vb.sign);
+        } else if (va.sign == 0) {
+            result = 0;
+        } else {
+            int c = sem_b10_mag(&va, &vb);
+            if (c == -2) { *err = 1; result = 0; }
+            else result = va.sign < 0 ? -c : c;
+        }
+        free(va.mag);
+        free(vb.mag);
+        return result;
+    }
+    /* exactly one side is a finite float */
+    if (sem_is_exact(a)) {
+        sem_b10 va;
+        if (sem_num_to_b10(a, &va) != 0) { *err = 1; return 0; }
+        int c = sem_b10_float(&va, sem_float(b));
+        free(va.mag);
+        if (c == -2) { *err = 1; return 0; }
+        return c;
+    }
+    sem_b10 vb;
+    if (sem_num_to_b10(b, &vb) != 0) { *err = 1; return 0; }
+    int c = sem_b10_float(&vb, sem_float(a));
+    free(vb.mag);
+    if (c == -2) { *err = 1; return 0; }
+    return -c;
+}
+
 static int sem_numbers(const struple_element *a, const struple_element *b, int *err) {
     int ca = sem_num_class(a), cb = sem_num_class(b);
     if (ca != cb) return (ca > cb) - (ca < cb);
     if (ca != 1) return 0;
+    if (a->kind == STRUPLE_DECIMAL || b->kind == STRUPLE_DECIMAL) return sem_with_decimal(a, b, err);
     bool ai = sem_is_int(a), bi = sem_is_int(b);
     if (ai && bi) return sem_int_int(a, b);
     if (!ai && !bi) return sem_dcmp(sem_float(a), sem_float(b));
@@ -1010,7 +1483,8 @@ static int sem_elements(const struple_element *a, const struple_element *b, int 
         case STRUPLE_INT:
         case STRUPLE_BIGINT:
         case STRUPLE_F32:
-        case STRUPLE_F64: return sem_numbers(a, b, err);
+        case STRUPLE_F64:
+        case STRUPLE_DECIMAL: return sem_numbers(a, b, err);
         case STRUPLE_TIMESTAMP: return sem_icmp(a->int_val, b->int_val);
         case STRUPLE_UUID: return sem_cmp_lex(a->data, 16, b->data, 16);
         case STRUPLE_STRING:

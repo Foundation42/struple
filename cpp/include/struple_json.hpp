@@ -366,6 +366,30 @@ inline void render(std::string& out, const Element& e) {
             break;
         case Kind::F32: render_float(out, double(e.f32)); break;
         case Kind::F64: render_float(out, e.f64); break;
+        case Kind::Decimal: {
+            // Exact plain decimal literal (no exponent), one-way.
+            if (e.decIsZero()) { out += '0'; break; }
+            const Bytes& digs = e.data;  // 0–9 values, MSD first
+            int64_t k = int64_t(digs.size());
+            int64_t exp10 = e.dec_exp;  // value = C · 10^exp10
+            if (e.big_negative) out += '-';
+            if (exp10 >= 0) {
+                for (uint8_t d : digs) out += char('0' + d);
+                for (int64_t z = 0; z < exp10; z++) out += '0';
+                break;
+            }
+            int64_t point_pos = k + exp10;  // number of integer-part digits
+            if (point_pos > 0) {
+                for (int64_t i = 0; i < point_pos; i++) out += char('0' + digs[size_t(i)]);
+                out += '.';
+                for (int64_t i = point_pos; i < k; i++) out += char('0' + digs[size_t(i)]);
+            } else {
+                out += "0.";
+                for (int64_t z = point_pos; z < 0; z++) out += '0';
+                for (uint8_t d : digs) out += char('0' + d);
+            }
+            break;
+        }
         case Kind::Uuid: {
             static const char* hexd = "0123456789abcdef";
             std::string u;

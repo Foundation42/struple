@@ -39,7 +39,7 @@ fn class_rank(e: &Element) -> u8 {
         Element::Nil => 0,
         Element::Undefined => 1,
         Element::Bool(_) => 2,
-        Element::Int(_) | Element::BigInt { .. } | Element::F32(_) | Element::F64(_) => 3,
+        Element::Int(_) | Element::BigInt { .. } | Element::F32(_) | Element::F64(_) | Element::Decimal(_) => 3,
         Element::Timestamp(_) => 4,
         Element::Uuid(_) => 5,
         Element::Str(_) => 6,
@@ -75,7 +75,7 @@ fn compare_elements(a: &Element, b: &Element) -> Result<Ordering, Error> {
 // Rank within the number class: -inf < finite < +inf < NaN.
 fn num_class(e: &Element) -> u8 {
     let f = match e {
-        Element::Int(_) | Element::BigInt { .. } => return 1,
+        Element::Int(_) | Element::BigInt { .. } | Element::Decimal(_) => return 1,
         Element::F32(x) => *x as f64,
         Element::F64(x) => *x,
         _ => unreachable!(),
@@ -111,6 +111,10 @@ fn compare_numbers(a: &Element, b: &Element) -> Ordering {
     if ca != 1 {
         return Ordering::Equal; // both -inf, both +inf, or both NaN
     }
+    // Both finite. A decimal on either side routes through the base-10 path.
+    if is_decimal(a) || is_decimal(b) {
+        return compare_with_decimal(a, b);
+    }
     let (ai, bi) = (is_int(a), is_int(b));
     if ai && bi {
         compare_int_int(a, b)
@@ -121,6 +125,10 @@ fn compare_numbers(a: &Element, b: &Element) -> Ordering {
     } else {
         compare_int_finite(b, float_val(a)).reverse()
     }
+}
+
+fn is_decimal(e: &Element) -> bool {
+    matches!(e, Element::Decimal(_))
 }
 
 fn sign_rank(f: f64) -> i8 {
@@ -269,7 +277,160 @@ fn compare_mag_to_scaled(mag: &[u8], mant: u64, exp: i32) -> Ordering {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Decimal vs the rest of the number class
+// ---------------------------------------------------------------------------
+
+// An exact base-10 value `sign · mag · 10^exp10` (mag big-endian; empty mag == 0).
+struct B10 {
+    sign: i8,
+    mag: Vec<u8>,
+    exp10: i64,
+}
+
+/// Decompose an int / big-int / decimal into its exact base-10 value.
+fn num_to_b10(e: &Element) -> B10 {
+    match e {
+        Element::Int(v) => {
+            if *v == 0 {
+                return B10 { sign: 0, mag: Vec::new(), exp10: 0 };
+            }
+            let mag = trim(&v.unsigned_abs().to_be_bytes()).to_vec();
+            B10 { sign: if *v < 0 { -1 } else { 1 }, mag, exp10: 0 }
+        }
+        Element::BigInt { negative, magnitude } => {
+            B10 { sign: if *negative { -1 } else { 1 }, mag: trim(magnitude).to_vec(), exp10: 0 }
+        }
+        Element::Decimal(d) => {
+            if d.is_zero() {
+                return B10 { sign: 0, mag: Vec::new(), exp10: 0 };
+            }
+            let mag = dec_digits_to_mag(&d.coefficient_digits());
+            B10 { sign: if d.negative { -1 } else { 1 }, mag, exp10: d.exponent() }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn is_exact_kind(e: &Element) -> bool {
+    matches!(e, Element::Int(_) | Element::BigInt { .. } | Element::Decimal(_))
+}
+
+fn compare_with_decimal(a: &Element, b: &Element) -> Ordering {
+    if is_exact_kind(a) && is_exact_kind(b) {
+        let va = num_to_b10(a);
+        let vb = num_to_b10(b);
+        if va.sign != vb.sign {
+            return va.sign.cmp(&vb.sign);
+        }
+        if va.sign == 0 {
+            return Ordering::Equal;
+        }
+        let c = compare_b10_mag(&va, &vb);
+        return if va.sign < 0 { c.reverse() } else { c };
+    }
+    // exactly one side is a finite float
+    if is_exact_kind(a) {
+        compare_b10_float(&num_to_b10(a), float_val(b))
+    } else {
+        compare_b10_float(&num_to_b10(b), float_val(a)).reverse()
+    }
+}
+
+/// Compare two same-sign, nonzero base-10 magnitudes (`mag · 10^exp10`), exactly.
+fn compare_b10_mag(a: &B10, b: &B10) -> Ordering {
+    let e = a.exp10.min(b.exp10);
+    let sa = mul_pow10(&a.mag, (a.exp10 - e) as usize);
+    let sb = mul_pow10(&b.mag, (b.exp10 - e) as usize);
+    cmp_mag(&sa, &sb)
+}
+
+fn compare_b10_float(v: &B10, f: f64) -> Ordering {
+    let sf = sign_rank(f);
+    if v.sign != sf {
+        return v.sign.cmp(&sf);
+    }
+    if v.sign == 0 {
+        return Ordering::Equal; // both zero
+    }
+    let (mant, exp) = decompose(f.abs());
+    let c = compare_b10_mag_to_float(&v.mag, v.exp10, mant, exp);
+    if v.sign < 0 {
+        c.reverse()
+    } else {
+        c
+    }
+}
+
+/// Compare `mag · 10^exp10` to `mant · 2^e2` (both > 0), exactly. Splits `10^exp10`
+/// into `2^exp10 · 5^exp10` and scales both sides up to integers before comparing.
+fn compare_b10_mag_to_float(mag: &[u8], exp10: i64, mant: u64, e2: i32) -> Ordering {
+    let a_pow2: i64 = 0.max((-exp10).max(-(e2 as i64))); // common 2^ multiplier
+    let b_pow5: i64 = 0.max(-exp10); // common 5^ multiplier
+
+    // LHS' = mag · 5^(exp10 + b_pow5) · 2^(exp10 + a_pow2)
+    let lhs = mul_pow5(mag, (exp10 + b_pow5) as usize);
+    let lhs = shift_left(&lhs, (exp10 + a_pow2) as usize);
+
+    // RHS' = mant · 5^(b_pow5) · 2^(e2 + a_pow2)
+    let mant_be = mant.to_be_bytes();
+    let rhs = mul_pow5(trim(&mant_be), b_pow5 as usize);
+    let rhs = shift_left(&rhs, (e2 as i64 + a_pow2) as usize);
+
+    cmp_mag(&lhs, &rhs)
+}
+
 // ------------------------------------------------------------ magnitude helpers
+
+/// Decimal digits (each 0–9, most-significant first) -> big-endian base-256 magnitude.
+fn dec_digits_to_mag(digits: &[u8]) -> Vec<u8> {
+    let mut bytes: Vec<u8> = Vec::new();
+    for &dch in digits {
+        let mut carry = dch as u16; // already 0–9
+        for b in bytes.iter_mut().rev() {
+            let v = *b as u16 * 10 + carry;
+            *b = (v & 0xff) as u8;
+            carry = v >> 8;
+        }
+        while carry > 0 {
+            bytes.insert(0, (carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    bytes
+}
+
+/// `mag · m` (small `m`) as new big-endian bytes, trimmed.
+fn mul_small(mag: &[u8], m: u16) -> Vec<u8> {
+    let mut bytes = mag.to_vec();
+    let mut carry: u32 = 0;
+    for b in bytes.iter_mut().rev() {
+        let v = *b as u32 * m as u32 + carry;
+        *b = (v & 0xff) as u8;
+        carry = v >> 8;
+    }
+    while carry > 0 {
+        bytes.insert(0, (carry & 0xff) as u8);
+        carry >>= 8;
+    }
+    bytes
+}
+
+fn mul_pow(mag: &[u8], base: u16, k: usize) -> Vec<u8> {
+    let mut cur = mag.to_vec();
+    for _ in 0..k {
+        cur = mul_small(&cur, base);
+    }
+    cur
+}
+
+fn mul_pow10(mag: &[u8], k: usize) -> Vec<u8> {
+    mul_pow(mag, 10, k)
+}
+
+fn mul_pow5(mag: &[u8], k: usize) -> Vec<u8> {
+    mul_pow(mag, 5, k)
+}
 
 fn trim(b: &[u8]) -> &[u8] {
     let mut s = 0;

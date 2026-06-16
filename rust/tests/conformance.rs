@@ -78,6 +78,9 @@ fn build_into(w: &mut Writer, op: &Json) {
         "float32" => {
             w.append_f32(as_f64(val) as f32);
         }
+        "decimal" => {
+            w.append_decimal_string(as_str(val)).unwrap();
+        }
         "timestamp" => {
             w.append_timestamp(as_str(val).parse().unwrap());
         }

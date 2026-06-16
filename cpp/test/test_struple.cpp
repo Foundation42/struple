@@ -112,6 +112,50 @@ int main() {
         CHECK(e && e->kind == Kind::F64 && e->f64 == 0.1, "float round-trip");
     }
 
+    // decimal golden bytes + canonicalization
+    {
+        auto dec = [](const char* s) { Writer w; w.appendDecimalString(s); return hex(w.bytes()); };
+        CHECK(dec("12.345") == "380321020d233300", "decimal 12.345");
+        CHECK(dec("-12.345") == "3801defdf2dcccff", "decimal -12.345");
+        CHECK(dec("0") == "3802", "decimal 0");
+        CHECK(dec("0.0") == "3802", "decimal 0.0 canonical zero");
+        CHECK(dec("100") == "380321030b00", "decimal 100");
+        CHECK(dec("12.300") == dec("12.3"), "decimal trailing-zero canonicalization");
+        CHECK(dec("1e-9") == "38031ff80b00", "decimal 1e-9");
+    }
+
+    // decimal round-trip (sign, coefficient digits, exponent)
+    {
+        Writer w;
+        w.appendDecimalString("-12.345");
+        Reader r(w.bytes());
+        auto e = r.next();
+        bool ok = e && e->kind == Kind::Decimal && e->big_negative && e->dec_exp == -3 &&
+                  e->data == Bytes({1, 2, 3, 4, 5});
+        CHECK(ok, "decimal round-trip -12.345");
+
+        Writer wz;
+        wz.appendDecimalString("0");
+        Reader rz(wz.bytes());
+        auto ez = rz.next();
+        CHECK(ez && ez->kind == Kind::Decimal && ez->decIsZero(), "decimal zero round-trip");
+    }
+
+    // decimal memcmp ordering: negative < zero < positive, magnitude within sign
+    {
+        const char* ascending[] = {"-100", "-12.345", "-0.5", "0", "0.001", "1.5", "12.345", "100"};
+        Bytes prev;
+        for (size_t i = 0; i < sizeof ascending / sizeof ascending[0]; i++) {
+            Writer w;
+            w.appendDecimalString(ascending[i]);
+            if (i > 0 && !(prev < w.bytes())) {
+                std::fprintf(stderr, "FAIL decimal order at %zu (%s)\n", i, ascending[i]);
+                fails++;
+            }
+            prev = w.bytes();
+        }
+    }
+
     // navigation
     {
         Writer child;

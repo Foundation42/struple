@@ -69,6 +69,7 @@ static void build_into(Writer& w, const Json& op) {
     else if (key == "int") w.append_int(std::stoll(val.text));
     else if (key == "float64") w.append_f64(as_f64(val));
     else if (key == "float32") w.append_f32(float(as_f64(val)));
+    else if (key == "decimal") w.appendDecimalString(val.text);
     else if (key == "timestamp") w.append_timestamp(std::stoll(val.text));
     else if (key == "string") w.append_string(val.text);
     else if (key == "bytes") w.append_bytes(from_hex(val.text));
