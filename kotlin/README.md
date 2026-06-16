@@ -9,6 +9,21 @@ corpus.
 No Gradle, no JUnit — same zero-infra style as the C and C++ ports. Compiles
 with `kotlinc` straight to a runnable jar.
 
+## Quick start
+
+```kotlin
+import struple.*
+
+val key = pack("users", 12345L, "alice", true)   // ByteArray — memcmp-orderable
+order(keyA, keyB)                                  // -1 / 0 / 1  ==  value order
+
+val r = reader(key)
+while (true) { val e = r.next() ?: break /* e: Element.Str / Element.Int / … */ }
+
+val bytes = fromJson("""{"id":12345,"name":"alice"}""")
+val json  = toJson(bytes)                          // {"id":12345,"name":"alice"}
+```
+
 ## Run the tests
 
 ```sh

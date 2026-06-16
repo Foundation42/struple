@@ -10,6 +10,20 @@ only `System.*` (notably `System.Numerics.BigInteger`). A tiny JSON parser +
 serializer is hand-rolled so number tokens keep full precision (no
 `System.Text.Json`).
 
+## Quick start
+
+```csharp
+using Struple;
+
+byte[] key = new Struple.Packer()
+    .AppendString("users").AppendInt(12345).AppendBool(true)
+    .Bytes();                          // memcmp-orderable bytes
+Struple.Compare(keyA, keyB);           // -1 / 0 / 1  ==  value order
+
+byte[] k = Json.FromJson("{\"id\":12345,\"name\":\"alice\"}");
+string j = Json.ToJson(k);             // {"id":12345,"name":"alice"}
+```
+
 ## Build & test
 
 ```sh

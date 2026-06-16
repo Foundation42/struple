@@ -41,6 +41,16 @@
     </div>
   </section>
 
+  <section id="polyglot">
+    <div class="wrap">
+      <h2>Twelve languages, one set of bytes <span class="sub">pack a tuple anywhere — it encodes identically</span></h2>
+      <p class="lead">The same value produces the same bytes in every implementation, so a struple packed
+        in one language is read byte-for-byte in any other. Pick a language:</p>
+      <div class="lang-tabs" id="lang-tabs"></div>
+      <pre class="lang-snippet"><code id="lang-code"></code></pre>
+    </div>
+  </section>
+
   <section id="encoder">
     <div class="wrap io">
       <h2>Pack it live <span class="sub">the actual codec, running in your browser</span></h2>
@@ -151,6 +161,41 @@
       </div>
       <p class="note">Deterministic encoding + a total order is exactly the substrate that replicated,
         mergeable, ordered data is built on.</p>
+    </div>
+  </section>
+
+  <section id="usecases">
+    <div class="wrap">
+      <h2>Where it shines <span class="sub">ordered + canonical + self-delimiting</span></h2>
+      <p class="lead">Three properties — bytes that sort themselves, one canonical encoding per value, and a
+        stream you can read incrementally — add up to a handful of things struple is unusually good at.</p>
+      <div class="crdt-grid">
+        <div class="crdt-card">
+          <h3>Database keys &amp; indexes</h3>
+          <p>Pack a composite key like <code>[tenant, "user", id]</code> and drop the bytes straight into
+            RocksDB, LMDB, sled or FoundationDB. They sort in the right order with <strong>no custom
+            comparator</strong>, so range scans, prefix queries and secondary indexes just work.</p>
+        </div>
+        <div class="crdt-card">
+          <h3>Message passing &amp; queues</h3>
+          <p>Because all twelve languages emit identical bytes, a struple <em>is</em> a language-neutral
+            message — no schema compiler, no codegen. It's how Substrate wires <strong>functional-style FFIs
+            and queues between languages and cores</strong>: a Rust core enqueues a struple, a Python or Swift
+            worker dequeues and decodes it. Self-delimiting, so you can parse it as it streams.</p>
+        </div>
+        <div class="crdt-card">
+          <h3>Content addressing &amp; caching</h3>
+          <p>One value → one canonical byte string → one hash. Use it as a cache key, a content address or a
+            dedup fingerprint, and every language agrees on the identity. The same property makes it a clean
+            <a href="#crdt">CRDT</a> substrate.</p>
+        </div>
+        <div class="crdt-card">
+          <h3>Polyglot data exchange</h3>
+          <p>A wire format spanning the union of the Python and JavaScript data models — nulls, big integers,
+            decimals, timestamps, UUIDs, nested maps and sets — round-tripping byte-identically across a dozen
+            runtimes. One format for your whole stack, front to back.</p>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -322,6 +367,109 @@
     renderEncoder();
     renderCompare();
     renderSemantic();
+  </script>
+
+  <script>
+    // Rotating polyglot banner — the same tuple packed in each implementation.
+    (function () {
+      const SNIPPETS = [
+        { name: "Zig", code:
+`var p = struple.Packer.init(alloc);
+try p.append("users");
+try p.append(@as(i64, 12345));
+try p.append(true);
+const key = p.bytes(); // memcmp-orderable` },
+        { name: "TypeScript", code:
+`import { pack, compare } from "struple";
+
+const key = pack("users", 12345n, "alice", true);
+compare(a, b); // <0 | 0 | >0  ==  value order` },
+        { name: "Python", code:
+`from struple import pack
+
+key = pack("users", 12345, "alice", True)
+sorted([a, b])  # plain bytes order == value order` },
+        { name: "Rust", code:
+`use struple::{pack, Value};
+
+let key = pack(&[
+    Value::Str("users".into()),
+    Value::Int(12345),
+    Value::Bool(true),
+]); // Vec<u8> is Ord: a < b sorts like the values` },
+        { name: "Go", code:
+`w := struple.NewWriter()
+w.AppendString("users")
+w.AppendInt(12345)
+w.AppendBool(true)
+key := w.Bytes() // bytes.Compare(a, b) == value order` },
+        { name: "C", code:
+`struple_writer w;
+struple_writer_init(&w);
+struple_append_string(&w, "users", 5);
+struple_append_int(&w, 12345);
+struple_append_bool(&w, true);
+/* w.data / w.len — memcmp-orderable */` },
+        { name: "C++", code:
+`using namespace struple;
+
+Bytes key = pack("users", int64_t(12345), true);
+// std::vector<uint8_t>; operator< orders like the values` },
+        { name: "Java", code:
+`byte[] key = new Packer()
+    .appendString("users")
+    .appendInt(12345)
+    .appendBool(true)
+    .bytes();
+Struple.compare(a, b); // -1 / 0 / 1` },
+        { name: "Kotlin", code:
+`val key = pack("users", 12345L, "alice", true)
+order(a, b) // raw byte order: -1 / 0 / 1` },
+        { name: "C#", code:
+`byte[] key = new Struple.Packer()
+    .AppendString("users")
+    .AppendInt(12345)
+    .AppendBool(true)
+    .Bytes();
+Struple.Compare(a, b); // -1 / 0 / 1` },
+        { name: "Swift", code:
+`var w = Writer()
+w.appendString("users")
+w.appendInt(12345)
+w.appendBool(true)
+let key = w.bytes // [UInt8] — compare(a, b) sorts` },
+        { name: "Dart", code:
+`final w = Writer()
+  ..appendString(utf8.encode('users'))
+  ..appendInt(12345)
+  ..appendBool(true);
+final key = w.bytes(); // Uint8List — memcmp-orderable` },
+      ];
+
+      const tabs = document.getElementById("lang-tabs");
+      const codeEl = document.getElementById("lang-code");
+      if (!tabs || !codeEl) return;
+
+      const pills = SNIPPETS.map((s, i) => {
+        const b = document.createElement("button");
+        b.className = "lang-pill";
+        b.textContent = s.name;
+        b.addEventListener("click", () => { stop(); show(i); });
+        tabs.appendChild(b);
+        return b;
+      });
+
+      let active = -1, timer = null;
+      function show(i) {
+        active = i;
+        codeEl.textContent = SNIPPETS[i].code;
+        pills.forEach((p, j) => p.classList.toggle("active", j === i));
+      }
+      function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+      show(0);
+      timer = setInterval(() => show((active + 1) % SNIPPETS.length), 3200);
+    })();
   </script>
 </body>
 </html>

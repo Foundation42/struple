@@ -5,8 +5,24 @@ lexicographically-ordered tuple packing. Byte-identical to the Zig reference and
 the other five language ports, driven by the shared
 [`conformance/`](../conformance) corpus.
 
-Requires **JDK 26** (`javac` / `java` on PATH). No Maven/Gradle, no JUnit — the
+Requires **JDK 21+** (`javac` / `java` on PATH). No Maven/Gradle, no JUnit — the
 test runners are plain `main()` methods, exactly like the C and C++ ports.
+
+## Quick start
+
+```java
+import struple.Struple.Packer;
+import struple.Struple;
+import struple.Json;
+
+byte[] key = new Packer()
+    .appendString("users").appendInt(12345).appendBool(true)
+    .bytes();                          // memcmp-orderable bytes
+Struple.compare(keyA, keyB);           // -1 / 0 / 1  ==  value order
+
+byte[] k = Json.fromJson("{\"id\":12345,\"name\":\"alice\"}");
+String j = Json.toJson(k);             // {"id":12345,"name":"alice"}
+```
 
 ## Build & test
 
