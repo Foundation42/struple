@@ -6,7 +6,7 @@
   <title>struple — lexicographically-ordered tuple packing</title>
   <meta name="description" content="A schema-free binary format whose encoded bytes are directly memcmp-orderable. One wire format, twelve byte-identical implementations." />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=3" />
 </head>
 <body>
 
@@ -72,7 +72,7 @@
       <p class="lead">The same value produces the same bytes in every implementation, so a struple packed
         in one language is read byte-for-byte in any other. Pick a language:</p>
       <div class="lang-tabs" id="lang-tabs"></div>
-      <pre class="lang-snippet"><code id="lang-code"></code></pre>
+      <pre class="snippet"><code id="lang-code"></code></pre>
     </div>
   </section>
 
@@ -83,7 +83,7 @@
         element at a time and stop early, branch on each element's type, jump to a field by position, descend
         into a nested container, or look a map key up in <code>O(log n)</code> — no schema, no codegen. Pick a language:</p>
       <div class="lang-tabs" id="unpack-tabs"></div>
-      <pre class="lang-snippet"><code id="unpack-code"></code></pre>
+      <pre class="snippet"><code id="unpack-code"></code></pre>
     </div>
   </section>
 

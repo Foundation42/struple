@@ -157,16 +157,22 @@ code { font-family: var(--mono); background: var(--panel2); padding: 1px 6px; bo
   background: linear-gradient(90deg, var(--accent), var(--accent2));
   box-shadow: 0 4px 14px rgba(56, 189, 248, 0.25);
 }
-.lang-snippet {
+/* Class is "snippet", NOT "lang-snippet": Prism's highlightElement copies the
+   language class onto the parent <pre> and first strips any lang-*/language-*
+   class (regex /\blang(?:uage)?-/) — which silently deleted "lang-snippet" and
+   let Prism's own defaults (16px Consolas, content-driven height) take over.
+   "snippet" is immune; pre.snippet / pre.snippet code win Prism's
+   pre[class*=language-] rules on source order (style.css loads after Prism). */
+pre.snippet {
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
   padding: 18px 20px; margin: 0; overflow: auto;
   box-shadow: inset 0 0 0 1px rgba(110, 231, 183, 0.04);
 }
 /* fixed heights (sized for each banner's tallest snippet) so cycling never
    reflows the page — the box stays put instead of jumping per language */
-#polyglot .lang-snippet { height: 190px; }
-#unpacking .lang-snippet { height: 300px; }
-.lang-snippet code {
+#polyglot .snippet { height: 190px; }
+#unpacking .snippet { height: 300px; }
+pre.snippet code {
   font-family: var(--mono); font-size: 0.78rem; background: none; padding: 0;
   color: var(--text); white-space: pre; line-height: 1.55; text-shadow: none;
 }
