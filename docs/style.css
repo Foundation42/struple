@@ -30,14 +30,29 @@ code { font-family: var(--mono); background: var(--panel2); padding: 1px 6px; bo
 
 /* hero */
 .hero {
+  position: relative;
+  overflow: hidden;
   text-align: center;
-  padding: 84px 20px 64px;
-  background: radial-gradient(1200px 400px at 50% -10%, rgba(56, 189, 248, 0.16), transparent 70%),
-    radial-gradient(900px 360px at 50% 0%, rgba(110, 231, 183, 0.12), transparent 70%);
+  padding: 92px 20px 76px;
+  background:
+    radial-gradient(1000px 480px at 12% -15%, rgba(110, 231, 183, 0.30), transparent 60%),
+    radial-gradient(950px 460px at 88% -8%, rgba(56, 189, 248, 0.30), transparent 60%),
+    radial-gradient(820px 520px at 50% 128%, rgba(167, 139, 250, 0.24), transparent 60%),
+    var(--bg);
   border-top: none;
 }
+.hero::before {
+  content: "";
+  position: absolute; inset: -50%; z-index: 0;
+  background: conic-gradient(from 0deg, #6ee7b7, #38bdf8, #a78bfa, #f472b6, #fbbf24, #6ee7b7);
+  filter: blur(95px);
+  opacity: 0.30;
+  animation: aurora 24s linear infinite;
+}
+@keyframes aurora { to { transform: rotate(1turn); } }
+.hero > * { position: relative; z-index: 1; }
 .hero h1 {
-  font-size: 3.4rem;
+  font-size: 3.9rem;
   margin: 0;
   letter-spacing: -1.5px;
   background: linear-gradient(90deg, var(--accent), var(--accent2), var(--accent));
@@ -45,10 +60,37 @@ code { font-family: var(--mono); background: var(--panel2); padding: 1px 6px; bo
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 34px rgba(110, 231, 183, 0.28));
   animation: hero-shimmer 7s linear infinite;
 }
 @keyframes hero-shimmer { to { background-position: 200% center; } }
-@media (prefers-reduced-motion: reduce) { .hero h1 { animation: none; } }
+
+/* cheeky starburst sticker */
+.starburst {
+  position: absolute; top: 34px; right: max(20px, 6vw); z-index: 3;
+  width: 150px; height: 150px;
+  display: flex; align-items: center; justify-content: center;
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.45));
+  animation: wobble 4.5s ease-in-out infinite;
+}
+.starburst::before {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(135deg, #fbbf24, #f472b6);
+  clip-path: polygon(50% 0%, 58% 30.6%, 85.4% 14.6%, 69.4% 42%, 100% 50%, 69.4% 58%,
+    85.4% 85.4%, 58% 69.4%, 50% 100%, 42% 69.4%, 14.6% 85.4%, 30.6% 58%, 0% 50%,
+    30.6% 42%, 14.6% 14.6%, 42% 30.6%);
+}
+.starburst span {
+  position: relative; z-index: 1; text-align: center;
+  font-family: var(--mono); font-weight: 800; font-size: 0.92rem; line-height: 1.12;
+  color: #2a1500; letter-spacing: -0.3px; transform: rotate(-8deg);
+}
+@keyframes wobble { 0%, 100% { transform: rotate(9deg); } 50% { transform: rotate(15deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .hero h1, .hero::before, .starburst { animation: none; }
+}
+@media (max-width: 720px) { .starburst { display: none; } }
 .hero .tag { font-size: 1.25rem; color: var(--text); margin: 14px 0 6px; }
 .hero .tag2 { color: var(--muted); max-width: 620px; margin: 0 auto 26px; }
 .badges { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
