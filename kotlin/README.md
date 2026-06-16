@@ -24,6 +24,46 @@ val bytes = fromJson("""{"id":12345,"name":"alice"}""")
 val json  = toJson(bytes)                          // {"id":12345,"name":"alice"}
 ```
 
+## Unpacking
+
+Encoded bytes aren't opaque — read the fields back out, no schema required. The
+same forms work in every port:
+
+```kotlin
+val key = pack("users", 12345L, "alice", true)        // [table, id, name, active]
+
+// 1. Whole-tuple unpack — decode every field at once; pick by position
+val fields = buildList { val r = reader(key); while (true) add(r.next() ?: break) }
+val name = (fields[2] as Element.Str).value           // "alice"
+
+// 2. Streaming read loop — advance one element at a time, stop early
+val r = reader(key)
+while (true) { val e = r.next() ?: break; if (e is Element.Int) break /* id=12345 */ }
+
+// 3. Type dispatch — when() over the Element sealed class; recurse into containers
+when (val e = reader(key).next()) {
+    is Element.Str     -> e.value                      // "users"
+    is Element.Int     -> e.value                      // BigInteger
+    is Element.MapElem -> MapView(e.inner)             // descend into a nested map
+    else -> {}
+}
+
+// 4. Random access — count / head / tail / at(i) without decoding everything
+val v = view(key)
+v.count(); v.head(); v.tail()                          // 4 / "users" elem / rest
+val active = (reader(v.at(3)!!).next() as Element.Bool).value   // true
+
+// 5. Container descent — step into a nested map's inner stream
+val m = fromJson("""{"id":12345,"name":"alice"}""")
+val inner = view(m).containedItems()!!                 // un-escaped [k][v]… stream
+
+// 6. Map lookup by key — MapView.get (linear) or IndexedMap (O(log n) get/find)
+val hit = MapView(inner).get(encode("name"))!!         // value bytes for "name"
+(reader(hit).next() as Element.Str).value              // "alice"
+val im = IndexedMap(inner)
+im.find(encode("name")); im.at(1); im.get(encode("name"))
+```
+
 ## Run the tests
 
 ```sh

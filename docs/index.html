@@ -76,6 +76,17 @@
     </div>
   </section>
 
+  <section id="unpacking">
+    <div class="wrap">
+      <h2>…and read it back anywhere <span class="sub">unpack without a schema — the same six forms in every port</span></h2>
+      <p class="lead">Packed bytes aren't opaque. Decode the whole tuple, walk it one self-delimiting
+        element at a time and stop early, branch on each element's type, jump to a field by position, descend
+        into a nested container, or look a map key up in <code>O(log n)</code> — no schema, no codegen. Pick a language:</p>
+      <div class="lang-tabs" id="unpack-tabs"></div>
+      <pre class="lang-snippet"><code id="unpack-code"></code></pre>
+    </div>
+  </section>
+
   <section id="encoder">
     <div class="wrap io">
       <h2>Pack it live <span class="sub">the actual codec, running in your browser</span></h2>
@@ -508,6 +519,189 @@ final key = w.bytes(); // Uint8List — memcmp-orderable` },
 
       show(0);
       timer = setInterval(() => show((active + 1) % SNIPPETS.length), 3200);
+    })();
+
+    // Rotating polyglot banner #2 — the same tuple UNPACKED in each implementation.
+    (function () {
+      const SNIPPETS = [
+        { name: "Zig", code:
+`var p = struple.Packer.init(alloc);
+try p.append("users"); try p.append(@as(i64, 12345));
+try p.append("alice"); try p.append(true);
+const key = p.bytes();
+
+var r = struple.reader(key);                 // 1+2. stream field-by-field (no list type)
+while (try r.next()) |e| switch (e) {        // 3. dispatch on the tagged union; recurse maps
+    .int => |v| { if (v == 12345) break; },  //     stop early
+    else => {},
+};
+const v = struple.view(key);                 // 4. count / head / tail / at(i)
+const inner = (try v.containedItems(alloc)).?;   // 5. descend into a map
+_ = (try struple.MapView.init(inner).get(k)).?;  // 6. lookup -> "alice" (IndexedMap = O(log n))` },
+        { name: "TypeScript", code:
+`import { pack, unpack, encode, view, Reader, MapView, IndexedMap } from "struple";
+
+const key = pack("users", 12345n, "alice", true);
+const [table, id, name, active] = unpack(key);    // 1. whole-tuple, by position
+const r = new Reader(key); let e = r.next();       // 2. stream one element
+if (e && e.kind === "int") e.value;                // 3. dispatch on e.kind (recurse e.body)
+const v = view(key); unpack(v.at(2)!);             // 4. count / head / tail / at(i)
+const inner = view(pack({ id: 12345n, name: "alice" })).containedItems()!; // 5. descend
+unpack(new MapView(inner).get(encode("name"))!);   // 6. lookup -> ["alice"]
+new IndexedMap(inner).find(encode("name"));        //    or O(log n) get / find` },
+        { name: "Python", code:
+`from struple import pack, unpack, encode, Reader, view, MapView, IndexedMap
+
+key = pack("users", 12345, "alice", True)
+table, id, name, active = unpack(key)            # 1. whole-tuple, by position
+r = Reader(key); kind, value = r.next()          # 2. stream one element (kind, value)
+walk(value) if kind in ("array", "map", "set") else None  # 3. dispatch / recurse
+v = view(key); v.count(); unpack(v.at(2))        # 4. count / head / tail / at(i)
+inner = view(pack({"id": 12345, "name": "alice"})).contained_items()  # 5. descend
+unpack(MapView(inner).get(encode("name")))       # 6. lookup -> ["alice"]
+IndexedMap(inner).find(encode("name"))           #    or O(log n) get / find` },
+        { name: "Rust", code:
+`let key = pack(&[Value::Str("users".into()), Value::Int(12345),
+                 Value::Str("alice".into()), Value::Bool(true)]);
+let fields = unpack(&key)?;                       // 1. whole-tuple, by position
+let mut r = Reader::new(&key);                    // 2. stream one element
+while let Some(el) = r.next()? {                  // 3. match el { Element::Int(i) => ...,
+    if let Element::Int(_) = el { break; }        //    Element::Map(body) => recurse }
+}
+let v = view(&key); let name = v.at(2)?.unwrap(); // 4. count / head / tail / at(i)
+let inner = view(&map).contained_items()?.unwrap();      // 5. descend into a map
+let mv = MapView::new(&inner);                    // 6. mv.get(encode(Str("name"))) -> "alice"
+mv.indexed()?.find(&encode(&Value::Str("name".into())));  //    or O(log n) get / find` },
+        { name: "Go", code:
+`r := struple.NewReader(key)                       // 2. stream one element
+first, _, _ := r.Next()                           // 1. read fields one at a time
+if first.Kind == struple.KindString {             // 3. dispatch on .Kind (recurse via inner)
+    _ = string(struple.Unescape(first.Body))      //    -> "users"
+}
+v := struple.NewView(key)                         // 4. random access:
+n, _ := v.Count(); name, _, _ := v.At(2)          //    Count / Head / Tail / At(i)
+mb, _ := struple.FromJson("{\\"id\\":12345,\\"name\\":\\"alice\\"}")  // 5. descend into a map
+inner, _, _ := struple.NewView(mb).ContainedItems()
+nk := struple.NewWriter(); nk.AppendString("name")
+val, ok, _ := struple.NewMapView(inner).Get(nk.Bytes())    // 6. lookup -> "alice"
+im, _ := struple.NewIndexedMap(inner); im.Find(nk.Bytes())  //    O(log n) Get / Find` },
+        { name: "C", code:
+`struple_reader r; struple_reader_init(&r, buf, len);
+struple_element e;                               /* 1+2. stream field-by-field */
+while (struple_reader_next(&r, &e) == 1)         /*      (C has no list type) */
+    if (e.kind == STRUPLE_INT) break;            /* 3. dispatch on e.kind; stop early */
+struple_view v = {buf, len}, third;              /* 4. random access: */
+long n = struple_view_count(v);                  /*    count / head / tail / at(i) */
+struple_view_at(v, 2, &third);
+struple_writer inner; struple_writer_init(&inner);
+struple_view_contained_items(v, &inner);         /* 5. descend into a map */
+struple_map m = {inner.data, inner.len}; struple_view got;
+struple_map_get(m, key, klen, &got);             /* 6. lookup -> "alice"; indexed = O(log n) */` },
+        { name: "C++", code:
+`Bytes key = pack("users", int64_t(12345), "alice", true);
+View t(key);                                     // 1. whole-tuple: pick by position
+Reader r(key);                                   // 2. stream one element
+while (auto e = r.next())                        // 3. switch on e->kind; recurse e->data
+    if (e->kind == Kind::Int && e->integer == 12345) break;
+t.count(); t.head(); t.tail(); t.at(3);          // 4. random access, no full decode
+Writer mw; mw.append_map({{pack("id"), pack(int64_t(12345))},
+                          {pack("name"), pack("alice")}});
+auto inner = View(mw.take()).containedItems();   // 5. descend into the map
+auto val = MapView(*inner).get(pack("name"));    // 6. lookup -> "alice"
+Reader(val->data, val->size).next()->str;        //    IndexedMap(*inner) = O(log n)` },
+        { name: "Java", code:
+`List<Element> all = new ArrayList<>();
+for (Reader r = new Reader(key); !r.done(); ) all.add(r.next());  // 1. drain = whole-tuple
+Reader r = new Reader(key); Element first = r.next();            // 2. stream one element
+switch (e.kind) {                                                // 3. dispatch on kind
+    case STRING -> e.string(); case INT -> e.intValue();         //    recurse new Reader(e.inner())
+    default -> {}
+}
+View v = Navigate.view(key); v.count(); byte[] f = v.at(2);      // 4. count / head / tail / at(i)
+byte[] inner = Navigate.view(mapBytes).containedItems();         // 5. descend into a map
+byte[] kk = new Packer().appendString("name").bytes();           //    encode the key
+byte[] val = new MapView(inner).get(kk);                         // 6. lookup -> "alice"
+Integer at = new MapView(inner).indexed().find(kk);              //    or IndexedMap O(log n)` },
+        { name: "Kotlin", code:
+`val key = pack("users", 12345L, "alice", true)
+val all = buildList { val r = reader(key); while (true) add(r.next() ?: break) } // 1. whole-tuple
+val r = reader(key); val first = r.next()                  // 2. stream one element
+when (reader(key).next()) {                                // 3. dispatch on sealed Element
+    is Element.Str -> "str"; is Element.Int -> "int"; else -> "" }
+val v = view(key); v.count(); v.head(); v.at(3)            // 4. count / head / tail / at(i)
+val inner = view(fromJson(json)).containedItems()!!        // 5. descend into a map
+MapView(inner).get(encode("name"))                         // 6. lookup -> "alice" (linear)
+IndexedMap(inner).find(encode("name"))                     //    or O(log n) get / find` },
+        { name: "C#", code:
+`byte[] key = new Struple.Packer().AppendString("users").AppendInt(12345)
+    .AppendString("alice").AppendBool(true).Bytes();
+var r = new Struple.Reader(key); Struple.Element? e;
+while ((e = r.Next()) != null) all.Add(e);                 // 1. drain = whole-tuple
+while ((e = r.Next()) != null)                             // 2. stream, stop early
+    if (e.Kind == Struple.Kind.Int) break;                // 3. dispatch on e.Kind (recurse e.Inner)
+var v = Navigate.NewView(key); int n = v.Count();         // 4. Count / Head / Tail / At(i)
+byte[] inner = Navigate.NewView(mapKey).ContainedItems(); // 5. descend into a map
+byte[] probe = new Struple.Packer().AppendString("name").Bytes();
+byte[] val = new Navigate.MapView(inner).Get(probe);      // 6. lookup -> "alice"
+new Navigate.MapView(inner).Indexed().Find(probe);        //    or O(log n) Get / Find` },
+        { name: "Swift", code:
+`var w = Writer(); w.appendString("users"); w.appendInt(12345)
+w.appendString("alice"); w.appendBool(true); let key = w.bytes
+var r = Reader(key)                                       // 2. stream one element
+while let e = try r.next() {                              // 1+3. dispatch on e; stop early
+    if case .int(let id) = e { _ = id; break } }          //     recurse via unescape(body)
+let v = view(key); _ = try v.count(); _ = try v.at(2)     // 4. count / head / tail / at(i)
+let map = try fromJson(#"{"id":12345,"name":"alice"}"#)   // 5. descend into a map
+guard let body = try view(map).containedItems() else { return }
+var pw = Writer(); pw.appendString("name"); let k = pw.bytes
+let idx = try IndexedMap(body); _ = idx.get(k); idx.find(k)  // 6. lookup -> "alice", O(log n)` },
+        { name: "Dart", code:
+`final v = View(key);                                            // 4. random-access view
+final table = utf8.decode(unescape(Reader(v.at(0)!).next()!.body!)); // 1. whole-tuple by position
+final r = Reader(key); final e = r.next();                      // 2. stream one element
+final kind = e!.kind;                                           // 3. switch on e.kind; recurse body
+final n = v.count(); final name = v.at(2)!;                     // 4. count / head / tail / at(i)
+final inner = View(mapBytes).containedItems()!;                 // 5. descend into a map
+final nameKey = (Writer()..appendString(utf8.encode('name'))).bytes();
+final hit = MapView(inner).get(nameKey);                        // 6. lookup -> "alice" bytes
+MapView(inner).indexed().find(nameKey);                         //    or O(log n) get / find` },
+      ];
+
+      const PRISM_LANG = {
+        "Zig": "zig", "TypeScript": "typescript", "Python": "python", "Rust": "rust",
+        "Go": "go", "C": "c", "C++": "cpp", "Java": "java", "Kotlin": "kotlin",
+        "C#": "csharp", "Swift": "swift", "Dart": "dart",
+      };
+      if (window.Prism && Prism.plugins && Prism.plugins.autoloader) {
+        Prism.plugins.autoloader.languages_path = "https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/";
+      }
+
+      const tabs = document.getElementById("unpack-tabs");
+      const codeEl = document.getElementById("unpack-code");
+      if (!tabs || !codeEl) return;
+
+      const pills = SNIPPETS.map((s, i) => {
+        const b = document.createElement("button");
+        b.className = "lang-pill";
+        b.textContent = s.name;
+        b.addEventListener("click", () => { stop(); show(i); });
+        tabs.appendChild(b);
+        return b;
+      });
+
+      let active = -1, timer = null;
+      function show(i) {
+        active = i;
+        const s = SNIPPETS[i];
+        codeEl.textContent = s.code;
+        codeEl.className = "language-" + (PRISM_LANG[s.name] || "clike");
+        if (window.Prism) Prism.highlightElement(codeEl);
+        pills.forEach((p, j) => p.classList.toggle("active", j === i));
+      }
+      function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+      show(0);
+      timer = setInterval(() => show((active + 1) % SNIPPETS.length), 4500);
     })();
   </script>
 </body>

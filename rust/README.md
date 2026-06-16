@@ -22,6 +22,70 @@ let bytes = from_json(r#"{"id":12345,"name":"alice"}"#).unwrap();
 assert_eq!(to_json(&bytes).unwrap(), r#"{"id":12345,"name":"alice"}"#);
 ```
 
+## Unpacking
+
+Encoded bytes aren't opaque — read the fields back out, no schema required. The
+same forms work in every port:
+
+```rust
+use struple::{pack, unpack, encode, view, Element, MapView, Reader, Value};
+
+let key = pack(&[
+    Value::Str("users".into()), Value::Int(12345),
+    Value::Str("alice".into()), Value::Bool(true),
+]); // fields: [table, id, name, active]
+
+// 1. Whole-tuple unpack — decode every field at once; pick by position.
+let fields = unpack(&key)?;
+assert_eq!(fields[1], Value::Int(12345));
+
+// 2. Streaming read loop — advance one element at a time, stop early.
+let mut r = Reader::new(&key);
+while let Some(el) = r.next()? {
+    if let Element::Int(id) = el { assert_eq!(id, 12345); break; }
+}
+
+// 3. Type dispatch — match on each element's kind; recurse into containers.
+let mut r = Reader::new(&key);
+while let Some(el) = r.next()? {
+    match el {
+        Element::Str(s) => { /* "users" / "alice" */ }
+        Element::Int(i) => assert_eq!(i, 12345),
+        Element::Bool(b) => assert!(b),
+        Element::Array(body) | Element::Map(body) | Element::Set(body) => {
+            let mut child = Reader::new(&body); // step into the inner stream
+            while let Some(_inner) = child.next()? {}
+        }
+        _ => {}
+    }
+}
+
+// 4. Random access — count / head / tail / at(i) without decoding everything.
+let v = view(&key);
+assert_eq!(v.count()?, 4);
+let _head = v.head()?.unwrap();              // first field's raw bytes
+let _tail = v.tail()?;                        // everything after the first
+let name = v.at(2)?.unwrap();                 // third field, zero-copy slice
+assert_eq!(unpack(name)?[0], Value::Str("alice".into()));
+
+// map: {"id": 12345, "name": "alice"}
+let map = encode(&Value::Map(vec![
+    (Value::Str("id".into()), Value::Int(12345)),
+    (Value::Str("name".into()), Value::Str("alice".into())),
+]));
+
+// 5. Container descent — step into a nested map/array's inner stream.
+let inner = view(&map).contained_items()?.unwrap(); // un-escaped k/v stream
+
+// 6. Map lookup by key — MapView::get (linear) or IndexedMap (O(log n) get/find).
+let mv = MapView::new(&inner);
+let name_key = encode(&Value::Str("name".into()));
+let got = mv.get(&name_key)?.unwrap();
+assert_eq!(unpack(got)?[0], Value::Str("alice".into()));     // -> "alice"
+let idx = mv.indexed()?;                                      // many lookups? index once
+assert_eq!(idx.find(&name_key), Some(1));                    // O(log n) get/find/at
+```
+
 ## Value mapping
 
 | Rust | struple |

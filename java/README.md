@@ -24,6 +24,57 @@ byte[] k = Json.fromJson("{\"id\":12345,\"name\":\"alice\"}");
 String j = Json.toJson(k);             // {"id":12345,"name":"alice"}
 ```
 
+## Unpacking
+
+Encoded bytes aren't opaque — read the fields back out, no schema required. The
+same forms work in every port:
+
+```java
+byte[] key = new Packer()
+    .appendString("users").appendInt(12345).appendString("alice").appendBool(true)
+    .bytes();                                    // [table, id, name, active]
+
+// 1. Whole-tuple unpack — no one-shot helper; the streaming loop IS the unpack.
+//    Drain every element into a list, then pick fields by position.
+List<Element> all = new ArrayList<>();
+for (Reader r = new Reader(key); !r.done(); ) all.add(r.next());
+String table = all.get(0).string();              // "users"
+BigInteger id = all.get(1).intValue();           // 12345  (java.math.BigInteger)
+
+// 2. Streaming read loop — advance one element at a time, stop early.
+Reader r = new Reader(key);
+Element first = r.next();                         // r.next() == null at end
+// ... break out as soon as you've seen enough; no need to decode the rest
+
+// 3. Type dispatch — switch on each element's kind; recurse into containers.
+for (Reader rd = new Reader(key); !rd.done(); ) {
+    Element e = rd.next();
+    switch (e.kind) {                             // enum Struple.Kind
+        case STRING          -> use(e.string());
+        case INT, BIG_INT    -> use(e.intValue());
+        case BOOLEAN         -> use(e.boolValue());
+        case ARRAY, MAP, SET -> recurse(new Reader(e.inner()));  // inner stream
+        default              -> {}
+    }
+}
+
+// 4. Random access — count / head / tail / at(i) without decoding everything.
+View v = Navigate.view(key);
+int n = v.count();                               // 4
+byte[] name = v.at(2);                           // a sub-view (null if out of range)
+String nameStr = new Reader(name).next().string();   // decode just that one
+
+// 5. Container descent — step into a nested map/array's inner stream.
+byte[] inner = Navigate.view(mapBytes).containedItems();   // un-escaped, or null
+
+// 6. Map lookup by key — encode the key, then look it up.
+byte[] k = new Packer().appendString("name").bytes();
+byte[] val = new MapView(inner).get(k);          // linear, early-exit; null if absent
+IndexedMap im = new MapView(inner).indexed();    // O(log n) get/find, O(1) at
+byte[] v2 = im.get(k);                            // -> bytes for "alice"
+Integer at = im.find(k);                         // index in canonical order, or null
+```
+
 ## Build & test
 
 ```sh

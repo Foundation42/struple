@@ -35,6 +35,48 @@ while ((e = r.next()) != null) {
 compareBytes(keyA, keyB);           // -1 / 0 / 1 — that's the comparator
 ```
 
+## Unpacking
+
+Encoded bytes aren't opaque — read the fields back out, no schema required. The
+same forms work in every port:
+
+```dart
+final v = View(key);                              // key = the Quick-start tuple
+
+// 1. Whole-tuple unpack — no top-level unpack(); View picks by position.
+final table = utf8.decode(unescape(Reader(v.at(0)!).next()!.body!)); // 'users'
+final id    = Reader(v.at(1)!).next()!.intValue!;                    // BigInt 12345
+
+// 2. Streaming read loop — advance one element at a time, stop early.
+final r = Reader(key);
+for (Element? e; (e = r.next()) != null;) {
+  if (e!.kind == Kind.int_) break;                // got the id; leave rest unread
+}
+
+// 3. Type dispatch — switch on each element's kind; recurse into containers.
+String show(Element e) => switch (e.kind) {
+  Kind.string                => utf8.decode(unescape(e.body!)),
+  Kind.int_ || Kind.bigInt   => '${e.intValue}',
+  Kind.boolean               => '${e.boolValue}',
+  Kind.array || Kind.map || Kind.set => '<${e.kind.name}>', // → Reader(unescape(e.body!))
+  _                          => e.kind.name,
+};
+
+// 4. Random access — count / head / tail / at(i), no full decode.
+v.count();                                         // 4
+v.head(); v.tail();                                // element 0 view; elements 1.. stream
+final name = utf8.decode(unescape(Reader(v.at(2)!).next()!.body!)); // 'alice'
+
+// 5. Container descent — step into a nested map's inner stream.
+final inner = View(mapBytes).containedItems()!;    // un-escaped {"id":..,"name":..}
+final map   = MapView(inner);                       // map.count() == 2
+
+// 6. Map lookup by key — encode the key, then MapView.get / IndexedMap.
+final nameKey = (Writer()..appendString(utf8.encode('name'))).bytes();
+map.get(nameKey);                                  // linear, early-exit → 'alice' bytes
+map.indexed().find(nameKey);                       // IndexedMap: O(log n) get / find → 1
+```
+
 ## API
 
 - **Codec** (`lib/src/codec.dart`): `Writer` (`appendNil`, `appendUndefined`,

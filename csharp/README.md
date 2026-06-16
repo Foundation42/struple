@@ -24,6 +24,59 @@ byte[] k = Json.FromJson("{\"id\":12345,\"name\":\"alice\"}");
 string j = Json.ToJson(k);             // {"id":12345,"name":"alice"}
 ```
 
+## Unpacking
+
+Encoded bytes aren't opaque — read the fields back out, no schema required. The
+same forms work in every port:
+
+```csharp
+byte[] key = new Struple.Packer()
+    .AppendString("users").AppendInt(12345).AppendString("alice").AppendBool(true)
+    .Bytes();                                          // [table, id, name, active]
+
+// 1. Whole-tuple unpack — no batch decoder; drain the Reader, pick by position.
+var fields = new List<Struple.Element>();
+var rd = new Struple.Reader(key);
+Struple.Element? el;
+while ((el = rd.Next()) != null) fields.Add(el);
+string table = fields[0].StringValue;                  // "users"  (IntValue is BigInteger)
+
+// 2. Streaming read loop — advance one element at a time, stop early.
+var r = new Struple.Reader(key);
+Struple.Element? e;
+while ((e = r.Next()) != null)
+    if (e.Kind == Struple.Kind.Int) { var id = e.IntValue; break; }   // 12345
+
+// 3. Type dispatch — switch on each element's Kind; recurse into containers.
+void Walk(byte[] buf) {
+    var rr = new Struple.Reader(buf);
+    for (Struple.Element? x; (x = rr.Next()) != null; )
+        switch (x.Kind) {
+            case Struple.Kind.String:  Use(x.StringValue); break;
+            case Struple.Kind.Int:     Use(x.IntValue); break;         // BigInteger
+            case Struple.Kind.Boolean: Use(x.BoolValue); break;
+            case Struple.Kind.Array:
+            case Struple.Kind.Map:
+            case Struple.Kind.Set:     Walk(x.Inner); break;           // descend
+        }
+}
+
+// 4. Random access — Count / Head / Tail / At(i) without decoding everything.
+var v = Navigate.NewView(key);
+int n = v.Count();                                     // 4
+string name = new Struple.Reader(v.At(2)!).Next()!.StringValue;        // "alice"
+
+// 5. Container descent — step into a nested map/array's inner stream.
+byte[] mapKey = Json.FromJson("{\"id\":12345,\"name\":\"alice\"}");
+byte[] inner = Navigate.NewView(mapKey).ContainedItems()!;            // map body
+
+// 6. Map lookup by key — MapView.Get (linear) or IndexedMap (O(log n) Get/Find).
+var mv = new Navigate.MapView(inner);
+byte[] probe = new Struple.Packer().AppendString("name").Bytes();
+byte[]? val = mv.Get(probe);                           // or mv.Indexed().Get(probe)
+string alice = new Struple.Reader(val!).Next()!.StringValue;          // "alice"
+```
+
 ## Build & test
 
 ```sh

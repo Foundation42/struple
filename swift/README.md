@@ -37,6 +37,56 @@ let bytes = try fromJson(#"{"id":12345,"name":"alice"}"#)
 let json  = try toJson(bytes) // {"id":12345,"name":"alice"}
 ```
 
+## Unpacking
+
+Encoded bytes aren't opaque — read the fields back out, no schema required. The
+same forms work in every port:
+
+```swift
+// helpers: pack one value to its key bytes (mirrors the appendX surface)
+func pack(_ build: (inout Writer) -> Void) -> [UInt8] { var w = Writer(); build(&w); return w.bytes }
+func str(_ s: ArraySlice<UInt8>) -> String { String(decoding: unescape(s), as: UTF8.self) }
+
+// 1. Whole-tuple unpack — no unpack(bytes); drain the stream once, pick by position
+var all: [Element] = []
+var r0 = Reader(bytes)
+while let e = try r0.next() { all.append(e) }
+if case .string(let s) = all[2] { _ = str(s) }           // "alice"
+
+// 2. Streaming read loop — advance one element at a time, stop early
+var r = Reader(bytes)
+while let e = try r.next() { if case .int(let id) = e { _ = id; break } }  // 12345
+
+// 3. Type dispatch — switch on each element's kind; recurse into containers
+var r2 = Reader(bytes)
+while let e = try r2.next() {
+    switch e {
+    case .string(let s):  _ = str(s)
+    case .int(let v):     _ = v
+    case .boolean(let b): _ = b
+    case .array(let body), .map(let body), .set(let body):
+        var inner = Reader(unescape(body)); while let _ = try inner.next() {}
+    default: break
+    }
+}
+
+// 4. Random access — count / head / tail / at(i) without decoding everything
+let v = view(bytes)
+_ = try v.count()                                        // 4
+_ = try v.head(); _ = try v.tail()                       // sub-views (ArraySlice<UInt8>)
+if let third = try v.at(2) { var t = Reader(third); _ = try t.next() }  // "alice"
+
+// 5. Container descent — step into a nested map/array's inner stream
+let map = try fromJson(#"{"id":12345,"name":"alice"}"#)
+guard let body = try view(map).containedItems() else { fatalError() }
+
+// 6. Map lookup by key — MapView.get (linear) or IndexedMap (O(log n) get/find)
+let nameKey = pack { $0.appendString("name") }
+if let raw = try MapView(body).get(nameKey) { var vr = Reader(raw); _ = try vr.next() }  // "alice"
+let idx = try IndexedMap(body)                           // or: MapView(body).indexed()
+_ = idx.find(nameKey); _ = idx.get(nameKey)              // O(log n) — canonical key order
+```
+
 ## Public API
 
 - **Codec** (`Struple.swift`): `Writer` (`appendNil`, `appendUndefined`,
