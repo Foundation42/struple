@@ -69,51 +69,61 @@ code { font-family: var(--mono); background: var(--panel2); padding: 1px 6px; bo
 .star-field { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
 .star {
   position: absolute;
-  width: var(--size, 106px); height: var(--size, 106px);
+  width: var(--size, 120px); height: var(--size, 120px);
   display: flex; align-items: center; justify-content: center;
   opacity: 0;
   filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.45));
-  animation: star-pop 28s ease-in-out infinite;
+  animation: star-pop 44s ease-in-out infinite;
   will-change: transform, opacity;
 }
 .star::before {
   content: ""; position: absolute; inset: 0;
   background: linear-gradient(135deg, var(--c1, #fbbf24), var(--c2, #f472b6));
-  clip-path: polygon(50% 0%, 58% 30.6%, 85.4% 14.6%, 69.4% 42%, 100% 50%, 69.4% 58%,
-    85.4% 85.4%, 58% 69.4%, 50% 100%, 42% 69.4%, 14.6% 85.4%, 30.6% 58%, 0% 50%,
-    30.6% 42%, 14.6% 14.6%, 42% 30.6%);
+  /* chunkier 8-point star (inner radius ~0.6 of outer) — bigger body so labels don't overrun */
+  clip-path: polygon(50% 2%, 61.1% 23.2%, 83.9% 16.1%, 76.8% 38.9%, 98% 50%, 76.8% 61.1%,
+    83.9% 83.9%, 61.1% 76.8%, 50% 98%, 38.9% 76.8%, 16.1% 83.9%, 23.2% 61.1%, 2% 50%,
+    23.2% 38.9%, 16.1% 16.1%, 38.9% 23.2%);
 }
 .star span {
-  position: relative; z-index: 1; text-align: center; padding: 0 6px;
-  font-family: var(--mono); font-weight: 800; font-size: 0.8rem; line-height: 1.1;
+  position: relative; z-index: 1; text-align: center; padding: 0 4px;
+  font-family: var(--mono); font-weight: 800; font-size: 0.73rem; line-height: 1.08;
   /* dark ink + light halo keeps every fill legible at AA contrast */
   color: #241200; letter-spacing: -0.3px; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.34);
   transform: rotate(calc(-7deg * var(--d, 1)));
 }
-/* pop in (3%), settle, hold, then scale-spin out (12%) — invisible the rest of the loop */
+/* pop in (1.5%), settle, hold, then scale-spin out (7%) — invisible the rest of the loop */
 @keyframes star-pop {
   0%, 100% { opacity: 0; transform: scale(0.3)  rotate(calc(-28deg * var(--d, 1))); }
-  3%       { opacity: 1; transform: scale(1.06) rotate(calc(-5deg  * var(--d, 1))); }
-  6%       { opacity: 1; transform: scale(1)    rotate(calc(-7deg  * var(--d, 1))); }
-  9%       { opacity: 1; transform: scale(1.03) rotate(calc(-3deg  * var(--d, 1))); }
-  12%      { opacity: 0; transform: scale(1.3)  rotate(calc(16deg  * var(--d, 1))); }
+  1.5%     { opacity: 1; transform: scale(1.06) rotate(calc(-5deg  * var(--d, 1))); }
+  3%       { opacity: 1; transform: scale(1)    rotate(calc(-7deg  * var(--d, 1))); }
+  5%       { opacity: 1; transform: scale(1.03) rotate(calc(-3deg  * var(--d, 1))); }
+  7%       { opacity: 0; transform: scale(1.3)  rotate(calc(16deg  * var(--d, 1))); }
 }
 
-/* position · palette · sequence delay — staggered 2s apart so one hands off to the next */
-.star.s1  { top: 28px; right: 4vw;        --c1: #fbbf24; --c2: #f472b6; --d:  1; animation-delay:   0s; }
-.star.s2  { bottom: 28px; left: 5vw;      --c1: #a78bfa; --c2: #f472b6; --d: -1; animation-delay:  -2s; }
-.star.s3  { top: 42%; left: 1.5vw;        --c1: #fb923c; --c2: #f87171; --d:  1; animation-delay:  -4s; }
-.star.s4  { top: 12px; right: 13vw; --size: 88px; --c1: #38bdf8; --c2: #a78bfa; --d: -1; animation-delay: -6s; }
-.star.s5  { bottom: 24px; right: 5vw;     --c1: #22d3ee; --c2: #38bdf8; --d:  1; animation-delay:  -8s; }
-.star.s6  { top: 30px; left: 4vw;         --c1: #6ee7b7; --c2: #38bdf8; --d: -1; animation-delay: -10s; }
-.star.s7  { top: 46%; right: 1.5vw;       --c1: #a3e635; --c2: #34d399; --d:  1; animation-delay: -12s; }
-.star.s8  { bottom: 10px; left: 14vw; --size: 88px; --c1: #fbbf24; --c2: #fb923c; --d: -1; animation-delay: -14s; }
-.star.s9  { top: 86px; right: 3vw;        --c1: #34d399; --c2: #a3e635; --d:  1; animation-delay: -16s; }
-.star.s10 { top: 64%; left: 2.5vw;        --c1: #f472b6; --c2: #fbbf24; --d: -1; animation-delay: -18s; }
-.star.s11 { top: 10px; left: 13vw; --size: 88px;  --c1: #38bdf8; --c2: #fbbf24; --d:  1; animation-delay: -20s; }
-.star.s12 { bottom: 12px; right: 14vw; --size: 88px; --c1: #a3e635; --c2: #22d3ee; --d: -1; animation-delay: -22s; }
-.star.s13 { top: 90px; left: 3vw;         --c1: #6ee7b7; --c2: #a78bfa; --d:  1; animation-delay: -24s; }
-.star.s14 { top: 66%; right: 2.5vw;       --c1: #fbbf24; --c2: #f472b6; --d: -1; animation-delay: -26s; }
+/* position · palette · sequence delay — 22 stars staggered 2s apart over a 44s loop,
+   each handoff bouncing to the opposite side; all twelve languages get a star */
+.star.s1  { top: 22px; right: 5vw;       --c1: #fbbf24; --c2: #f472b6; --d:  1; animation-delay:   0s; } /* sorts itself */
+.star.s2  { bottom: 26px; left: 5vw;     --c1: #a78bfa; --c2: #f472b6; --d: -1; animation-delay:  -2s; } /* CRDTs */
+.star.s3  { top: 40%; left: 0.5vw;       --c1: #fb923c; --c2: #f87171; --d:  1; animation-delay:  -4s; } /* Rust */
+.star.s4  { top: 38%; right: 0.5vw;      --c1: #38bdf8; --c2: #a78bfa; --d: -1; animation-delay:  -6s; } /* zero schemas */
+.star.s5  { top: 12px; right: 13vw; --size: 100px; --c1: #22d3ee; --c2: #34d399; --d:  1; animation-delay: -8s; } /* Go */
+.star.s6  { bottom: 10px; left: 14vw; --size: 100px; --c1: #6ee7b7; --c2: #38bdf8; --d: -1; animation-delay: -10s; } /* memcmp */
+.star.s7  { top: 24px; left: 5vw;        --c1: #a3e635; --c2: #34d399; --d:  1; animation-delay: -12s; } /* DBs */
+.star.s8  { bottom: 24px; right: 5vw;    --c1: #fbbf24; --c2: #fb923c; --d: -1; animation-delay: -14s; } /* Zig */
+.star.s9  { top: 20%; right: 1.5vw;      --c1: #34d399; --c2: #a3e635; --d:  1; animation-delay: -16s; } /* streams */
+.star.s10 { top: 74%; left: 2.5vw;       --c1: #f472b6; --c2: #fbbf24; --d: -1; animation-delay: -18s; } /* msg passing */
+.star.s11 { top: 12px; left: 13vw; --size: 100px; --c1: #38bdf8; --c2: #fbbf24; --d:  1; animation-delay: -20s; } /* Python */
+.star.s12 { bottom: 10px; right: 14vw; --size: 100px; --c1: #a3e635; --c2: #22d3ee; --d: -1; animation-delay: -22s; } /* bytes go brrr */
+.star.s13 { bottom: 92px; right: 3vw;    --c1: #6ee7b7; --c2: #a78bfa; --d:  1; animation-delay: -24s; } /* O(log n) maps */
+.star.s14 { top: 100px; left: 3vw;       --c1: #fbbf24; --c2: #f472b6; --d: -1; animation-delay: -26s; } /* 12 langs */
+.star.s15 { top: 56%; right: 1.5vw;      --c1: #38bdf8; --c2: #22d3ee; --d:  1; animation-delay: -28s; } /* TypeScript */
+.star.s16 { top: 22%; left: 1.5vw;       --c1: #22d3ee; --c2: #38bdf8; --d: -1; animation-delay: -30s; } /* C */
+.star.s17 { top: 100px; right: 3vw;      --c1: #38bdf8; --c2: #a78bfa; --d:  1; animation-delay: -32s; } /* C++ */
+.star.s18 { bottom: 96px; left: 3vw;     --c1: #a78bfa; --c2: #f472b6; --d: -1; animation-delay: -34s; } /* Kotlin */
+.star.s19 { top: 72%; right: 2.5vw;      --c1: #f87171; --c2: #fbbf24; --d:  1; animation-delay: -36s; } /* Java */
+.star.s20 { top: 58%; left: 1.5vw;       --c1: #a78bfa; --c2: #38bdf8; --d: -1; animation-delay: -38s; } /* C# */
+.star.s21 { top: 60px; left: 9vw; --size: 110px;  --c1: #22d3ee; --c2: #2dd4bf; --d:  1; animation-delay: -40s; } /* Dart */
+.star.s22 { bottom: 60px; right: 9vw; --size: 110px; --c1: #fb923c; --c2: #f472b6; --d: -1; animation-delay: -42s; } /* Swift */
 
 @media (prefers-reduced-motion: reduce) {
   .hero h1, .hero::before { animation: none; }
