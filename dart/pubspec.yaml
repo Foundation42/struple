@@ -1,0 +1,13 @@
+name: struple
+description: >-
+  Streaming, lexicographically-ordered tuple packing. Pure, zero-dependency Dart
+  port of the struple reference implementation, byte-identical across all
+  language ports and driven by the shared conformance corpus.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+# Zero dependencies: only the Dart SDK libraries are used
+# (dart:core BigInt, dart:convert, dart:io, dart:typed_data).

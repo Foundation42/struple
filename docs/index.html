@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>struple — lexicographically-ordered tuple packing</title>
-  <meta name="description" content="A schema-free binary format whose encoded bytes are directly memcmp-orderable. One wire format, nine byte-identical implementations." />
+  <meta name="description" content="A schema-free binary format whose encoded bytes are directly memcmp-orderable. One wire format, twelve byte-identical implementations." />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -15,10 +15,10 @@
     <p class="tag2">Pack values into bytes that are directly <code>memcmp</code>-comparable — drop them
       into any byte-ordered store and they sort in the correct semantic order, no custom comparator.
       It's a <strong>stream</strong>, not a message, and a <strong>canonical</strong> one — which
-      makes it a natural fit for databases and CRDTs alike. One wire format, nine byte-identical
+      makes it a natural fit for databases and CRDTs alike. One wire format, twelve byte-identical
       implementations.</p>
     <div class="badges">
-      <span class="badge"><b>6</b> languages</span>
+      <span class="badge"><b>12</b> languages</span>
       <span class="badge"><b>memcmp</b>-orderable</span>
       <span class="badge">streamable</span>
       <span class="badge">canonical</span>
@@ -137,7 +137,7 @@
           <h3>Canonical bytes</h3>
           <p>The same value always encodes to <strong>exactly the same bytes</strong> — map keys
             sorted, floats canonicalized, no whitespace or ordering ambiguity — and identically across
-            all nine languages. So you can hash, compare, dedup, and merge by raw bytes, and two
+            all twelve languages. So you can hash, compare, dedup, and merge by raw bytes, and two
             replicas independently produce byte-identical encodings. Most formats (JSON, Protobuf,
             MessagePack) have no canonical form at all.</p>
         </div>
@@ -208,7 +208,7 @@
 
   <section id="ports">
     <div class="wrap">
-      <h2>Nine implementations, every byte identical</h2>
+      <h2>Twelve implementations, every byte identical</h2>
       <p class="lead">All driven by the same language-neutral conformance corpus, verified in both directions.</p>
       <div class="ports">
         <div class="port"><div class="name">Zig</div><div class="how">reference</div></div>
@@ -220,6 +220,9 @@
         <div class="port"><div class="name">Go</div><div class="how">go test</div></div>
         <div class="port"><div class="name">Kotlin</div><div class="how">kotlinc</div></div>
         <div class="port"><div class="name">Java</div><div class="how">javac</div></div>
+        <div class="port"><div class="name">C#</div><div class="how">dotnet</div></div>
+        <div class="port"><div class="name">Dart</div><div class="how">dart</div></div>
+        <div class="port"><div class="name">Swift</div><div class="how">swiftc</div></div>
       </div>
     </div>
   </section>

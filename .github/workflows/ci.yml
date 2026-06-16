@@ -122,3 +122,42 @@ jobs:
       - name: Test
         run: KOTLINC="$HOME/kotlin-dist/kotlinc/bin/kotlinc" ./run-tests.sh
         working-directory: kotlin
+
+  csharp:
+    name: C#
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: DOTNET=dotnet ./run-tests.sh
+        working-directory: csharp
+
+  dart:
+    name: Dart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: DART=dart ./run-tests.sh
+        working-directory: dart
+
+  swift:
+    name: Swift
+    runs-on: ubuntu-24.04
+    env:
+      SWIFT_VERSION: "6.3.2"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Swift runtime deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libncurses6 libtinfo6 libcurl4
+      - name: Install Swift toolchain
+        run: |
+          url="https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2404/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE-ubuntu24.04.tar.gz"
+          curl -fsSL -o /tmp/swift.tar.gz "$url"
+          mkdir -p "$HOME/swift" && tar xzf /tmp/swift.tar.gz -C "$HOME/swift" --strip-components=1
+      - run: ./run-tests.sh
+        working-directory: swift
