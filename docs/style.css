@@ -265,3 +265,31 @@ footer { text-align: center; color: var(--muted); padding: 40px 20px 60px; borde
   table { font-size: 0.84rem; }
   th, td { padding: 8px 7px; }
 }
+
+/* performance — per-workload, side-by-side language charts */
+#perf .lead em { color: var(--text); font-style: normal; }
+.perf-controls { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; justify-content: space-between; margin: 16px 0 4px; }
+.perf-controls .lang-tabs { margin: 0; flex: 1 1 auto; }
+.perf-toggle { display: inline-flex; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px; flex: 0 0 auto; }
+.perf-mbtn { font-family: var(--mono); font-size: 0.8rem; padding: 5px 16px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; transition: color 0.15s, background 0.15s; }
+.perf-mbtn:hover { color: var(--text); }
+.perf-mbtn.active { color: var(--bg); font-weight: 700; background: linear-gradient(90deg, var(--accent), var(--accent2)); box-shadow: 0 4px 14px rgba(56, 189, 248, 0.22); }
+.perf-desc { color: var(--muted); font-size: 0.92rem; margin: 6px 0 18px; min-height: 1.2em; }
+.perf-desc b { color: var(--text); }
+.perf-bars { display: flex; flex-direction: column; gap: 9px; }
+.perf-row { display: grid; grid-template-columns: 6.5em 1fr; align-items: center; gap: 12px; }
+.perf-lang { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); text-align: right; white-space: nowrap; }
+.perf-row.lead-row .perf-lang { color: var(--accent); font-weight: 700; }
+.perf-track { position: relative; height: 26px; background: var(--panel2); border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.perf-bar { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: 6px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.7s cubic-bezier(0.22, 1, 0.36, 1); }
+.perf-row.lead-row .perf-bar { box-shadow: 0 0 16px rgba(110, 231, 183, 0.4); }
+.perf-val { position: absolute; top: 0; right: 10px; height: 26px; display: flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 0.8rem; color: var(--text); text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7); }
+.perf-unit { color: var(--muted); font-size: 0.72rem; }
+@media (max-width: 640px) {
+  .perf-row { grid-template-columns: 4.8em 1fr; }
+  .perf-controls { justify-content: flex-start; }
+  .perf-val .perf-unit { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .perf-bar { transition: none; } }

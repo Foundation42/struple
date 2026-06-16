@@ -6,7 +6,8 @@
   <title>struple — lexicographically-ordered tuple packing</title>
   <meta name="description" content="A schema-free binary format whose encoded bytes are directly memcmp-orderable. One wire format, twelve byte-identical implementations." />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
-  <link rel="stylesheet" href="style.css?v=4" />
+  <link rel="stylesheet" href="style.css?v=5" />
+  <script src="benchmarks.js?v=2"></script>
 </head>
 <body>
 
@@ -260,6 +261,26 @@
         <strong>canonical encoding</strong> — together they make struple ideal for database keys, sorted
         indexes, range scans, content-addressing, and CRDTs, in any byte-ordered store (RocksDB, LMDB,
         FoundationDB-style layers, Redis ZSETs, …).</p>
+    </div>
+  </section>
+
+  <section id="perf">
+    <div class="wrap">
+      <h2>How fast is it? <span class="sub">same bytes, every language — pick a workload</span></h2>
+      <p class="lead">One wire format means this doubles as a clean cross-language micro-benchmark: every
+        port encodes and decodes the <em>identical</em> bytes (sha256-verified before timing). No
+        favouritism — just whoever's fastest at each workload. Figures are <strong>single-threaded</strong>,
+        millions of records per second; the work is embarrassingly parallel, so multiply by your cores.</p>
+      <div class="perf-controls">
+        <div class="lang-tabs" id="perf-tabs"></div>
+        <div class="perf-toggle" id="perf-metric">
+          <button class="perf-mbtn active" data-m="e">Encode</button>
+          <button class="perf-mbtn" data-m="d">Decode</button>
+        </div>
+      </div>
+      <p class="perf-desc" id="perf-desc"></p>
+      <div class="perf-bars" id="perf-bars"></div>
+      <p class="note" id="perf-foot" style="margin-top:16px"></p>
     </div>
   </section>
 
@@ -702,6 +723,110 @@ MapView(inner).indexed().find(nameKey);                         //    or O(log n
 
       show(0);
       timer = setInterval(() => show((active + 1) % SNIPPETS.length), 4500);
+    })();
+  </script>
+
+  <!-- Performance: per-workload, side-by-side language charts (data island in benchmarks.js) -->
+  <script>
+    (function () {
+      const B = window.STRUPLE_BENCH;
+      if (!B) return;
+      const tabs = document.getElementById("perf-tabs");
+      const barsEl = document.getElementById("perf-bars");
+      const descEl = document.getElementById("perf-desc");
+      const footEl = document.getElementById("perf-foot");
+      const mBtns = Array.from(document.querySelectorAll("#perf-metric .perf-mbtn"));
+      const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      const fmt = (x) => (x < 100 ? x.toFixed(2) : Math.round(x).toLocaleString());
+      const OVERVIEW = "__overview__";
+      const TABS = [{ name: OVERVIEW, label: "Overview" }].concat(B.payloads);
+      let active = OVERVIEW;
+      let metric = "e"; // "e" encode, "d" decode
+
+      TABS.forEach((p) => {
+        const b = document.createElement("button");
+        b.className = "lang-pill" + (p.name === active ? " active" : "");
+        b.textContent = p.label;
+        b.dataset.name = p.name;
+        b.onclick = () => {
+          active = p.name;
+          Array.from(tabs.children).forEach((c) => c.classList.toggle("active", c.dataset.name === active));
+          render();
+        };
+        tabs.appendChild(b);
+      });
+      mBtns.forEach((btn) => (btn.onclick = () => {
+        metric = btn.dataset.m;
+        mBtns.forEach((x) => x.classList.toggle("active", x === btn));
+        render();
+      }));
+
+      function render() {
+        const mk = metric === "e" ? "em" : "dm";
+        const bk = metric === "e" ? "eb" : "db";
+        const verb = metric === "e" ? "encode" : "decode";
+        let rows, max, unit;
+
+        if (active === OVERVIEW) {
+          // Composite: each port's speed averaged across all workloads, relative
+          // to the fastest port on each (geometric mean of per-workload ratios).
+          const langs = Object.keys(B.data[B.payloads[0].name]);
+          const logSum = {}, n = {};
+          B.payloads.forEach((p) => {
+            const d = B.data[p.name]; if (!d) return;
+            const wmax = Math.max.apply(null, langs.map((l) => (d[l] ? d[l][mk] : 0)));
+            langs.forEach((l) => {
+              if (!d[l] || wmax <= 0) return;
+              logSum[l] = (logSum[l] || 0) + Math.log(d[l][mk] / wmax);
+              n[l] = (n[l] || 0) + 1;
+            });
+          });
+          rows = langs.map((l) => ({ lang: l, val: Math.exp(logSum[l] / n[l]) * 100 }))
+            .sort((a, b) => b.val - a.val);
+          max = 100; unit = "%";
+          descEl.innerHTML = `<b>Overall ${verb}</b> — each port's speed averaged across all `
+            + `${B.payloads.length} workloads, relative to the fastest port on each `
+            + `(geometric mean; 100% = fastest on every workload).`;
+        } else {
+          const meta = B.payloads.find((p) => p.name === active);
+          const d = B.data[active] || {};
+          rows = Object.keys(d).map((lang) => ({ lang, val: d[lang][mk], mb: d[lang][bk] }))
+            .sort((a, b) => b.val - a.val);
+          max = rows.length ? rows[0].val : 1; unit = "Mrec/s";
+          descEl.innerHTML = esc(meta.desc) + ` &nbsp;·&nbsp; <b>${verb}</b>, `
+            + `${meta.records.toLocaleString()} records · ${meta.kb} KB`;
+        }
+
+        barsEl.innerHTML = "";
+        rows.forEach((r, i) => {
+          const row = document.createElement("div");
+          row.className = "perf-row" + (i === 0 ? " lead-row" : "");
+          const valTxt = unit === "%" ? Math.round(r.val) : fmt(r.val);
+          row.title = unit === "%"
+            ? `${r.lang}: ${valTxt}% of the fastest port, averaged across all workloads`
+            : `${r.lang}: ${r.val} Mrec/s · ${r.mb} MB/s`;
+          const pct = Math.max(1.5, (r.val / max) * 100);
+          row.innerHTML = `<span class="perf-lang">${esc(r.lang)}</span>`
+            + `<div class="perf-track"><div class="perf-bar" data-pct="${pct}"></div>`
+            + `<span class="perf-val">${valTxt} <span class="perf-unit">${unit}</span></span></div>`;
+          barsEl.appendChild(row);
+          // Heatmap the ranking: green (fastest) → red (slowest), top to bottom.
+          const t = rows.length <= 1 ? 0 : i / (rows.length - 1);
+          const h = 140 - 140 * t; // 140° green … 0° red
+          row.querySelector(".perf-bar").style.background =
+            `linear-gradient(90deg, hsl(${h},60%,42%), hsl(${h},80%,57%))`;
+        });
+        requestAnimationFrame(() => {
+          Array.from(barsEl.querySelectorAll(".perf-bar")).forEach((bar, i) => {
+            bar.style.transitionDelay = i * 28 + "ms";
+            bar.style.width = bar.dataset.pct + "%";
+          });
+        });
+        footEl.innerHTML = "Single-threaded on " + esc(B.host)
+          + '. Every port reproduced these bytes exactly before timing. Full table: '
+          + '<a href="https://github.com/Foundation42/struple/blob/main/BENCHMARKS.md">BENCHMARKS.md</a>.';
+      }
+      render();
     })();
   </script>
 </body>
