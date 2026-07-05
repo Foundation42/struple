@@ -100,6 +100,10 @@ class Conformance(unittest.TestCase):
                 continue
             with self.subTest(build=v["build"]):
                 self.assertEqual(build_bytes(v["build"]).hex(), v["bytes"])
+                # Build vectors carrying a one-way "to_json" field pin the plain +
+                # scientific decimal rendering cross-language (Item 2).
+                if "to_json" in v:
+                    self.assertEqual(to_json(bytes.fromhex(v["bytes"])), v["to_json"])
 
     def test_transcode(self):
         for v in VECTORS:

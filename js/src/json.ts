@@ -160,15 +160,27 @@ function renderMap(body: Uint8Array, depth: number): string {
   return "{" + parts.join(",") + "}";
 }
 
-// Render a decimal as an exact JSON number literal (plain notation, no exponent).
+// Render a decimal as an exact JSON number literal: plain notation for normal
+// scales, with a scientific fallback past a 40-zero pad threshold so a huge
+// (i32-bounded) exponent can't emit gigabytes (Item 2).
 // One-way: fromJson never produces decimals (non-integer JSON numbers stay float64).
 function renderDecimal(d: { negative: boolean; digits: number[]; exp: number }): string {
   if (d.digits.length === 0) return "0";
   const k = d.digits.length;
+  const exp10 = d.exp; // value = C · 10^exp10
   const sign = d.negative ? "-" : "";
   const ds = d.digits.join("");
-  if (d.exp >= 0) return sign + ds + "0".repeat(d.exp);
-  const pointPos = k + d.exp; // number of integer-part digits
+  // Plain notation would pad this many zeros; past the threshold, render in
+  // scientific notation so a huge (i32-bounded) exponent can't emit gigabytes.
+  const pad = exp10 >= 0 ? exp10 : k + exp10 > 0 ? 0 : -(k + exp10);
+  if (pad > 40) {
+    // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+    const sciExp = exp10 + k - 1;
+    const mantissa = k > 1 ? ds[0] + "." + ds.slice(1) : ds;
+    return sign + mantissa + "e" + (sciExp >= 0 ? "+" : "-") + Math.abs(sciExp);
+  }
+  if (exp10 >= 0) return sign + ds + "0".repeat(exp10);
+  const pointPos = k + exp10; // number of integer-part digits
   if (pointPos > 0) return sign + ds.slice(0, pointPos) + "." + ds.slice(pointPos);
   return sign + "0." + "0".repeat(-pointPos) + ds;
 }

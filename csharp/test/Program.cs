@@ -74,6 +74,12 @@ public static class Program
                 // transcode: transcode(bytes) == bytes
                 ExpectEq("transcode [" + want + "]", HexEncode(Transcode(bin)), want);
                 buildTrc++;
+                // one-way toJson pin (plain + scientific decimal rendering), when present
+                if (v.Has("to_json"))
+                {
+                    string wantJson = (string)v.Get("to_json")!;
+                    ExpectEq("to_json [" + want + "]", Json.ToJson(bin), wantJson);
+                }
             }
         }
 

@@ -103,7 +103,7 @@ int main() {
     std::string text = read_file("../conformance/vectors.json");
     Json root = json_parse(text);
 
-    int je = 0, jd = 0, be = 0, bt = 0;
+    int je = 0, jd = 0, be = 0, bt = 0, tj = 0;
     for (auto& v : root.items) {
         const std::string& want = obj_get(v, "bytes")->text;
         const Json* json = obj_get(v, "json");
@@ -120,6 +120,12 @@ int main() {
             be++;
             expect("transcode", to_hex(transcode(bin)), want);
             bt++;
+            // If the vector pins a one-way JSON rendering, check it too (pins the
+            // plain + scientific decimal to_json cross-language — Item 2).
+            if (const Json* tjson = obj_get(v, "to_json")) {
+                expect("to_json " + tjson->text, to_json(bin), tjson->text);
+                tj++;
+            }
         }
     }
 
@@ -165,7 +171,7 @@ int main() {
         fails++;
     }
 
-    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | malformed %d/%d rejected | %d failures\n",
-                je, jd, be, bt, sem, mal_ok, mal_tot, fails);
+    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d to_json %d | semantic %d | malformed %d/%d rejected | %d failures\n",
+                je, jd, be, bt, tj, sem, mal_ok, mal_tot, fails);
     return fails ? 1 : 0;
 }

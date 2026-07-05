@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func loadCorpus(t *testing.T, name string) []jsonValue {
@@ -228,6 +229,29 @@ func TestBuildTranscode(t *testing.T) {
 	}
 }
 
+// TestBuildToJson pins the plain + scientific decimal rendering: for every build
+// vector that carries a one-way "to_json" field, ToJson(bytes) must equal it
+// byte-for-byte. Vectors without the field are unaffected (Item 2, part 5).
+func TestBuildToJson(t *testing.T) {
+	for _, v := range loadCorpus(t, "vectors.json") {
+		if _, ok := field(v, "build"); !ok {
+			continue
+		}
+		tj, ok := field(v, "to_json")
+		if !ok {
+			continue
+		}
+		bytesField, _ := field(v, "bytes")
+		got, err := ToJson(fromHex(t, asStr(t, bytesField)))
+		if err != nil {
+			t.Fatalf("ToJson(%s): %v", asStr(t, bytesField), err)
+		}
+		if got != asStr(t, tj) {
+			t.Errorf("to_json %s\n got %s\nwant %s", asStr(t, bytesField), got, asStr(t, tj))
+		}
+	}
+}
+
 // loadMalformed reads conformance/malformed.json — the negative counterpart to
 // vectors.json. Its top level is an object { "description", "cases": [...] }, so
 // (unlike loadCorpus) it pulls out the "cases" array.
@@ -329,6 +353,88 @@ func TestMalformedRejected(t *testing.T) {
 	t.Logf("malformed: %d/%d rejected", rejected, len(cases))
 	if rejected != len(cases) {
 		t.Fatalf("malformed corpus: only %d of %d cases rejected cleanly", rejected, len(cases))
+	}
+}
+
+// TestDecimalItem2 covers the encode-side exponent bounds and the semantic DoS
+// short-circuit for decimals (Item 2). The decode-side i32 cap is exercised by
+// the malformed corpus (380324800000000b00) and the scientific/plain toJson
+// rendering by TestBuildToJson.
+func TestDecimalItem2(t *testing.T) {
+	// Encode bounds: an exponent literal or adjusted exponent past i32 rejects;
+	// adjusted exponent == i32 max is accepted.
+	encCases := []struct {
+		s    string
+		want bool // true => must reject
+	}{
+		{"1e9999999999", true},  // exponent literal far beyond i32
+		{"1e2147483647", true},  // adjusted exponent 2^31 (out of range)
+		{"1e2147483646", false}, // adjusted exponent == i32 max (valid)
+	}
+	for _, c := range encCases {
+		w := NewWriter()
+		err := w.AppendDecimalString(c.s)
+		if c.want && err != ErrInvalidDecimal {
+			t.Errorf("AppendDecimalString(%q) = %v, want ErrInvalidDecimal", c.s, err)
+		}
+		if !c.want && err != nil {
+			t.Errorf("AppendDecimalString(%q) = %v, want nil", c.s, err)
+		}
+	}
+
+	// Semantic short-circuit: an astronomically large/small (but i32-valid)
+	// exponent must decide by order of magnitude and return PROMPTLY — never
+	// materialize a 2^31-scaled value. A hang (no return) is a hard failure.
+	build := func(s string) []byte {
+		w := NewWriter()
+		if err := w.AppendDecimalString(s); err != nil {
+			t.Fatalf("build %q: %v", s, err)
+		}
+		return append([]byte(nil), w.Bytes()...)
+	}
+	buildInt := func(v int64) []byte {
+		w := NewWriter()
+		w.AppendInt(v)
+		return append([]byte(nil), w.Bytes()...)
+	}
+	buildF64 := func(v float64) []byte {
+		w := NewWriter()
+		w.AppendF64(v)
+		return append([]byte(nil), w.Bytes()...)
+	}
+	huge := build("1e2000000000")
+	tiny := build("1e-2000000000")
+	five := buildInt(5)
+	onef := buildF64(1.0)
+
+	semCases := []struct {
+		name string
+		a, b []byte
+		want int
+	}{
+		{"1e2000000000 > int 5", huge, five, 1},
+		{"1e-2000000000 < int 5", tiny, five, -1},
+		{"1e2000000000 > 1.0", huge, onef, 1},
+		{"1e-2000000000 < 1.0", tiny, onef, -1},
+	}
+	for _, c := range semCases {
+		done := make(chan struct{})
+		var got int
+		var err error
+		go func() {
+			got, err = SemanticOrder(c.a, c.b)
+			close(done)
+		}()
+		select {
+		case <-done:
+			if err != nil {
+				t.Errorf("%s: SemanticOrder error: %v", c.name, err)
+			} else if got != c.want {
+				t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: SemanticOrder did not return within 3s — the DoS short-circuit is wrong", c.name)
+		}
 	}
 }
 

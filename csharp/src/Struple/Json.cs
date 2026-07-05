@@ -224,6 +224,27 @@ public static class Json
         int k = digs.Length;
         long exp10 = d.Exponent();
         if (d.Negative) sb.Append('-');
+
+        // Plain notation would pad this many zeros; past the threshold, render in scientific
+        // notation so a huge (i32-bounded) exponent can't emit gigabytes (Item 2).
+        const long maxPlainPad = 40;
+        long pad = exp10 >= 0 ? exp10 : (k + exp10 > 0 ? 0 : -(k + exp10));
+        if (pad > maxPlainPad)
+        {
+            // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+            sb.Append((char)('0' + digs[0]));
+            if (digs.Length > 1)
+            {
+                sb.Append('.');
+                for (int i = 1; i < digs.Length; i++) sb.Append((char)('0' + digs[i]));
+            }
+            long sciExp = exp10 + k - 1;
+            sb.Append('e');
+            sb.Append(sciExp >= 0 ? '+' : '-');
+            sb.Append(System.Math.Abs(sciExp).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return;
+        }
+
         if (exp10 >= 0)
         {
             foreach (int dd in digs) sb.Append((char)('0' + dd));

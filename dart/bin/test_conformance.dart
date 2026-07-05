@@ -183,6 +183,20 @@ void main() {
     _check(got == bytes, 'transcode($bytes) = $got');
   }
 
+  // 4b. Build to_json: for vectors carrying a one-way "to_json" field, assert
+  // toJson(bytes) == to_json. Pins the plain + scientific decimal rendering
+  // cross-language (Item 2). Vectors without the field are unaffected.
+  var toJsonCount = 0;
+  for (final raw in vectors) {
+    final v = (raw as Map).cast<String, dynamic>();
+    if (!v.containsKey('to_json')) continue;
+    toJsonCount++;
+    final bytes = v['bytes'] as String;
+    final want = v['to_json'] as String;
+    final got = toJson(_fromHex(bytes));
+    _check(got == want, 'toJson($bytes) = $got, want $want');
+  }
+
   // 5. Semantic corpus: semanticOrder(a, b) == order.
   final semantic = _loadCorpus('semantic_vectors.json');
   for (final raw in semantic) {
@@ -221,6 +235,7 @@ void main() {
 
   stdout.writeln('conformance: $jsonCount json vectors (both directions), '
       '$buildCount build vectors (both directions), '
+      '$toJsonCount to_json checks, '
       '${semantic.length} semantic pairs');
   stdout.writeln('conformance: ${_checks - _failures}/$_checks checks passed');
   if (_failures > 0) {

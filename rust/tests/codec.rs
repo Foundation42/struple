@@ -48,6 +48,33 @@ fn decimal_byte_order_and_semantics() {
     assert_eq!(semantic_order(&dec("0"), &encode(&Value::F64(-0.0))).unwrap(), Ordering::Equal);
 }
 
+#[test]
+fn decimal_exponent_bounds_and_dos_shortcircuit() {
+    // Encode bounds (Item 2): an exponent past i32, or an adjusted exponent
+    // (sig-len + exp) past i32, is rejected; the i32-max adjusted exponent is fine.
+    let try_dec = |s: &str| Writer::new().append_decimal_string(s).map(|_| ());
+    assert!(try_dec("1e9999999999").is_err(), "huge exponent must reject");
+    assert!(try_dec("1e2147483647").is_err(), "adj_exp = i32::MAX + 1 must reject");
+    assert!(try_dec("1e2147483646").is_ok(), "adj_exp = i32::MAX must be accepted");
+
+    // The digits+exp Writer path is bounded too.
+    assert!(Writer::new().append_decimal(false, &[1], i32::MAX).is_err());
+
+    // DoS short-circuit: a huge-exponent decimal vs an int and vs a float must
+    // resolve PROMPTLY (never materialize/scale by ~2e9) with the correct order.
+    let big = dec("1e2000000000");
+    let tiny = dec("1e-2000000000");
+    let five = encode(&Value::Int(5));
+    let one_f = encode(&Value::F64(1.0));
+    assert_eq!(semantic_order(&big, &five).unwrap(), Ordering::Greater);
+    assert_eq!(semantic_order(&big, &one_f).unwrap(), Ordering::Greater);
+    assert_eq!(semantic_order(&tiny, &five).unwrap(), Ordering::Less);
+    assert_eq!(semantic_order(&tiny, &one_f).unwrap(), Ordering::Less);
+    // And the reverse orientation short-circuits identically.
+    assert_eq!(semantic_order(&five, &big).unwrap(), Ordering::Less);
+    assert_eq!(semantic_order(&one_f, &tiny).unwrap(), Ordering::Greater);
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::new();
     for b in bytes {

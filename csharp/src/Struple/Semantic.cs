@@ -150,15 +150,22 @@ public static class Semantic
         int cb = NumClass(b);
         if (ca != cb) return ca < cb ? -1 : 1;
         if (ca != 1) return 0; // both -inf, both +inf, or both NaN
-        // Both finite; compare exact rational values.
+        // Both finite. A decimal on either side can carry an i32-sized exponent, so route it
+        // through the order-of-magnitude short-circuit (Item 2) rather than materializing
+        // 10^exp. Int/big-int/float never scale by a base-10 exponent, so they stay on the
+        // exact-rational path (a double's 2^exp shift is bounded to [-1074, 1024]).
+        if (a.Kind == Struple.Kind.Decimal || b.Kind == Struple.Kind.Decimal)
+        {
+            return CompareWithDecimal(a, b);
+        }
         Rational va = ToRational(a);
         Rational vb = ToRational(b);
         return va.CompareTo(vb);
     }
 
     /// <summary>
-    /// The exact value of a finite number element as a rational (numerator / denominator, with a
-    /// positive denominator).
+    /// The exact value of a finite non-decimal number element as a rational (numerator /
+    /// denominator, with a positive denominator).
     /// </summary>
     private static Rational ToRational(Struple.Element e)
     {
@@ -168,8 +175,6 @@ public static class Semantic
                 return new Rational(e.IntValue, BigInteger.One);
             case Struple.Kind.BigIntKind:
                 return new Rational(e.IntValue, BigInteger.One);
-            case Struple.Kind.Decimal:
-                return DecimalToRational(e.Decimal!);
             case Struple.Kind.Float32:
                 return DoubleToRational(e.Float32Value);
             case Struple.Kind.Float64:
@@ -179,17 +184,145 @@ public static class Semantic
         }
     }
 
-    /// <summary>A struple decimal coefficient·10^exp as an exact rational.</summary>
-    private static Rational DecimalToRational(Struple.DecimalValue d)
+    // -----------------------------------------------------------------------
+    // Decimal vs the rest of the number class — base-10 order-of-magnitude
+    // short-circuit (Item 2). Before scaling/materializing a magnitude by an
+    // i32-sized exponent, compare the operands' base-10 orders of magnitude;
+    // build the exact value only when those bounds overlap (then the exponents
+    // are close, so it is cheap).
+    // -----------------------------------------------------------------------
+
+    /// <summary>An exact base-10 value <c>sign · mag · 10^exp10</c> (mag big-endian, non-negative;
+    /// empty mag == 0).</summary>
+    private readonly struct B10
     {
-        if (d.IsZero) return new Rational(BigInteger.Zero, BigInteger.One);
-        BigInteger coeff = d.Coefficient(); // sign-applied
-        long exp = d.Exponent();
-        if (exp >= 0)
+        public readonly int Sign;
+        public readonly byte[] Mag; // big-endian, leading zeros trimmed
+        public readonly long Exp10;
+
+        public B10(int sign, byte[] mag, long exp10)
         {
-            return new Rational(coeff * BigInteger.Pow(10, (int)exp), BigInteger.One);
+            Sign = sign;
+            Mag = mag;
+            Exp10 = exp10;
         }
-        return new Rational(coeff, BigInteger.Pow(10, (int)(-exp)));
+    }
+
+    private static bool IsExactKind(Struple.Element e) =>
+        e.Kind == Struple.Kind.Int || e.Kind == Struple.Kind.BigIntKind || e.Kind == Struple.Kind.Decimal;
+
+    private static double FloatVal(Struple.Element e) =>
+        e.Kind == Struple.Kind.Float32 ? e.Float32Value : e.Float64Value;
+
+    /// <summary>Decompose an int / big-int / decimal into its exact base-10 value.</summary>
+    private static B10 NumToB10(Struple.Element e)
+    {
+        switch (e.Kind)
+        {
+            case Struple.Kind.Int:
+            case Struple.Kind.BigIntKind:
+            {
+                BigInteger v = e.IntValue;
+                if (v.Sign == 0) return new B10(0, System.Array.Empty<byte>(), 0);
+                return new B10(v.Sign, Struple.MagnitudeBytes(BigInteger.Abs(v)), 0);
+            }
+            case Struple.Kind.Decimal:
+            {
+                var d = e.Decimal!;
+                if (d.IsZero) return new B10(0, System.Array.Empty<byte>(), 0);
+                BigInteger coeff = BigInteger.Abs(d.Coefficient());
+                return new B10(d.Negative ? -1 : 1, Struple.MagnitudeBytes(coeff), d.Exponent());
+            }
+            default:
+                throw new InvalidOperationException();
+        }
+    }
+
+    private static int CompareWithDecimal(Struple.Element a, Struple.Element b)
+    {
+        if (IsExactKind(a) && IsExactKind(b))
+        {
+            B10 va = NumToB10(a);
+            B10 vb = NumToB10(b);
+            if (va.Sign != vb.Sign) return va.Sign.CompareTo(vb.Sign);
+            if (va.Sign == 0) return 0;
+            int c = CompareB10Mag(va, vb);
+            return va.Sign < 0 ? -c : c;
+        }
+        // exactly one side is a finite float
+        if (IsExactKind(a))
+        {
+            return CompareB10Float(NumToB10(a), FloatVal(b));
+        }
+        return -CompareB10Float(NumToB10(b), FloatVal(a));
+    }
+
+    /// <summary>
+    /// Bounds on the base-10 order of magnitude of a nonzero <c>mag · 10^exp10</c>: returns
+    /// <c>(lo, hi)</c> with <c>|value| ∈ [10^lo, 10^hi)</c>. Uses byte-length bounds on the
+    /// base-256 magnitude (<c>256^(n-1) ≥ 10^(2(n-1))</c>, <c>256^n &lt; 10^(3n)</c>). Lets the
+    /// comparators reject a far-apart pair without materializing a magnitude scaled by an
+    /// i32-sized exponent.
+    /// </summary>
+    private static (long lo, long hi) B10OomBounds(B10 v)
+    {
+        long na = v.Mag.Length; // ≥ 1 for a nonzero value (MagnitudeBytes trims leading zeros)
+        return (v.Exp10 + 2 * na - 2, v.Exp10 + 3 * na);
+    }
+
+    /// <summary>Compare two same-sign, nonzero base-10 magnitudes (<c>mag · 10^exp10</c>).</summary>
+    private static int CompareB10Mag(B10 a, B10 b)
+    {
+        // If the orders of magnitude are disjoint, decide by them — no scaling. When they
+        // overlap, |a.Exp10 − b.Exp10| is bounded by the digit counts, so the exact scaling
+        // below is cheap (never proportional to the raw exponent).
+        var ba = B10OomBounds(a);
+        var bb = B10OomBounds(b);
+        if (ba.hi <= bb.lo) return -1;
+        if (bb.hi <= ba.lo) return 1;
+        long e = System.Math.Min(a.Exp10, b.Exp10);
+        BigInteger sa = MagValue(a.Mag) * BigInteger.Pow(10, (int)(a.Exp10 - e));
+        BigInteger sb = MagValue(b.Mag) * BigInteger.Pow(10, (int)(b.Exp10 - e));
+        return sa.CompareTo(sb);
+    }
+
+    private static int CompareB10Float(B10 v, double f)
+    {
+        int sf = SignRank(f);
+        if (v.Sign != sf) return v.Sign.CompareTo(sf);
+        if (v.Sign == 0) return 0; // both zero
+        // Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If the exact value's order of
+        // magnitude is clear of that window, decide without scaling — this is what stops a huge
+        // decimal exponent from driving a 2^31-digit materialization (Item 2). When the bounds
+        // overlap the window, v.Exp10 is bounded by it, so the exact path's 10^exp is cheap.
+        var bnd = B10OomBounds(v);
+        int c;
+        if (bnd.lo >= 310) c = 1;        // decimal magnitude exceeds any finite f64
+        else if (bnd.hi <= -325) c = -1; // decimal magnitude below any finite nonzero f64
+        else c = ExactB10MagVsFloat(v, System.Math.Abs(f));
+        return v.Sign < 0 ? -c : c;
+    }
+
+    /// <summary>Compare <c>|mag · 10^exp10|</c> to <c>g = |f|</c> (> 0) exactly. Only reached when
+    /// exp10 is bounded to the f64 order-of-magnitude window, so <c>10^|exp10|</c> is cheap.</summary>
+    private static int ExactB10MagVsFloat(B10 v, double g)
+    {
+        BigInteger mag = MagValue(v.Mag);
+        Rational rv = v.Exp10 >= 0
+            ? new Rational(mag * BigInteger.Pow(10, (int)v.Exp10), BigInteger.One)
+            : new Rational(mag, BigInteger.Pow(10, (int)(-v.Exp10)));
+        Rational rf = DoubleToRational(g);
+        return rv.CompareTo(rf);
+    }
+
+    private static BigInteger MagValue(byte[] mag) =>
+        mag.Length == 0 ? BigInteger.Zero : new BigInteger(mag, isUnsigned: true, isBigEndian: true);
+
+    private static int SignRank(double f)
+    {
+        if (f > 0) return 1;
+        if (f < 0) return -1;
+        return 0; // ±0.0
     }
 
     /// <summary>A finite double's exact value (mantissa·2^exp) as an exact rational.</summary>

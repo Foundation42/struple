@@ -336,6 +336,59 @@ int main() {
         CHECK(so_threw, "depth cap: semanticOrder 300-deep throws");
     }
 
+    // Item 2: decimal exponent bounds, scientific render, DoS short-circuit.
+    // Mirrors src/tests.zig "decimal: exponent bounds, scientific render, ...".
+    {
+        auto rejects = [](const char* s) {
+            try { Writer w; w.appendDecimalString(s); return false; }
+            catch (const Error&) { return true; }
+        };
+        // Encode-side bounds: exponent literal / adjusted exponent past i32 rejected.
+        CHECK(rejects("1e9999999999"), "item2: 1e9999999999 rejected");
+        CHECK(rejects("1e2147483647"), "item2: adj_exp 2^31 rejected");
+        // Valid boundary: adjusted exponent == i32 max decodes cleanly.
+        {
+            bool ok = false;
+            try {
+                Writer w;
+                w.appendDecimalString("1e2147483646");  // adj_exp = 2147483647 = i32 max
+                Reader r(w.bytes());
+                ok = r.next().has_value();
+            } catch (const Error&) { ok = false; }
+            CHECK(ok, "item2: adj_exp i32max accepted");
+        }
+        // Decode-side bound: a wire decimal with adjusted exponent i32max+1 is rejected.
+        {
+            Bytes bad = {0x38, 0x03, 0x24, 0x80, 0x00, 0x00, 0x00, 0x0b, 0x00};
+            bool threw = false;
+            try { transcode(bad); } catch (const Error&) { threw = true; }
+            CHECK(threw, "item2: malformed decimal decode rejected");
+        }
+        // Scientific toJson past the plain-notation pad threshold (also pinned by corpus).
+        {
+            auto tj = [](const char* s) { Writer w; w.appendDecimalString(s); return to_json(w.bytes()); };
+            CHECK(tj("1e40") == "10000000000000000000000000000000000000000", "item2: 1e40 plain");
+            CHECK(tj("1e41") == "1e+41", "item2: 1e41 sci");
+            CHECK(tj("1e300") == "1e+300", "item2: 1e300 sci");
+            CHECK(tj("1e-300") == "1e-300", "item2: 1e-300 sci");
+            CHECK(tj("1.5e300") == "1.5e+300", "item2: 1.5e300 sci");
+            CHECK(tj("-9.99e-300") == "-9.99e-300", "item2: -9.99e-300 sci");
+        }
+        // Semantic short-circuit: astronomically large/small (but i32-valid) exponents
+        // must decide by order of magnitude — promptly, never by materializing a
+        // 2^31-scaled value. If the short-circuit is wrong this hangs.
+        {
+            Writer huge; huge.appendDecimalString("1e2000000000");
+            Writer tiny; tiny.appendDecimalString("1e-2000000000");
+            Writer five; five.append_int(5);
+            Writer onef; onef.append_f64(1.0);
+            CHECK(semanticOrder(huge.bytes(), five.bytes()) > 0, "item2: 1e2e9 > int 5");
+            CHECK(semanticOrder(tiny.bytes(), five.bytes()) < 0, "item2: 1e-2e9 < int 5");
+            CHECK(semanticOrder(huge.bytes(), onef.bytes()) > 0, "item2: 1e2e9 > 1.0");
+            CHECK(semanticOrder(tiny.bytes(), onef.bytes()) < 0, "item2: 1e-2e9 < 1.0");
+        }
+    }
+
     if (fails == 0)
         std::printf("test_struple: all checks passed\n");
     else

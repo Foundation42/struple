@@ -161,7 +161,7 @@ int main(void) {
         return 2;
     }
 
-    int json_enc = 0, json_dec = 0, build_enc = 0, build_trc = 0;
+    int json_enc = 0, json_dec = 0, build_enc = 0, build_trc = 0, build_json = 0;
     for (size_t i = 0; i < root->count; i++) {
         const sj_value *v = &root->items[i];
         const char *want = obj_get(v, "bytes")->str;
@@ -203,6 +203,22 @@ int main(void) {
             expect_hex("transcode", tw.data, tw.len, want);
             build_trc++;
             struple_writer_free(&tw);
+
+            /* Build vectors may carry a one-way "to_json" field pinning the
+             * decimal render (plain + scientific) cross-language. */
+            const sj_value *tj = obj_get(v, "to_json");
+            if (tj) {
+                struple_writer jj;
+                struple_writer_init(&jj);
+                struple_to_json(bin, blen, &jj);
+                if (jj.len != strlen(tj->str) || memcmp(jj.data, tj->str, jj.len) != 0) {
+                    fprintf(stderr, "TO_JSON FAIL: want %s got %.*s\n", tj->str, (int)jj.len, jj.data);
+                    failures++;
+                } else {
+                    build_json++;
+                }
+                struple_writer_free(&jj);
+            }
         }
         free(bin);
     }
@@ -276,7 +292,7 @@ int main(void) {
     struple_json_free(mroot);
     free(mtext);
 
-    printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | malformed %d/%d rejected | %d failures\n",
-           json_enc, json_dec, build_enc, build_trc, sem_ok, malformed_ok, malformed_total, failures);
+    printf("test_conformance: json encode %d decode %d | build %d transcode %d to_json %d | semantic %d | malformed %d/%d rejected | %d failures\n",
+           json_enc, json_dec, build_enc, build_trc, build_json, sem_ok, malformed_ok, malformed_total, failures);
     return failures ? 1 : 0;
 }

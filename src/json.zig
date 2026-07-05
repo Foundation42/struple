@@ -244,6 +244,28 @@ fn writeDecimal(arena: std.mem.Allocator, writer: anytype, d: struple.Decimal) !
     const exp10 = d.exponent(); // value = C · 10^exp10
 
     if (d.negative) try writer.writeByte('-');
+
+    // Plain notation would pad this many zeros; past the threshold, render in
+    // scientific notation so a huge (i32-bounded) exponent can't emit gigabytes.
+    const max_plain_pad = 40;
+    const pad: i64 = if (exp10 >= 0) exp10 else blk: {
+        const pp = k + exp10;
+        break :blk if (pp > 0) 0 else -pp;
+    };
+    if (pad > max_plain_pad) {
+        // d1[.d2…dk]e±E, where E = adj_exp − 1 (the power of ten of the MSD − 1).
+        try writer.writeByte('0' + digs[0]);
+        if (digs.len > 1) {
+            try writer.writeByte('.');
+            for (digs[1..]) |dd| try writer.writeByte('0' + dd);
+        }
+        const sci_exp = exp10 + k - 1;
+        try writer.writeByte('e');
+        try writer.writeByte(if (sci_exp >= 0) '+' else '-');
+        try writer.print("{d}", .{@abs(sci_exp)});
+        return;
+    }
+
     if (exp10 >= 0) {
         for (digs) |dd| try writer.writeByte('0' + dd);
         var z: i64 = 0;

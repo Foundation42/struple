@@ -5,7 +5,11 @@
 //!   { "build": <op>,                    "bytes": "<hex>" }   -- typed value
 //!
 //! JSON entries:  fromJson(json) == bytes  and  toJson(bytes) == json.
-//! Build entries: encode(build(op)) == bytes  and  transcode(bytes) == bytes,
+//! Build entries: encode(build(op)) == bytes  and  transcode(bytes) == bytes.
+//!   A build entry may also carry an optional one-way  "to_json": "<text>"  giving
+//!   the expected toJson(bytes) rendering (used for decimals, whose text can't be a
+//!   round-trip "json" field — fromJson of it would produce a float). Runners that
+//!   support it check toJson(bytes) == to_json; older runners ignore the field.
 //! where `build` interprets a tiny op language (covering the types JSON cannot
 //! express: undefined, float32, timestamp, bytes, set, non-string map keys, and
 //! compositions of them). An op is a one-key object; integers and timestamps are
@@ -65,6 +69,14 @@ const build_ops = [_][]const u8{
     "{\"decimal\":\"-0.5\"}",
     "{\"decimal\":\"123456789012345678901234567890.123456789\"}", // wide coefficient
     "{\"decimal\":\"1e-9\"}",
+    // large exponents (Item 2): plain up to the pad threshold, scientific beyond.
+    "{\"decimal\":\"1e40\"}", // plain: pad == threshold
+    "{\"decimal\":\"1e41\"}", // scientific: pad just over the threshold
+    "{\"decimal\":\"1e300\"}",
+    "{\"decimal\":\"-1e300\"}",
+    "{\"decimal\":\"1e-300\"}",
+    "{\"decimal\":\"1.5e300\"}",
+    "{\"decimal\":\"-9.99e-300\"}",
     "{\"array\":[{\"decimal\":\"1.5\"},{\"string\":\"x\"}]}",
 };
 
@@ -96,7 +108,20 @@ pub fn main() !void {
         try buildInto(a, &p, op);
         try w.writeAll("  { \"build\": ");
         try w.writeAll(op_text); // op is valid JSON, embed verbatim
-        try emitBytes(w, p.bytes());
+        try w.writeAll(", \"bytes\": \"");
+        for (p.bytes()) |b| try w.print("{x:0>2}", .{b});
+        try w.writeAll("\"");
+        // Decimals are build-only, so the {json,bytes} vectors don't cover their
+        // toJson text. Pin it here so the plain/scientific rendering (Item 2) is a
+        // cross-language contract. A distinct one-way field name ("to_json", not
+        // "json") avoids the round-trip semantics: fromJson of this text would make
+        // a float, not the decimal. Runners check toJson(bytes)==to_json when present.
+        if (std.mem.startsWith(u8, op_text, "{\"decimal\"")) {
+            const j = try struple.toJson(a, p.bytes());
+            try w.writeAll(", \"to_json\": ");
+            try writeJsonStringLiteral(w, j);
+        }
+        try w.writeAll(" }");
         try comma(w, &idx, total);
     }
 

@@ -501,8 +501,8 @@ fn encode_once(kind: PKind, d: &Data, out: &mut Writer, scratch: &mut Writer, ke
             for q in &d.quotes {
                 scratch.clear();
                 scratch.append_string(&q.symbol);
-                scratch.append_decimal(false, &q.bid.digits, q.bid.exp);
-                scratch.append_decimal(false, &q.ask.digits, q.ask.exp);
+                scratch.append_decimal(false, &q.bid.digits, q.bid.exp).unwrap();
+                scratch.append_decimal(false, &q.ask.digits, q.ask.exp).unwrap();
                 scratch.append_f64(q.last);
                 scratch.append_int(q.volume);
                 scratch.append_timestamp(q.ts);

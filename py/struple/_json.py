@@ -134,6 +134,19 @@ def _render_decimal(value) -> str:
         k -= 1
     digs = "".join(str(d) for d in digits[:k])
     neg = "-" if sign else ""
+    # Past the plain-notation pad threshold, render in scientific notation so a huge
+    # (i32-bounded) exponent can't emit gigabytes of zeros. Mirrors the Zig reference
+    # (src/json.zig: writeDecimal). Here `exp` == exponent() (adj_exp − k).
+    if exp >= 0:
+        pad = exp
+    else:
+        point_pos0 = k + exp
+        pad = 0 if point_pos0 > 0 else -point_pos0
+    if pad > 40:
+        sci_exp = exp + k - 1  # power of ten of the most-significant digit
+        mant = digs[0] + ("." + digs[1:] if k > 1 else "")
+        esign = "+" if sci_exp >= 0 else "-"
+        return neg + mant + "e" + esign + str(abs(sci_exp))
     if exp >= 0:
         return neg + digs + "0" * exp
     point_pos = k + exp  # number of integer-part digits

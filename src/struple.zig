@@ -356,7 +356,7 @@ pub const Packer = struct {
     /// `digits` are the coefficient `C`'s decimal digits (each 0–9, most-significant
     /// first). Canonicalized on the way in: leading/trailing zeros are stripped and
     /// any all-zero coefficient collapses to the single zero form.
-    pub fn appendDecimal(self: *Packer, negative: bool, digits: []const u8, exp: i32) EncodeError!void {
+    pub fn appendDecimal(self: *Packer, negative: bool, digits: []const u8, exp: i32) (EncodeError || DecimalError)!void {
         var lead: usize = 0;
         while (lead < digits.len and digits[lead] == 0) lead += 1;
         const sig = digits[lead..];
@@ -370,6 +370,9 @@ pub const Packer = struct {
         // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
         // Trailing zeros change neither the value nor E, so drop them for storage.
         const adj_exp: i128 = @as(i128, @intCast(sig.len)) + exp;
+        // Bound the adjusted exponent to i32 so it round-trips through decode's
+        // i32 cap and downstream exponent math never overflows (Item 2).
+        if (adj_exp > std.math.maxInt(i32) or adj_exp < std.math.minInt(i32)) return error.InvalidDecimal;
         var end: usize = sig.len;
         while (end > 0 and sig[end - 1] == 0) end -= 1;
         const store = sig[0..end];
@@ -405,7 +408,7 @@ pub const Packer = struct {
         }
         var digits = std.ArrayList(u8).init(self.list.allocator);
         defer digits.deinit();
-        var exp: i32 = 0;
+        var exp: i64 = 0; // i64 so the parse can't overflow before the i32 bound check
         var seen_point = false;
         var any = false;
         while (i < s.len) : (i += 1) {
@@ -424,22 +427,24 @@ pub const Packer = struct {
         if (!any) return error.InvalidDecimal;
         if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
             i += 1;
-            var esign: i32 = 1;
+            var esign: i64 = 1;
             if (i < s.len and (s[i] == '+' or s[i] == '-')) {
                 if (s[i] == '-') esign = -1;
                 i += 1;
             }
-            var ev: i32 = 0;
+            var ev: i64 = 0;
             var edig = false;
             while (i < s.len) : (i += 1) {
                 if (s[i] < '0' or s[i] > '9') return error.InvalidDecimal;
                 ev = ev * 10 + (s[i] - '0');
+                if (ev > std.math.maxInt(i32)) return error.InvalidDecimal; // far beyond any real exponent
                 edig = true;
             }
             if (!edig) return error.InvalidDecimal;
             exp += esign * ev;
         }
-        try self.appendDecimal(negative, digits.items, exp);
+        if (exp > std.math.maxInt(i32) or exp < std.math.minInt(i32)) return error.InvalidDecimal;
+        try self.appendDecimal(negative, digits.items, @intCast(exp));
     }
 
     /// Microseconds since the Unix epoch, UTC.
@@ -682,7 +687,10 @@ pub const Reader = struct {
             for (try self.take(n), 0..) |b, k| tmp[k] = decodeByte(b, complement);
             if (n == 16 and ((positive and tmp[0] >= 0x80) or (!positive and tmp[0] < 0x80))) return error.InvalidType;
             const v = decodeIntPayload(positive, tmp[0..n]);
-            if (v > std.math.maxInt(i64) or v < std.math.minInt(i64)) return error.InvalidType;
+            // Bound the adjusted exponent to i32 (Item 2): keeps `Decimal.exponent()`
+            // (= adj_exp − digitCount) from underflowing i64, and is already ~2× any
+            // real decimal Emax. A larger stored exponent is malformed.
+            if (v > std.math.maxInt(i32) or v < std.math.minInt(i32)) return error.InvalidType;
             return @intCast(v);
         }
         return error.InvalidType;

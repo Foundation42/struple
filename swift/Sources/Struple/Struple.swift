@@ -304,7 +304,7 @@ public struct Writer {
     /// `digits` are the coefficient `C`'s decimal digits (each 0–9, MSD first).
     /// Canonicalized on the way in: leading/trailing zeros stripped, any all-zero
     /// coefficient collapses to the single zero form.
-    public mutating func appendDecimal(negative: Bool, digits: [UInt8], exp: Int32) {
+    public mutating func appendDecimal(negative: Bool, digits: [UInt8], exp: Int32) throws {
         var lead = 0
         while lead < digits.count && digits[lead] == 0 { lead += 1 }
         let sig = Array(digits[lead...])
@@ -318,6 +318,11 @@ public struct Writer {
         // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
         // Trailing zeros change neither the value nor E, so drop them for storage.
         let adjExp = Int128(sig.count) + Int128(exp)
+        // Bound the adjusted exponent to i32 so it round-trips through decode's
+        // i32 cap and downstream exponent math never overflows (Item 2).
+        if adjExp > Int128(Int32.max) || adjExp < Int128(Int32.min) {
+            throw StrupleError.invalidDecimal
+        }
         var end = sig.count
         while end > 0 && sig[end - 1] == 0 { end -= 1 }
         let store = Array(sig[0..<end])
@@ -348,7 +353,7 @@ public struct Writer {
             i += 1
         }
         var digits: [UInt8] = []
-        var exp: Int32 = 0
+        var exp: Int64 = 0  // Int64 so the parse can't overflow before the i32 bound check
         var seenPoint = false
         var any = false
         while i < chars.count {
@@ -369,25 +374,27 @@ public struct Writer {
         if !any { throw StrupleError.invalidDecimal }
         if i < chars.count && (chars[i] == UInt8(ascii: "e") || chars[i] == UInt8(ascii: "E")) {
             i += 1
-            var esign: Int32 = 1
+            var esign: Int64 = 1
             if i < chars.count && (chars[i] == UInt8(ascii: "+") || chars[i] == UInt8(ascii: "-")) {
                 if chars[i] == UInt8(ascii: "-") { esign = -1 }
                 i += 1
             }
-            var ev: Int32 = 0
+            var ev: Int64 = 0
             var edig = false
             while i < chars.count {
                 if chars[i] < UInt8(ascii: "0") || chars[i] > UInt8(ascii: "9") {
                     throw StrupleError.invalidDecimal
                 }
-                ev = ev * 10 + Int32(chars[i] - UInt8(ascii: "0"))
+                ev = ev * 10 + Int64(chars[i] - UInt8(ascii: "0"))
+                if ev > Int64(Int32.max) { throw StrupleError.invalidDecimal }  // far beyond any real exponent
                 edig = true
                 i += 1
             }
             if !edig { throw StrupleError.invalidDecimal }
             exp += esign * ev
         }
-        appendDecimal(negative: negative, digits: digits, exp: exp)
+        if exp > Int64(Int32.max) || exp < Int64(Int32.min) { throw StrupleError.invalidDecimal }
+        try appendDecimal(negative: negative, digits: digits, exp: Int32(exp))
     }
 
     /// Microseconds since the Unix epoch, UTC.
@@ -657,7 +664,10 @@ public struct Reader {
                 throw StrupleError.invalidType
             }
             let v = decodeIntPayload(positive: positive, payload: tmp[0..<n])
-            if v > Int128(Int64.max) || v < Int128(Int64.min) { throw StrupleError.invalidType }
+            // Bound the adjusted exponent to i32 (Item 2): keeps `Decimal.exponent`
+            // (= adjExp − digitCount) from overflowing, and is already ~2× any real
+            // decimal Emax. A larger stored exponent is malformed.
+            if v > Int128(Int32.max) || v < Int128(Int32.min) { throw StrupleError.invalidType }
             return Int64(v)
         }
         throw StrupleError.invalidType
@@ -865,7 +875,7 @@ func reencode(_ w: inout Writer, _ e: Element) throws {
     case .float32(let f): w.appendF32(f)
     case .float64(let f): w.appendF64(f)
     case .decimal(let d):
-        w.appendDecimal(
+        try w.appendDecimal(
             negative: d.negative, digits: d.coefficientDigits, exp: Int32(d.exponent))
     case .timestamp(let t): w.appendTimestamp(t)
     case .uuid(let u): w.appendUuid(u)

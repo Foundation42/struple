@@ -48,6 +48,12 @@ _SIGN64 = 1 << 63
 # The fixed integer slots span the i128 range; values beyond use the big-int codes.
 _I128_MAX = (1 << 127) - 1
 _I128_MIN = -(1 << 127)
+# Decimal adjusted-exponent bound: i32. Keeps `exponent() = adj_exp - digitCount`
+# from underflowing, and stops a huge exponent from driving a multi-GB toJson or an
+# exponent-proportional semantic scale (HARDENING.md Item 2). Mirrors the Zig
+# reference (readDecExponent / appendDecimal / appendDecimalString i32 caps).
+_DEC_ADJ_EXP_MAX = (1 << 31) - 1   # 2147483647
+_DEC_ADJ_EXP_MIN = -(1 << 31)      # -2147483648
 _EPOCH = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
 
 # Maximum container/JSON nesting depth accepted by the recursive walks (JSON
@@ -296,6 +302,10 @@ def _append_decimal(out: bytearray, negative: bool, digits, exp: int) -> None:
     # Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
     # Trailing zeros change neither the value nor E, so drop them for storage.
     adj_exp = len(sig) + exp
+    # Bound the adjusted exponent to i32 so it round-trips through decode's i32 cap
+    # and downstream exponent math never overflows (Item 2).
+    if adj_exp > _DEC_ADJ_EXP_MAX or adj_exp < _DEC_ADJ_EXP_MIN:
+        raise ValueError("struple: decimal adjusted exponent out of range")
     end = len(sig)
     while end > 0 and sig[end - 1] == 0:
         end -= 1
@@ -361,11 +371,17 @@ def _append_decimal_string(out: bytearray, s: str) -> None:
             if not ("0" <= s[i] <= "9"):
                 raise ValueError("struple: invalid decimal")
             ev = ev * 10 + (ord(s[i]) - 48)
+            if ev > _DEC_ADJ_EXP_MAX:  # far beyond any real exponent
+                raise ValueError("struple: invalid decimal")
             edig = True
             i += 1
         if not edig:
             raise ValueError("struple: invalid decimal")
         exp += esign * ev
+    # Bound the (i64-safe) exponent to i32 before handing off; _append_decimal
+    # additionally bounds the adjusted exponent (Item 2).
+    if exp > _DEC_ADJ_EXP_MAX or exp < _DEC_ADJ_EXP_MIN:
+        raise ValueError("struple: invalid decimal")
     _append_decimal(out, negative, digits, exp)
 
 
@@ -603,7 +619,13 @@ class Reader:
             if n == 16 and ((positive and payload[0] >= 0x80) or (not positive and payload[0] < 0x80)):
                 raise ValueError("struple: non-canonical 16-byte decimal exponent")
             raw = int.from_bytes(payload, "big")
-            return raw if positive else raw - (1 << (8 * n))
+            v = raw if positive else raw - (1 << (8 * n))
+            # Bound the adjusted exponent to i32 (Item 2): keeps `exponent()`
+            # (= adj_exp − digitCount) from underflowing and is ~2× any real
+            # decimal Emax. A larger stored exponent is malformed.
+            if v > _DEC_ADJ_EXP_MAX or v < _DEC_ADJ_EXP_MIN:
+                raise ValueError("struple: decimal adjusted exponent out of range")
+            return v
         raise ValueError("struple: invalid decimal exponent")
 
     def _read_f64(self) -> float:
@@ -1041,11 +1063,94 @@ def _compare_numbers(ea: tuple, eb: tuple) -> int:
         return _sign(va - vb)
     if not _is_exact(ea) and not _is_exact(eb):
         return (va > vb) - (va < vb)  # both finite floats
-    # At least one exact (int/decimal) operand — compare exactly via rationals.
-    # Fraction is exact for int, Decimal and float (a float's true binary value),
-    # so no precision is lost even for huge values.
-    return _sign(_Fraction(va) - _Fraction(vb))
+    # At least one exact (int/decimal) operand, and not both int. Decide by base-10
+    # order of magnitude first, so a decimal with an i32-huge exponent never
+    # materializes a 10**exp-scaled Fraction (Item 2 DoS). The exact rational path
+    # is reached only when the magnitudes are close — then the work is bounded by
+    # the operands' digit counts, never by the raw exponent.
+    xa, xb = _is_exact(ea), _is_exact(eb)
+    if xa and xb:
+        return _compare_exact_exact(ea, eb)
+    if xa:
+        return _compare_exact_float(ea, eb)
+    return -_compare_exact_float(eb, ea)
 
 
 def _is_exact(e: tuple) -> bool:
     return e[0] == "int" or e[0] == "decimal"
+
+
+def _num_base10_digits(n: int) -> int:
+    """Exact number of base-10 digits of a positive int, without ``str(n)`` (its
+    conversion is O(digits²) and, on Python 3.11+, capped at 4300 digits) or
+    ``math.log10`` (OverflowError past ~1e308). ``bit_length·log10(2)`` seeds a
+    candidate; one or two integer-power corrections pin it exactly."""
+    est = ((n.bit_length() * 1233) >> 12) + 1  # ~floor(bits·log10(2)) + 1
+    while n >= 10 ** est:
+        est += 1
+    while est > 1 and n < 10 ** (est - 1):
+        est -= 1
+    return est
+
+
+def _b10(e: tuple):
+    """Base-10 view of an exact (int/decimal) element: ``(sign, coeff, exp10, oom)``
+    with ``value = sign·coeff·10**exp10`` (``coeff`` a non-negative int) and
+    ``oom = floor(log10|value|)`` so ``|value| ∈ [10**oom, 10**(oom+1))``. Zero maps
+    to ``(0, 0, 0, None)``. Never materializes ``10**exp10`` — the DoS site."""
+    k, v = e
+    if k == "int":
+        if v == 0:
+            return (0, 0, 0, None)
+        c = -v if v < 0 else v
+        return (_sign(v), c, 0, _num_base10_digits(c) - 1)
+    # decimal — as_tuple() is context-free (no huge power built)
+    if v.is_zero():
+        return (0, 0, 0, None)
+    s, digits, exp = v.as_tuple()
+    coeff = 0
+    for d in digits:
+        coeff = coeff * 10 + d
+    return (-1 if s else 1, coeff, exp, exp + len(digits) - 1)
+
+
+def _compare_exact_exact(ea: tuple, eb: tuple) -> int:
+    sa, ca, xa, oa = _b10(ea)
+    sb, cb, xb, ob = _b10(eb)
+    if sa != sb:
+        return _sign(sa - sb)  # covers zero-vs-nonzero and neg-vs-pos
+    if sa == 0:
+        return 0
+    if oa != ob:
+        # oom is exact, so disjoint bounds decide outright (10^oom ≤ |v| < 10^(oom+1)).
+        mag = _sign(oa - ob)
+    else:
+        # Equal oom ⇒ |exp10 difference| = |digit-count difference|, so the scaling
+        # power is bounded by the digit counts, never by the raw exponent.
+        e = xa if xa < xb else xb
+        mag = _sign(ca * 10 ** (xa - e) - cb * 10 ** (xb - e))
+    return mag if sa > 0 else -mag
+
+
+def _compare_exact_float(ex: tuple, ef: tuple) -> int:
+    """Compare an exact (int/decimal) element ``ex`` against a finite float ``ef``."""
+    sx, cx, xx, ox = _b10(ex)
+    f = ef[1]
+    sf = _sign(f)
+    if sx != sf:
+        return _sign(sx - sf)
+    if sx == 0:
+        return 0
+    # A finite nonzero f64 has |f| ∈ (10**-324, 10**309). If the exact value's order
+    # of magnitude clears that window, decide without touching the exponent.
+    if ox >= 309:
+        mag = 1
+    elif ox <= -325:
+        mag = -1
+    else:
+        # In-window: exp10 is bounded, so the exact rational compare is cheap. Use
+        # context-free abs so no Decimal context rounding perturbs the value.
+        kx, vx = ex
+        mx = _Fraction(cx if kx == "int" else vx.copy_abs())
+        mag = _sign(mx - _Fraction(abs(f)))
+    return mag if sx > 0 else -mag

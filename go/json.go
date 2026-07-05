@@ -302,8 +302,9 @@ func renderUUID(u [16]byte) string {
 	return b.String()
 }
 
-// renderDecimal renders a decimal as an exact JSON number literal (plain
-// notation, no exponent).
+// renderDecimal renders a decimal as an exact JSON number literal: plain
+// notation up to a bounded zero-pad, then a scientific fallback so an i32-sized
+// exponent can't emit gigabytes of zeros from a tiny input (Item 2).
 func renderDecimal(sb *strings.Builder, d Decimal) {
 	if d.IsZero() {
 		sb.WriteByte('0')
@@ -316,6 +317,38 @@ func renderDecimal(sb *strings.Builder, d Decimal) {
 	if d.Negative {
 		sb.WriteByte('-')
 	}
+
+	// Plain notation would pad this many zeros; past the threshold, switch to
+	// scientific notation.
+	const maxPlainPad = 40
+	var pad int64
+	if exp10 >= 0 {
+		pad = exp10
+	} else if pp := k + exp10; pp > 0 {
+		pad = 0
+	} else {
+		pad = -pp
+	}
+	if pad > maxPlainPad {
+		// d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+		sb.WriteByte('0' + digs[0])
+		if len(digs) > 1 {
+			sb.WriteByte('.')
+			for _, dd := range digs[1:] {
+				sb.WriteByte('0' + dd)
+			}
+		}
+		sciExp := exp10 + k - 1
+		sb.WriteByte('e')
+		if sciExp >= 0 {
+			sb.WriteByte('+')
+		} else {
+			sb.WriteByte('-')
+		}
+		sb.WriteString(strconv.FormatInt(absInt64(sciExp), 10))
+		return
+	}
+
 	if exp10 >= 0 {
 		for _, dd := range digs {
 			sb.WriteByte('0' + dd)

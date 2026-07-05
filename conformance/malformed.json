@@ -9,6 +9,7 @@
     { "hex": "31", "item": 1, "note": "truncated big-int: bare type code, no length-of-length byte" },
     { "hex": "10", "item": 1, "note": "truncated fixed int: 0x10 declares a 16-byte negative payload that is absent" },
     { "hex": "3803", "item": 2, "note": "truncated decimal: sign=pos but the adjusted-exponent byte is missing" },
+    { "hex": "380324800000000b00", "item": 2, "note": "decimal adjusted exponent 2^31 exceeds the i32 bound (coefficient 1); must be rejected on decode" },
     { "hex": "44", "item": 1, "note": "truncated uuid: type code with fewer than 16 payload bytes" }
   ]
 }

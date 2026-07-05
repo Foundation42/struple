@@ -39,6 +39,7 @@ public final class TestConformance {
         int jsonDec = 0;
         int buildEnc = 0;
         int buildTrc = 0;
+        int buildJson = 0;
 
         for (Object o : vectors) {
             JsonObject v = (JsonObject) o;
@@ -65,6 +66,14 @@ public final class TestConformance {
                 // transcode: transcode(bytes) == bytes
                 expectEq("transcode [" + want + "]", hexEncode(transcode(bin)), want);
                 buildTrc++;
+                // A build vector may carry a one-way expected toJson rendering (Item 2): pins the
+                // plain + scientific decimal rendering cross-language. Vectors without it are
+                // unaffected.
+                if (v.has("to_json")) {
+                    String wantJson = (String) v.get("to_json");
+                    expectEq("build-to_json [" + want + "]", Json.toJson(bin), wantJson);
+                    buildJson++;
+                }
             }
         }
 
@@ -116,14 +125,44 @@ public final class TestConformance {
             }
         }
 
+        // DoS short-circuit guard (Item 2): semanticOrder of a huge-exponent decimal vs an int and
+        // vs a float must return PROMPTLY — the magnitude short-circuit avoids any scaling
+        // proportional to the i32 exponent. A regressed short-circuit would hang here.
+        int dosOk = 0;
+        {
+            byte[] bigPos = new Packer().appendDecimalString("1e2000000000").bytes();
+            byte[] bigNeg = new Packer().appendDecimalString("1e-2000000000").bytes();
+            byte[] one = new Packer().appendInt(1).bytes();
+            byte[] onef = new Packer().appendFloat64(1.0).bytes();
+            long t0 = System.nanoTime();
+            dosOk += expectOrder("1e2000000000 vs int 1", Semantic.semanticOrder(bigPos, one), 1);
+            dosOk += expectOrder("1e2000000000 vs 1.0", Semantic.semanticOrder(bigPos, onef), 1);
+            dosOk += expectOrder("1e-2000000000 vs int 1", Semantic.semanticOrder(bigNeg, one), -1);
+            dosOk += expectOrder("1e-2000000000 vs 1.0", Semantic.semanticOrder(bigNeg, onef), -1);
+            long ms = (System.nanoTime() - t0) / 1_000_000L;
+            if (ms > 5000) {
+                System.err.println("DOS FAIL: huge-exponent semantic compare took " + ms + " ms");
+                failures++;
+            }
+        }
+
         System.out.printf(
-                "TestConformance: json encode %d decode %d | build %d transcode %d | semantic %d "
-                        + "| malformed %d/%d rejected | %d failures%n",
-                jsonEnc, jsonDec, buildEnc, buildTrc, semOk, malformedRejected, malformedTotal,
-                failures);
+                "TestConformance: json encode %d decode %d | build %d transcode %d to_json %d "
+                        + "| semantic %d | malformed %d/%d rejected | dos %d/4 | %d failures%n",
+                jsonEnc, jsonDec, buildEnc, buildTrc, buildJson, semOk, malformedRejected,
+                malformedTotal, dosOk, failures);
         if (failures != 0) {
             System.exit(1);
         }
+    }
+
+    private static int expectOrder(String label, int got, int want) {
+        if (got != want) {
+            System.err.println("DOS FAIL " + label + ": got " + got + " want " + want);
+            failures++;
+            return 0;
+        }
+        return 1;
     }
 
     // -----------------------------------------------------------------------

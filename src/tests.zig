@@ -683,6 +683,70 @@ test "depth cap: deeply nested input is rejected, not a stack overflow" {
     }
 }
 
+test "decimal: exponent bounds, scientific render, DoS short-circuit (Item 2)" {
+    const a = testing.allocator;
+
+    // Encode-side bounds: exponent literal / adjusted exponent past i32 are rejected.
+    {
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try testing.expectError(error.InvalidDecimal, p.appendDecimalString("1e9999999999"));
+        try testing.expectError(error.InvalidDecimal, p.appendDecimalString("1e2147483647")); // adj_exp 2^31
+    }
+    // Valid boundary: adjusted exponent == i32 max decodes cleanly.
+    {
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendDecimalString("1e2147483646"); // adj_exp = 2147483647 = i32 max
+        var r = struple.reader(p.bytes());
+        _ = try r.next();
+    }
+    // Decode-side bound: a wire decimal with adjusted exponent i32max+1 is rejected.
+    {
+        const bad = [_]u8{ 0x38, 0x03, 0x24, 0x80, 0x00, 0x00, 0x00, 0x0b, 0x00 };
+        var r = struple.reader(&bad);
+        try testing.expectError(error.InvalidType, r.next());
+    }
+    // Scientific toJson past the plain-notation pad threshold (also pinned by corpus).
+    {
+        const cases = [_]struct { s: []const u8, j: []const u8 }{
+            .{ .s = "1e40", .j = "10000000000000000000000000000000000000000" },
+            .{ .s = "1e41", .j = "1e+41" },
+            .{ .s = "1e300", .j = "1e+300" },
+            .{ .s = "1e-300", .j = "1e-300" },
+            .{ .s = "1.5e300", .j = "1.5e+300" },
+        };
+        for (cases) |c| {
+            var p = struple.Packer.init(a);
+            defer p.deinit();
+            try p.appendDecimalString(c.s);
+            const j = try struple.toJson(a, p.bytes());
+            defer a.free(j);
+            try testing.expectEqualStrings(c.j, j);
+        }
+    }
+    // Semantic short-circuit: an astronomically large/small (but i32-valid) exponent
+    // must decide by order of magnitude, never by materializing a 2^31-scaled value.
+    {
+        var huge = struple.Packer.init(a);
+        defer huge.deinit();
+        try huge.appendDecimalString("1e2000000000");
+        var tiny = struple.Packer.init(a);
+        defer tiny.deinit();
+        try tiny.appendDecimalString("1e-2000000000");
+        var five = struple.Packer.init(a);
+        defer five.deinit();
+        try five.appendInt(5);
+        var onef = struple.Packer.init(a);
+        defer onef.deinit();
+        try onef.appendF64(1.0);
+        try testing.expectEqual(std.math.Order.gt, try struple.semanticOrder(a, huge.bytes(), five.bytes()));
+        try testing.expectEqual(std.math.Order.lt, try struple.semanticOrder(a, tiny.bytes(), five.bytes()));
+        try testing.expectEqual(std.math.Order.gt, try struple.semanticOrder(a, huge.bytes(), onef.bytes()));
+        try testing.expectEqual(std.math.Order.lt, try struple.semanticOrder(a, tiny.bytes(), onef.bytes()));
+    }
+}
+
 fn expectJsonRoundtrip(canonical: []const u8) !void {
     const a = testing.allocator;
     const encoded = try struple.fromJson(a, canonical);

@@ -243,24 +243,30 @@ void struple_append_f32(struple_writer *w, float v) {
     for (int i = 3; i >= 0; i--) sw_push(w, (uint8_t)((bits >> (8 * i)) & 0xff));
 }
 
-void struple_append_decimal(struple_writer *w, bool negative, const uint8_t *digits, size_t ndigits, int32_t exp) {
+int struple_append_decimal(struple_writer *w, bool negative, const uint8_t *digits, size_t ndigits, int32_t exp) {
     /* Strip leading zeros: they shift neither the value nor the adjusted exponent. */
     size_t lead = 0;
     while (lead < ndigits && digits[lead] == 0) lead++;
     const uint8_t *sig = digits + lead;
     size_t sig_len = ndigits - lead;
 
-    sw_push(w, DECIMAL);
     if (sig_len == 0) { /* canonical zero — one form regardless of scale */
+        sw_push(w, DECIMAL);
         sw_push(w, DEC_SIGN_ZERO);
-        return;
+        return 0;
     }
 
     /* Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
      * Trailing zeros change neither the value nor E, so drop them for storage. */
     int64_t adj_exp = (int64_t)sig_len + (int64_t)exp;
+    /* Bound the adjusted exponent to i32 so it round-trips through decode's i32
+     * cap and downstream exponent math never overflows (Item 2). Checked before
+     * writing any bytes, so a rejected value emits nothing. */
+    if (adj_exp > INT32_MAX || adj_exp < INT32_MIN) return -1;
     size_t end = sig_len;
     while (end > 0 && sig[end - 1] == 0) end--;
+
+    sw_push(w, DECIMAL);
 
     /* Order-bearing tail: [E as a struple int][base-100 digits][terminator]. */
     struple_writer tail;
@@ -277,6 +283,7 @@ void struple_append_decimal(struple_writer *w, bool negative, const uint8_t *dig
     sw_push(w, negative ? DEC_SIGN_NEG : DEC_SIGN_POS);
     for (size_t i = 0; i < tail.len; i++) sw_push(w, negative ? (uint8_t)~tail.data[i] : tail.data[i]);
     struple_writer_free(&tail);
+    return 0;
 }
 
 int struple_append_decimal_string(struple_writer *w, const char *s, size_t len) {
@@ -288,7 +295,7 @@ int struple_append_decimal_string(struple_writer *w, const char *s, size_t len) 
     }
     uint8_t *digits = NULL;
     size_t ndigits = 0, dcap = 0;
-    int32_t exp = 0;
+    int64_t exp = 0; /* i64 so the parse can't overflow before the i32 bound check */
     bool seen_point = false;
     bool any = false;
     for (; i < len; i++) {
@@ -320,12 +327,12 @@ int struple_append_decimal_string(struple_writer *w, const char *s, size_t len) 
     }
     if (i < len && (s[i] == 'e' || s[i] == 'E')) {
         i++;
-        int32_t esign = 1;
+        int64_t esign = 1;
         if (i < len && (s[i] == '+' || s[i] == '-')) {
             if (s[i] == '-') esign = -1;
             i++;
         }
-        int32_t ev = 0;
+        int64_t ev = 0;
         bool edig = false;
         for (; i < len; i++) {
             if (s[i] < '0' || s[i] > '9') {
@@ -333,6 +340,10 @@ int struple_append_decimal_string(struple_writer *w, const char *s, size_t len) 
                 return -1;
             }
             ev = ev * 10 + (s[i] - '0');
+            if (ev > INT32_MAX) { /* far beyond any real exponent */
+                free(digits);
+                return -1;
+            }
             edig = true;
         }
         if (!edig) {
@@ -341,9 +352,15 @@ int struple_append_decimal_string(struple_writer *w, const char *s, size_t len) 
         }
         exp += esign * ev;
     }
-    struple_append_decimal(w, negative, digits, ndigits, exp);
+    /* Bound the exponent magnitude to i32; the adjusted exponent (significant-
+     * digit-count + exp) is bounded by struple_append_decimal (Item 2). */
+    if (exp > INT32_MAX || exp < INT32_MIN) {
+        free(digits);
+        return -1;
+    }
+    int rc = struple_append_decimal(w, negative, digits, ndigits, (int32_t)exp);
     free(digits);
-    return 0;
+    return rc;
 }
 
 void struple_append_timestamp(struple_writer *w, int64_t micros) {
@@ -636,20 +653,24 @@ static int read_dec_exponent(struple_reader *r, bool complement, int64_t *out_ex
     /* The exponent must fit i64; any payload wider than 8 bytes overflows. */
     if (n > 8) return -1;
     uint64_t mag = be_to_u64(tmp, n);
+    int64_t v;
     if (positive) {
         if (mag > (uint64_t)INT64_MAX) return -1;
-        *out_exp = (int64_t)mag;
-        return 0;
+        v = (int64_t)mag;
+    } else if (n < 8) {
+        /* negative: value = raw - 2^(8n) = -(2^(8n) - raw) */
+        v = -(int64_t)((1ULL << (8 * n)) - mag);
+    } else {
+        /* n == 8: value = mag - 2^64. Reject anything below INT64_MIN. */
+        uint64_t neg_mag = (uint64_t)0 - mag; /* 2^64 - mag */
+        if (neg_mag > (uint64_t)INT64_MAX + 1) return -1;
+        v = (neg_mag == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)neg_mag;
     }
-    /* negative: value = raw - 2^(8n) = -(2^(8n) - raw) */
-    if (n < 8) {
-        *out_exp = -(int64_t)((1ULL << (8 * n)) - mag);
-        return 0;
-    }
-    /* n == 8: value = mag - 2^64. Reject anything below INT64_MIN. */
-    uint64_t neg_mag = (uint64_t)0 - mag; /* 2^64 - mag */
-    if (neg_mag > (uint64_t)INT64_MAX + 1) return -1;
-    *out_exp = (neg_mag == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)neg_mag;
+    /* Bound the adjusted exponent to i32 (Item 2): keeps `exponent() =
+     * adj_exp − digitCount` from underflowing i64, and is ~2× any real decimal
+     * Emax. A larger stored exponent is malformed. */
+    if (v > INT32_MAX || v < INT32_MIN) return -1;
+    *out_exp = v;
     return 0;
 }
 
@@ -1457,9 +1478,30 @@ static int sem_num_to_b10(const struple_element *e, sem_b10 *out) {
     return 0;
 }
 
+/* Bounds on the base-10 order of magnitude of a nonzero mag · 10^exp10 value:
+ * |value| ∈ [10^lo, 10^hi). Uses byte-length bounds on the base-256 magnitude
+ * (256^(n-1) ≥ 10^(2(n-1)), 256^n < 10^(3n)). Lets the comparators reject a
+ * far-apart pair without materializing a magnitude scaled by an i32-sized
+ * exponent (Item 2 DoS short-circuit). */
+typedef struct { int64_t lo, hi; } sem_oom;
+static sem_oom sem_b10_oom(const sem_b10 *v) {
+    const uint8_t *m = v->mag;
+    size_t ml = v->mlen;
+    while (ml > 0 && m[0] == 0) { m++; ml--; } /* trim leading zeros (n ≥ 1 nonzero) */
+    int64_t na = (int64_t)ml;
+    sem_oom r = { v->exp10 + 2 * na - 2, v->exp10 + 3 * na };
+    return r;
+}
+
 /* Compare two same-sign, nonzero base-10 magnitudes (mag · 10^exp10). Returns
  * -1/0/1, or -2 on OOM. */
 static int sem_b10_mag(const sem_b10 *a, const sem_b10 *b) {
+    /* If the orders of magnitude are disjoint, decide by them — no scaling. When
+     * they overlap, |a.exp10 − b.exp10| is bounded by the digit counts, so the
+     * exact scaling below is cheap (never proportional to the raw exponent). */
+    sem_oom ba = sem_b10_oom(a), bb = sem_b10_oom(b);
+    if (ba.hi <= bb.lo) return -1;
+    if (bb.hi <= ba.lo) return 1;
     int64_t e = a->exp10 < b->exp10 ? a->exp10 : b->exp10;
     size_t sal, sbl;
     uint8_t *sa = sem_mul_pow(a->mag, a->mlen, 10, (size_t)(a->exp10 - e), &sal);
@@ -1512,11 +1554,22 @@ static int sem_b10_float(const sem_b10 *v, double f) {
     int sf = sem_sign(f);
     if (v->sign != sf) return (v->sign > sf) - (v->sign < sf);
     if (v->sign == 0) return 0; /* both zero */
-    uint64_t mant;
-    int exp;
-    sem_decompose(fabs(f), &mant, &exp);
-    int c = sem_b10_mag_to_float(v->mag, v->mlen, v->exp10, mant, exp);
-    if (c == -2) return -2;
+    /* Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If v's order of
+     * magnitude is clear of that window, decide without scaling — this is what
+     * stops a huge decimal exponent from driving a 2^31-iteration scale (Item 2). */
+    sem_oom bnd = sem_b10_oom(v);
+    int c;
+    if (bnd.lo >= 310) {
+        c = 1; /* |v| ≥ 10^310 > any finite f64 */
+    } else if (bnd.hi <= -325) {
+        c = -1; /* |v| < 10^-325 < any nonzero finite f64 */
+    } else {
+        uint64_t mant;
+        int exp;
+        sem_decompose(fabs(f), &mant, &exp);
+        c = sem_b10_mag_to_float(v->mag, v->mlen, v->exp10, mant, exp);
+        if (c == -2) return -2;
+    }
     return v->sign < 0 ? -c : c;
 }
 

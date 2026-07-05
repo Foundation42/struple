@@ -73,6 +73,16 @@ const int _decSignNeg = 0x01;
 const int _decSignZero = 0x02;
 const int _decSignPos = 0x03;
 
+// Item 2: the decimal adjusted exponent (and any exponent literal in the
+// decimal-string parser) is bounded to signed 32-bit range. This keeps
+// `Decimal.exponent` (= adjExp − digitCount) from under/overflowing and every
+// downstream exponent-driven step (JSON rendering, semantic scaling) bounded, so
+// a tiny hostile input can't drive gigabytes of work. Mirrors the Zig reference.
+const int _i32Max = 2147483647; // 2^31 − 1
+const int _i32Min = -2147483648; // −2^31
+final BigInt _i32MaxBig = BigInt.from(_i32Max);
+final BigInt _i32MinBig = BigInt.from(_i32Min);
+
 /// Error raised by the decoder and the decimal-string parser.
 class StrupleException implements Exception {
   final String message;
@@ -320,7 +330,16 @@ class Writer {
     }
 
     // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+    // Bound it to i32 (Item 2) so it round-trips through decode's i32 cap and
+    // downstream exponent math never overflows. Guard `exp` first so the sum
+    // below can't overflow the 64-bit int before it is checked.
+    if (exp > _i32Max || exp < _i32Min) {
+      throw const StrupleException('invalid decimal');
+    }
     final adjExp = sig.length + exp;
+    if (adjExp > _i32Max || adjExp < _i32Min) {
+      throw const StrupleException('invalid decimal');
+    }
     var end = sig.length;
     while (end > 0 && sig[end - 1] == 0) {
       end--;
@@ -389,10 +408,18 @@ class Writer {
         final c = s.codeUnitAt(i);
         if (c < 0x30 || c > 0x39) throw const StrupleException('invalid decimal');
         ev = ev * 10 + (c - 0x30);
+        // Reject a runaway exponent literal before it can overflow (Item 2);
+        // i32 max is already ~2× any real decimal Emax.
+        if (ev > _i32Max) throw const StrupleException('invalid decimal');
         edig = true;
       }
       if (!edig) throw const StrupleException('invalid decimal');
       exp += esign * ev;
+    }
+    // Bound the running exponent to i32 (Item 2) before handing it to
+    // appendDecimal, which re-checks the adjusted exponent.
+    if (exp > _i32Max || exp < _i32Min) {
+      throw const StrupleException('invalid decimal');
     }
     appendDecimal(negative, digits, exp);
   }
@@ -658,7 +685,13 @@ class Reader {
         throw const StrupleException('invalid type code');
       }
       final v = _decodeIntPayload(positive, tmp);
-      if (!v.isValidInt) throw const StrupleException('invalid type code');
+      // Bound the adjusted exponent to i32 (Item 2): keeps `Decimal.exponent`
+      // (= adjExp − digitCount) from underflowing and is already ~2× any real
+      // decimal Emax. A larger stored exponent is malformed. (This also subsumes
+      // the old i64 range check, since the i32 range fits a Dart int.)
+      if (v > _i32MaxBig || v < _i32MinBig) {
+        throw const StrupleException('invalid type code');
+      }
       return v.toInt();
     }
     throw const StrupleException('invalid type code');

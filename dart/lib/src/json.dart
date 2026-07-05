@@ -294,6 +294,35 @@ void _renderDecimal(StringBuffer sb, Decimal d) {
   final exp10 = d.exponent; // value = C * 10^exp10
 
   if (d.negative) sb.write('-');
+
+  // Plain notation would pad this many zeros; past the threshold, render in
+  // scientific notation so a huge (i32-bounded) exponent can't emit gigabytes
+  // from a tiny input (Item 2).
+  const maxPlainPad = 40;
+  final int pad;
+  if (exp10 >= 0) {
+    pad = exp10;
+  } else {
+    final pp = k + exp10;
+    pad = pp > 0 ? 0 : -pp;
+  }
+  if (pad > maxPlainPad) {
+    // d1[.d2…dk]e±E, where E = exp10 + k − 1 (power of ten of the MSD). The
+    // exponent sign is always present (e+/e-), followed by |E|.
+    sb.writeCharCode(0x30 + digs[0]);
+    if (k > 1) {
+      sb.write('.');
+      for (var i = 1; i < k; i++) {
+        sb.writeCharCode(0x30 + digs[i]);
+      }
+    }
+    final sciExp = exp10 + k - 1;
+    sb.write('e');
+    sb.write(sciExp >= 0 ? '+' : '-');
+    sb.write(sciExp.abs());
+    return;
+  }
+
   if (exp10 >= 0) {
     for (final dd in digs) {
       sb.writeCharCode(0x30 + dd);

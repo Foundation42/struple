@@ -170,7 +170,8 @@ private fun renderQuoted(sb: StringBuilder, s: String) {
     sb.append('"')
 }
 
-/** Exact plain decimal literal (no exponent), mirroring writeDecimal in json.zig. */
+/** Exact decimal literal (plain, or scientific past the pad threshold), mirroring
+ *  writeDecimal in json.zig. */
 private fun renderDecimal(value: BigDecimal): String {
     if (value.signum() == 0) return "0"
     val (negative, digitsArr, exp) = decimalToComponents(value)
@@ -185,6 +186,28 @@ private fun renderDecimal(value: BigDecimal): String {
     val digs = StringBuilder(k)
     for (i in 0 until k) digs.append(('0' + sig[i]))
     val neg = if (negative) "-" else ""
+
+    // Plain notation would pad this many zeros; past the threshold, render in
+    // scientific notation so a huge (i32-bounded) exponent can't emit gigabytes
+    // from a tiny input (Item 2). Longs guard the ±2e9 exponent range.
+    val maxPlainPad = 40L
+    val pad: Long = if (e >= 0) e.toLong() else {
+        val pp = k.toLong() + e.toLong()
+        if (pp > 0) 0L else -pp
+    }
+    if (pad > maxPlainPad) {
+        // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+        val sb = StringBuilder()
+        sb.append(neg)
+        sb.append(digs[0])
+        if (k > 1) { sb.append('.'); sb.append(digs, 1, k) }
+        val sciExp = e.toLong() + k.toLong() - 1L
+        sb.append('e')
+        sb.append(if (sciExp >= 0) '+' else '-')
+        sb.append(if (sciExp < 0) -sciExp else sciExp)
+        return sb.toString()
+    }
+
     if (e >= 0) {
         val zeros = StringBuilder(); repeat(e) { zeros.append('0') }
         return neg + digs.toString() + zeros.toString()

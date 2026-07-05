@@ -223,9 +223,12 @@ impl Writer {
     /// Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`, where
     /// `digits` are the coefficient `C`'s decimal digits (each 0–9, most-significant
     /// first). Canonicalized: leading/trailing zeros stripped, all-zero -> zero form.
-    pub fn append_decimal(&mut self, negative: bool, digits: &[u8], exp: i32) -> &mut Self {
+    /// Errors if the adjusted exponent (`significant-digit-count + exp`) falls outside
+    /// i32 (Item 2) — such a decimal cannot round-trip through decode's i32 cap.
+    pub fn append_decimal(&mut self, negative: bool, digits: &[u8], exp: i32) -> Result<&mut Self, Error> {
+        check_dec_adj_exp(digits, exp)?;
         append_decimal(&mut self.buf, negative, digits, exp);
-        self
+        Ok(self)
     }
     /// Append a decimal parsed from text: `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`.
     pub fn append_decimal_string(&mut self, s: &str) -> Result<&mut Self, Error> {
@@ -390,6 +393,26 @@ fn append_f32(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(&bits.to_be_bytes());
 }
 
+/// Validate that a decimal's adjusted exponent (`significant-digit-count + exp`,
+/// with leading zeros stripped) fits i32 — the bound decode enforces (Item 2),
+/// keeping `exponent()` math, JSON rendering and semantic scaling safe. A zero
+/// coefficient carries no exponent and is always fine.
+fn check_dec_adj_exp(digits: &[u8], exp: i32) -> Result<(), Error> {
+    let mut lead = 0;
+    while lead < digits.len() && digits[lead] == 0 {
+        lead += 1;
+    }
+    let sig_len = digits.len() - lead;
+    if sig_len == 0 {
+        return Ok(());
+    }
+    let adj_exp = sig_len as i128 + exp as i128;
+    if adj_exp > i32::MAX as i128 || adj_exp < i32::MIN as i128 {
+        return Err(Error::InvalidDecimal);
+    }
+    Ok(())
+}
+
 /// Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`. `digits` are
 /// the coefficient's decimal digits (0–9, most-significant first). Canonicalized:
 /// leading/trailing zeros stripped; an all-zero coefficient collapses to zero form.
@@ -443,7 +466,9 @@ fn append_decimal_string(out: &mut Vec<u8>, s: &str) -> Result<(), Error> {
         i += 1;
     }
     let mut digits: Vec<u8> = Vec::new();
-    let mut exp: i32 = 0;
+    // Accumulate in i64 so a hostile exponent (e.g. "1e9999999999") can't overflow
+    // before the i32 bound checks below reject it (Item 2).
+    let mut exp: i64 = 0;
     let mut seen_point = false;
     let mut any = false;
     while i < b.len() {
@@ -474,20 +499,23 @@ fn append_decimal_string(out: &mut Vec<u8>, s: &str) -> Result<(), Error> {
     }
     if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
         i += 1;
-        let mut esign: i32 = 1;
+        let mut esign: i64 = 1;
         if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
             if b[i] == b'-' {
                 esign = -1;
             }
             i += 1;
         }
-        let mut ev: i32 = 0;
+        let mut ev: i64 = 0;
         let mut edig = false;
         while i < b.len() {
             if !b[i].is_ascii_digit() {
                 return Err(Error::InvalidDecimal);
             }
-            ev = ev * 10 + (b[i] - b'0') as i32;
+            ev = ev * 10 + (b[i] - b'0') as i64;
+            if ev > i32::MAX as i64 {
+                return Err(Error::InvalidDecimal); // far beyond any real exponent
+            }
             edig = true;
             i += 1;
         }
@@ -496,7 +524,13 @@ fn append_decimal_string(out: &mut Vec<u8>, s: &str) -> Result<(), Error> {
         }
         exp += esign * ev;
     }
-    append_decimal(out, negative, &digits, exp);
+    if exp > i32::MAX as i64 || exp < i32::MIN as i64 {
+        return Err(Error::InvalidDecimal);
+    }
+    // Reject when the adjusted exponent (significant-digit-count + exp) leaves i32,
+    // mirroring `appendDecimal`'s bound (Item 2).
+    check_dec_adj_exp(&digits, exp as i32)?;
+    append_decimal(out, negative, &digits, exp as i32);
     Ok(())
 }
 
@@ -768,7 +802,11 @@ impl<'a> Reader<'a> {
         } else {
             raw as i128 - (1i128 << (8 * n))
         };
-        if v > i64::MAX as i128 || v < i64::MIN as i128 {
+        // Bound the adjusted exponent to i32 (Item 2): keeps `Decimal.exponent()`
+        // (= adj_exp − digit_count) from underflowing and downstream exponent math
+        // (JSON render / semantic scaling) safe, and is already ~2× any real decimal
+        // Emax. A larger stored exponent is malformed.
+        if v > i32::MAX as i128 || v < i32::MIN as i128 {
             return Err(Error::InvalidType(tb));
         }
         Ok(v as i64)

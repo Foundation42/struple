@@ -201,8 +201,8 @@ fn build_stock_quotes() -> Vec<u8> {
     for r in parse_rows(&load("stock_quotes")) {
         sc.clear();
         sc.append_string(&r[0]);
-        sc.append_decimal(false, &digits_from_str(&r[1]), r[2].parse().unwrap());
-        sc.append_decimal(false, &digits_from_str(&r[3]), r[4].parse().unwrap());
+        sc.append_decimal(false, &digits_from_str(&r[1]), r[2].parse().unwrap()).unwrap();
+        sc.append_decimal(false, &digits_from_str(&r[3]), r[4].parse().unwrap()).unwrap();
         sc.append_f64(f64_from_hex(&r[5]));
         sc.append_int(r[6].parse().unwrap());
         sc.append_timestamp(r[7].parse().unwrap());

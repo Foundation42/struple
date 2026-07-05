@@ -111,8 +111,55 @@ private fun compareNumbers(a: Element, b: Element): Int {
     if (ca != 1) return 0 // both -inf, both +inf, or both NaN
     // Both finite. If both are plain floats, compare as doubles (covers ±0 too).
     if (!isExact(a) && !isExact(b)) return floatOf(a).compareTo(floatOf(b))
-    // At least one exact operand — compare all sides as exact BigDecimals.
-    return toExact(a).compareTo(toExact(b))
+    // At least one exact operand. Compare via exact BigDecimals, but short-circuit
+    // on base-10 order of magnitude FIRST so a decimal with a ~2e9 exponent never
+    // drives BigDecimal.compareTo to align scales / materialize billions of digits
+    // (Item 2 DoS). The exact path only runs when the ooms are close, so it is cheap.
+    if (isExact(a) && isExact(b)) return compareExact(toExact(a), toExact(b))
+    return if (isExact(a)) compareExactToFloat(toExact(a), floatOf(b))
+    else -compareExactToFloat(toExact(b), floatOf(a))
+}
+
+/** Base-10 order-of-magnitude bounds of a nonzero exact BigDecimal `v`: returns
+ *  `[lo, hi)` with `|v| ∈ [10^lo, 10^hi)`, where `lo` is the adjusted exponent
+ *  (place value of the most-significant digit) and `hi = lo + 1`. Cheap — reads only
+ *  precision()/scale(), never materializing `10^exp`. Mirrors b10OomBounds in
+ *  src/semantic.zig (base-10 form). */
+private class Oom(val lo: Long, val hi: Long)
+
+private fun oomOf(v: BigDecimal): Oom {
+    // value = unscaled · 10^(-scale); the p-digit unscaled sits in [10^(p-1), 10^p),
+    // so |v| ∈ [10^(p-1-scale), 10^(p-scale)).
+    val lo = v.precision().toLong() - 1L - v.scale().toLong()
+    return Oom(lo, lo + 1L)
+}
+
+/** Compare two exact (int/big-int/decimal) values by value, short-circuiting on
+ *  magnitude when their orders of magnitude are disjoint. */
+private fun compareExact(a: BigDecimal, b: BigDecimal): Int {
+    val sa = a.signum()
+    val sb = b.signum()
+    if (sa != sb) return sign(sa - sb)
+    if (sa == 0) return 0 // both zero
+    val oa = oomOf(a)
+    val ob = oomOf(b)
+    // Disjoint ooms decide by magnitude (sign flips the direction for negatives).
+    if (oa.hi <= ob.lo) return -sa // |a| < |b|
+    if (ob.hi <= oa.lo) return sa  // |a| > |b|
+    return a.compareTo(b)          // ooms overlap → adjusted exponents equal → exact
+}
+
+/** Compare an exact value `v` to a finite double `f`, short-circuiting when `v`'s
+ *  order of magnitude clears the finite-f64 window `|f| ∈ (10^-324, 10^309)`. */
+private fun compareExactToFloat(v: BigDecimal, f: Double): Int {
+    val sv = v.signum()
+    val sf = if (f == 0.0) 0 else if (f < 0.0) -1 else 1 // f == 0.0 covers ±0.0
+    if (sv != sf) return sign(sv - sf)
+    if (sv == 0) return 0 // both zero
+    val o = oomOf(v)
+    if (o.lo >= 310) return sv    // |v| ≥ 10^310 > any finite double
+    if (o.hi <= -325) return -sv  // |v| < 10^-325 < smallest positive double
+    return v.compareTo(BigDecimal(f)) // within the float window → exact (bounded)
 }
 
 /** A finite number element -> its EXACT value as a BigDecimal. */

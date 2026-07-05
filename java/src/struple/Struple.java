@@ -85,6 +85,15 @@ public final class Struple {
     static final BigInteger I128_MIN = BigInteger.ONE.shiftLeft(127).negate();
 
     /**
+     * The adjusted-exponent range for decimals — bounded to i32 (Item 2). Keeps
+     * {@code Decimal.exponent()} (= adjExp − digitCount) from underflowing and downstream
+     * exponent math (toJson padding, semantic scaling) from overflowing / running for billions of
+     * iterations on a tiny hostile input.
+     */
+    static final BigInteger I32_MAX = BigInteger.valueOf(Integer.MAX_VALUE);
+    static final BigInteger I32_MIN = BigInteger.valueOf(Integer.MIN_VALUE);
+
+    /**
      * Maximum container/JSON nesting depth accepted by the recursive walks (JSON parse, JSON
      * render, semantic compare). Bounds stack use so hostile deeply-nested input is rejected with a
      * {@link StrupleException} instead of overflowing the stack (a {@code StackOverflowError}).
@@ -695,7 +704,11 @@ public final class Struple {
                 }
                 BigInteger v = new BigInteger(1, payload);
                 BigInteger value = positive ? v : v.subtract(BigInteger.ONE.shiftLeft(8 * n));
-                if (value.bitLength() > 63) {
+                // Bound the adjusted exponent to i32 (Item 2): keeps Decimal.exponent()
+                // (= adjExp − digitCount) from underflowing and downstream exponent math from
+                // overflowing, and is already ~2× any real decimal Emax. A larger stored
+                // exponent is malformed (mirrors src/struple.zig readDecExponent).
+                if (value.compareTo(I32_MAX) > 0 || value.compareTo(I32_MIN) < 0) {
                     throw new StrupleException("decimal exponent out of range");
                 }
                 return value.longValueExact();
@@ -888,6 +901,11 @@ public final class Struple {
         // Adjusted exponent: place value of the most-significant digit (0.d…·10^E). Trailing zeros
         // change neither the value nor E, so drop them for storage.
         long adjExp = (long) sigLen + exp;
+        // Bound the adjusted exponent to i32 (Item 2) so it round-trips through decode's i32 cap
+        // and downstream exponent math never overflows (mirrors src/struple.zig appendDecimal).
+        if (adjExp > Integer.MAX_VALUE || adjExp < Integer.MIN_VALUE) {
+            throw new StrupleException("invalid decimal");
+        }
         int end = digits.length;
         while (end > lead && digits[end - 1] == 0) {
             end--;
@@ -920,7 +938,7 @@ public final class Struple {
         }
         int[] digits = new int[n];
         int dlen = 0;
-        int exp = 0;
+        long exp = 0; // long so the parse can't overflow before the i32 bound check (Item 2)
         boolean seenPoint = false;
         boolean anyDigit = false;
         for (; i < n; i++) {
@@ -956,7 +974,7 @@ public final class Struple {
                 }
                 i++;
             }
-            int ev = 0;
+            long ev = 0;
             boolean edig = false;
             for (; i < n; i++) {
                 char c = s.charAt(i);
@@ -964,14 +982,21 @@ public final class Struple {
                     throw new StrupleException("invalid decimal");
                 }
                 ev = ev * 10 + (c - '0');
+                if (ev > Integer.MAX_VALUE) { // far beyond any real exponent (Item 2)
+                    throw new StrupleException("invalid decimal");
+                }
                 edig = true;
             }
             if (!edig) {
                 throw new StrupleException("invalid decimal");
             }
-            exp += esign * ev;
+            exp += (long) esign * ev;
         }
-        appendDecimalImpl(out, negative, Arrays.copyOf(digits, dlen), exp);
+        // Reject an out-of-i32 exponent before it reaches the encoder (Item 2).
+        if (exp > Integer.MAX_VALUE || exp < Integer.MIN_VALUE) {
+            throw new StrupleException("invalid decimal");
+        }
+        appendDecimalImpl(out, negative, Arrays.copyOf(digits, dlen), (int) exp);
     }
 
     /** Decimal digits (0–9, most-significant first) of a non-negative {@link BigInteger}. */

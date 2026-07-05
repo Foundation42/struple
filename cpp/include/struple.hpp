@@ -179,8 +179,13 @@ inline void append_decimal(Bytes& b, bool neg, const uint8_t* digits, size_t dle
     }
 
     // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
+    // Computed wide (128-bit) then bounded to i32 so it round-trips through decode's
+    // i32 cap and downstream exponent math never overflows (Item 2).
+    __int128 adj_exp_wide = (__int128)(int64_t)slen + exp;
+    if (adj_exp_wide > INT32_MAX || adj_exp_wide < INT32_MIN)
+        throw Error("struple: decimal exponent out of range");
+    int64_t adj_exp = int64_t(adj_exp_wide);
     // Trailing zeros change neither the value nor E, so drop them for storage.
-    int64_t adj_exp = int64_t(slen) + exp;
     size_t end = slen;
     while (end > 0 && sig[end - 1] == 0) end--;
 
@@ -236,11 +241,17 @@ inline void append_decimal_string(Bytes& b, std::string_view s) {
         for (; i < s.size(); i++) {
             if (s[i] < '0' || s[i] > '9') throw Error("struple: invalid decimal");
             ev = ev * 10 + (s[i] - '0');
+            // Cap the running exponent so the accumulator can't overflow i64 (Item 2);
+            // an exponent magnitude past i32 is far beyond any real decimal.
+            if (ev > int64_t(INT32_MAX)) throw Error("struple: invalid decimal");
             edig = true;
         }
         if (!edig) throw Error("struple: invalid decimal");
         exp += esign * ev;
     }
+    // Reject an exponent magnitude outside i32 before the (already i32-bounded)
+    // adjusted-exponent check in append_decimal (Item 2).
+    if (exp > int64_t(INT32_MAX) || exp < int64_t(INT32_MIN)) throw Error("struple: invalid decimal");
     append_decimal(b, neg, digits.data(), digits.size(), exp);
 }
 
@@ -653,17 +664,27 @@ private:
             // n <= 8 always here for any realistic exponent; reject wider as out of i64.
             if (n > 8) throw Error("struple: decimal exponent out of range");
             uint64_t raw = detail::be_to_u64(tmp, n);
+            int64_t value;
             if (positive) {
                 if (raw > uint64_t(INT64_MAX)) throw Error("struple: decimal exponent out of range");
-                return int64_t(raw);
-            }
-            // negative excess form over n bytes: value = raw - 2^(8n)
-            if (n == 8) {
+                value = int64_t(raw);
+            } else if (n == 8) {
+                // negative excess form over 8 bytes: value = raw - 2^64
                 uint64_t m = uint64_t(0) - raw;  // magnitude
                 if (m > uint64_t(INT64_MAX) + 1) throw Error("struple: decimal exponent out of range");
-                return (m == uint64_t(INT64_MAX) + 1) ? INT64_MIN : -int64_t(m);
+                value = (m == uint64_t(INT64_MAX) + 1) ? INT64_MIN : -int64_t(m);
+            } else {
+                // negative excess form over n<8 bytes: value = raw - 2^(8n)
+                value = -int64_t((uint64_t(1) << (8 * n)) - raw);
             }
-            return -int64_t((uint64_t(1) << (8 * n)) - raw);
+            // Bound the adjusted exponent to i32 (Item 2): keeps `exponent()`
+            // (= adj_exp − digitCount) from underflowing i64 and downstream exponent
+            // math (toJson pad, semantic scaling) from overflowing. A larger stored
+            // exponent is malformed — rejecting it here also stops the decode/skip
+            // DoS where a 2^31-scaled magnitude would be materialized.
+            if (value > INT32_MAX || value < INT32_MIN)
+                throw Error("struple: decimal exponent out of range");
+            return value;
         }
         throw Error("struple: invalid decimal exponent");
     }
@@ -1173,8 +1194,30 @@ inline B10 sem_num_to_b10(const Element& e) {
     return {e.big_negative ? -1 : 1, sem_dec_digits_to_mag(e.data), e.dec_exp};
 }
 
+// Bounds on the base-10 order of magnitude of a nonzero `mag · 10^exp10` value:
+// returns {lo, hi} with `|value| ∈ [10^lo, 10^hi)`. Uses byte-length bounds on the
+// base-256 magnitude (256^(n-1) ≥ 10^(2(n-1)), 256^n < 10^(3n)). Lets the
+// comparators reject a far-apart pair without materializing a magnitude scaled by
+// an i32-sized exponent (Item 2 DoS short-circuit).
+struct B10Bounds {
+    int64_t lo, hi;
+};
+inline B10Bounds sem_b10_oom_bounds(const B10& v) {
+    size_t s = 0;
+    while (s < v.mag.size() && v.mag[s] == 0) s++;
+    int64_t na = int64_t(v.mag.size() - s);  // ≥ 1 for a nonzero value
+    return {v.exp10 + 2 * na - 2, v.exp10 + 3 * na};
+}
+
 // Compare two same-sign, nonzero base-10 magnitudes (mag · 10^exp10), exactly.
 inline int sem_cmp_b10_mag(const B10& a, const B10& b) {
+    // If the orders of magnitude are disjoint, decide by them — no scaling. When
+    // they overlap, |a.exp10 − b.exp10| is bounded by the digit counts, so the exact
+    // scaling below is cheap (never proportional to the raw exponent) (Item 2).
+    B10Bounds ba = sem_b10_oom_bounds(a);
+    B10Bounds bb = sem_b10_oom_bounds(b);
+    if (ba.hi <= bb.lo) return -1;
+    if (bb.hi <= ba.lo) return 1;
     int64_t e = a.exp10 < b.exp10 ? a.exp10 : b.exp10;
     Bytes sa = sem_mul_pow10(a.mag, size_t(a.exp10 - e));
     Bytes sb = sem_mul_pow10(b.mag, size_t(b.exp10 - e));
@@ -1206,10 +1249,21 @@ inline int sem_cmp_b10_float(const B10& v, double f) {
     int sf = sem_sign(f);
     if (v.sign != sf) return (v.sign > sf) - (v.sign < sf);
     if (v.sign == 0) return 0;  // both zero
-    uint64_t mant;
-    int exp;
-    sem_decompose(std::fabs(f), mant, exp);
-    int c = sem_cmp_b10_mag_to_float(v.mag, v.exp10, mant, exp);
+    // Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If the exact value's order
+    // of magnitude is clear of that window, decide without scaling — this is what
+    // stops a huge decimal exponent from driving a 2^31-iteration scale (Item 2).
+    B10Bounds bnd = sem_b10_oom_bounds(v);
+    int c;
+    if (bnd.lo >= 310) {
+        c = 1;
+    } else if (bnd.hi <= -325) {
+        c = -1;
+    } else {
+        uint64_t mant;
+        int exp;
+        sem_decompose(std::fabs(f), mant, exp);
+        c = sem_cmp_b10_mag_to_float(v.mag, v.exp10, mant, exp);
+    }
     return v.sign < 0 ? -c : c;
 }
 

@@ -346,8 +346,29 @@ fn compare_with_decimal(a: &Element, b: &Element) -> Ordering {
     }
 }
 
+/// Bounds on the base-10 order of magnitude of a nonzero `mag · 10^exp10` value:
+/// returns `(lo, hi)` with `|value| ∈ [10^lo, 10^hi)`. Uses byte-length bounds on
+/// the base-256 magnitude (`256^(n-1) ≥ 10^(2(n-1))`, `256^n < 10^(3n)`). Lets the
+/// comparators decide a far-apart pair without materializing a magnitude scaled by
+/// an i32-sized exponent (Item 2 DoS short-circuit).
+fn b10_oom_bounds(v: &B10) -> (i64, i64) {
+    let na = trim(&v.mag).len() as i64; // ≥ 1 for a nonzero value
+    (v.exp10 + 2 * na - 2, v.exp10 + 3 * na)
+}
+
 /// Compare two same-sign, nonzero base-10 magnitudes (`mag · 10^exp10`), exactly.
 fn compare_b10_mag(a: &B10, b: &B10) -> Ordering {
+    // If the orders of magnitude are disjoint, decide by them — no scaling. When
+    // they overlap, `|a.exp10 − b.exp10|` is bounded by the digit counts, so the
+    // exact scaling below is cheap (never proportional to the raw exponent).
+    let (a_lo, a_hi) = b10_oom_bounds(a);
+    let (b_lo, b_hi) = b10_oom_bounds(b);
+    if a_hi <= b_lo {
+        return Ordering::Less;
+    }
+    if b_hi <= a_lo {
+        return Ordering::Greater;
+    }
     let e = a.exp10.min(b.exp10);
     let sa = mul_pow10(&a.mag, (a.exp10 - e) as usize);
     let sb = mul_pow10(&b.mag, (b.exp10 - e) as usize);
@@ -362,8 +383,18 @@ fn compare_b10_float(v: &B10, f: f64) -> Ordering {
     if v.sign == 0 {
         return Ordering::Equal; // both zero
     }
-    let (mant, exp) = decompose(f.abs());
-    let c = compare_b10_mag_to_float(&v.mag, v.exp10, mant, exp);
+    // Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If the exact value's
+    // order of magnitude is clear of that window, decide without scaling — this is
+    // what stops a huge decimal exponent from driving a 2^31-iteration scale (Item 2).
+    let (lo, hi) = b10_oom_bounds(v);
+    let c = if lo >= 310 {
+        Ordering::Greater
+    } else if hi <= -325 {
+        Ordering::Less
+    } else {
+        let (mant, exp) = decompose(f.abs());
+        compare_b10_mag_to_float(&v.mag, v.exp10, mant, exp)
+    };
     if v.sign < 0 {
         c.reverse()
     } else {

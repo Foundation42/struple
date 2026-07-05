@@ -54,8 +54,11 @@ void struple_append_f64(struple_writer *w, double v);
 /* Append an arbitrary-precision decimal `(-1)^negative · C · 10^exp`, where
  * `digits` are the coefficient C's decimal digits (each 0–9, most-significant
  * first). Canonicalized on the way in: leading/trailing zeros are stripped and
- * any all-zero coefficient collapses to the single zero form. */
-void struple_append_decimal(struple_writer *w, bool negative, const uint8_t *digits, size_t ndigits, int32_t exp);
+ * any all-zero coefficient collapses to the single zero form. Returns 0 on
+ * success, -1 (writing nothing) when the adjusted exponent `significant-digit-
+ * count + exp` falls outside int32 — bounding it keeps the wire value round-
+ * trippable through decode's i32 cap and downstream exponent math overflow-free. */
+int struple_append_decimal(struple_writer *w, bool negative, const uint8_t *digits, size_t ndigits, int32_t exp);
 /* Append a decimal parsed from text:
  * `[+/-] digits [. digits] [ (e|E) [+/-] digits ]`. Returns 0 on success, -1 on
  * a malformed literal. */

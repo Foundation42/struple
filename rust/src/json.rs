@@ -131,7 +131,9 @@ fn render_uuid(u: &[u8; 16]) -> String {
     s
 }
 
-/// Render a decimal as an exact JSON number literal (plain notation, no exponent).
+/// Render a decimal as an exact JSON number literal. Uses plain notation, falling
+/// back to scientific (`d1[.d2…dk]e±E`) once plain notation would pad more than 40
+/// zeros — so a huge (i32-bounded) exponent can't emit gigabytes (Item 2).
 fn render_decimal(out: &mut String, d: &Decimal) {
     if d.is_zero() {
         out.push('0');
@@ -144,6 +146,36 @@ fn render_decimal(out: &mut String, d: &Decimal) {
     if d.negative {
         out.push('-');
     }
+
+    // Plain notation would pad this many zeros; past the threshold, switch to
+    // scientific notation so a huge exponent can't drive an unbounded render.
+    const MAX_PLAIN_PAD: i64 = 40;
+    let pad: i64 = if exp10 >= 0 {
+        exp10
+    } else {
+        let pp = k + exp10;
+        if pp > 0 {
+            0
+        } else {
+            -pp
+        }
+    };
+    if pad > MAX_PLAIN_PAD {
+        // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+        out.push((b'0' + digs[0]) as char);
+        if digs.len() > 1 {
+            out.push('.');
+            for dd in &digs[1..] {
+                out.push((b'0' + dd) as char);
+            }
+        }
+        let sci_exp = exp10 + k - 1;
+        out.push('e');
+        out.push(if sci_exp >= 0 { '+' } else { '-' });
+        out.push_str(&sci_exp.unsigned_abs().to_string());
+        return;
+    }
+
     if exp10 >= 0 {
         for dd in &digs {
             out.push((b'0' + dd) as char);

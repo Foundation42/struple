@@ -209,7 +209,11 @@ public final class Json {
         sb.append('}');
     }
 
-    /** Render a decimal as an exact JSON number literal (plain notation, no exponent). */
+    /**
+     * Render a decimal as an exact JSON number literal — plain notation, or scientific notation for
+     * an extreme exponent so a huge (i32-bounded) exponent can't emit gigabytes (Item 2). Mirrors
+     * src/json.zig writeDecimal.
+     */
     private static void renderDecimal(StringBuilder sb, Struple.Decimal d) {
         if (d.isZero()) {
             sb.append('0');
@@ -220,6 +224,31 @@ public final class Json {
         long exp10 = d.exponent();
         if (d.negative) {
             sb.append('-');
+        }
+        // Plain notation would pad this many zeros; past the threshold, render in scientific
+        // notation so a huge (i32-bounded) exponent can't emit gigabytes.
+        final long maxPlainPad = 40;
+        long pad;
+        if (exp10 >= 0) {
+            pad = exp10;
+        } else {
+            long pp = k + exp10;
+            pad = pp > 0 ? 0 : -pp;
+        }
+        if (pad > maxPlainPad) {
+            // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+            sb.append((char) ('0' + digs[0]));
+            if (digs.length > 1) {
+                sb.append('.');
+                for (int i = 1; i < digs.length; i++) {
+                    sb.append((char) ('0' + digs[i]));
+                }
+            }
+            long sciExp = exp10 + k - 1;
+            sb.append('e');
+            sb.append(sciExp >= 0 ? '+' : '-');
+            sb.append(Long.toString(Math.abs(sciExp)));
+            return;
         }
         if (exp10 >= 0) {
             for (int dd : digs) {

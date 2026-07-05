@@ -344,8 +344,25 @@ fn compareWithDecimal(allocator: Allocator, a: Element, b: Element) SemanticErro
     return (try compareB10Float(allocator, vb, floatVal(a))).invert();
 }
 
+/// Bounds on the base-10 order of magnitude of a nonzero `mag · 10^exp10` value:
+/// returns `{lo, hi}` with `|value| ∈ [10^lo, 10^hi)`. Uses byte-length bounds on
+/// the base-256 magnitude (`256^(n-1) ≥ 10^(2(n-1))`, `256^n < 10^(3n)`). Lets the
+/// comparators reject a far-apart pair without materializing a magnitude scaled by
+/// an i32-sized exponent (Item 2 DoS short-circuit).
+fn b10OomBounds(v: B10) struct { lo: i64, hi: i64 } {
+    const na: i64 = @intCast(trimLeadingZeros(v.mag).len); // ≥ 1 for a nonzero value
+    return .{ .lo = v.exp10 + 2 * na - 2, .hi = v.exp10 + 3 * na };
+}
+
 /// Compare two same-sign, nonzero base-10 magnitudes (`mag · 10^exp10`), exactly.
 fn compareB10Mag(allocator: Allocator, a: B10, b: B10) SemanticError!Order {
+    // If the orders of magnitude are disjoint, decide by them — no scaling. When
+    // they overlap, `|a.exp10 − b.exp10|` is bounded by the digit counts, so the
+    // exact scaling below is cheap (never proportional to the raw exponent).
+    const ba = b10OomBounds(a);
+    const bb = b10OomBounds(b);
+    if (ba.hi <= bb.lo) return .lt;
+    if (bb.hi <= ba.lo) return .gt;
     const e = @min(a.exp10, b.exp10);
     const sa = try mulPow10(allocator, a.mag, @intCast(a.exp10 - e));
     defer allocator.free(sa);
@@ -358,8 +375,18 @@ fn compareB10Float(allocator: Allocator, v: B10, f: f64) SemanticError!Order {
     const sf = signRank(f);
     if (v.sign != sf) return std.math.order(v.sign, sf);
     if (v.sign == 0) return .eq; // both zero
-    const d = decompose(@abs(f));
-    const c = try compareB10MagToFloat(allocator, v.mag, v.exp10, d.mant, d.exp);
+    // Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If the exact value's
+    // order of magnitude is clear of that window, decide without scaling — this is
+    // what stops a huge decimal exponent from driving a 2^31-iteration scale (Item 2).
+    const bnd = b10OomBounds(v);
+    const c: Order = if (bnd.lo >= 310)
+        .gt
+    else if (bnd.hi <= -325)
+        .lt
+    else blk: {
+        const d = decompose(@abs(f));
+        break :blk try compareB10MagToFloat(allocator, v.mag, v.exp10, d.mant, d.exp);
+    };
     return if (v.sign < 0) c.invert() else c;
 }
 

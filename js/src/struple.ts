@@ -41,6 +41,14 @@ const SIGN64 = 0x8000000000000000n;
 // The fixed integer slots span the i128 range; values beyond use the big-int codes.
 const I128_MAX = (1n << 127n) - 1n;
 const I128_MIN = -(1n << 127n);
+// A decimal's adjusted exponent is bounded to i32 (Item 2). This keeps
+// exponent() (= adj_exp − digitCount) from over/underflowing and stops downstream
+// exponent math (render padding, semantic scaling) from being driven to
+// gigabyte-sized output / 2^31-iteration loops from a tiny input.
+const DEC_EXP_MAX = 2147483647; // maxInt(i32)
+const DEC_EXP_MIN = -2147483648; // minInt(i32)
+const DEC_EXP_MAX_BIG = 2147483647n;
+const DEC_EXP_MIN_BIG = -2147483648n;
 
 /** Maximum container/JSON nesting depth accepted by the recursive walks (JSON
  *  parse, JSON render, semantic compare). Bounds stack use so hostile
@@ -381,7 +389,11 @@ export class Reader {
     let raw = 0n;
     for (const b of payload) raw = (raw << 8n) | BigInt(comp(b));
     const v = positive ? raw : raw - (1n << BigInt(8 * n));
-    if (v > 9007199254740991n || v < -9007199254740991n)
+    // Bound the adjusted exponent to i32 (Item 2): keeps exponent() (= adj_exp −
+    // digitCount) from underflowing and downstream exponent math (render padding,
+    // semantic scaling) from being driven to gigabyte / 2^31-iteration sizes. A
+    // larger stored exponent is malformed.
+    if (v > DEC_EXP_MAX_BIG || v < DEC_EXP_MIN_BIG)
       throw new Error("struple: decimal exponent out of range");
     return Number(v);
   }
@@ -807,16 +819,36 @@ function exactToB10(e: Element): B10 {
   return { sign: d.negative ? -1 : 1, mag, exp10: d.exp };
 }
 
+// Bounds on the base-10 order of magnitude of a nonzero `mag · 10^exp10` value:
+// {lo, hi} with |value| ∈ [10^lo, 10^hi). Uses byte-length bounds on the base-256
+// magnitude (256^(n-1) ≥ 10^(2(n-1)), 256^n < 10^(3n)). Lets the comparators reject
+// a far-apart pair without materializing a magnitude scaled by an i32-sized
+// exponent (Item 2 DoS short-circuit).
+function b10OomBounds(v: B10): { lo: number; hi: number } {
+  const n = byteLenBig(v.mag); // ≥ 1 for a nonzero value
+  return { lo: v.exp10 + 2 * n - 2, hi: v.exp10 + 3 * n };
+}
+
 // Exact comparison of two base-10 (int/decimal) values via BigInt cross-scaling.
 function compareExact(a: Element, b: Element): number {
   const va = exactToB10(a);
   const vb = exactToB10(b);
   if (va.sign !== vb.sign) return cmp3(va.sign, vb.sign);
   if (va.sign === 0) return 0;
-  const e = Math.min(va.exp10, vb.exp10);
-  const sa = va.mag * 10n ** BigInt(va.exp10 - e);
-  const sb = vb.mag * 10n ** BigInt(vb.exp10 - e);
-  const c = cmp3(sa, sb);
+  // Short-circuit on order of magnitude before any 10^exp scaling: disjoint bounds
+  // decide by magnitude outright; only when they overlap is the exact scaling below
+  // cheap (|exp10 difference| is then bounded by the digit counts) (Item 2).
+  const ba = b10OomBounds(va);
+  const bb = b10OomBounds(vb);
+  let c: number;
+  if (ba.hi <= bb.lo) c = -1;
+  else if (bb.hi <= ba.lo) c = 1;
+  else {
+    const e = Math.min(va.exp10, vb.exp10);
+    const sa = va.mag * 10n ** BigInt(va.exp10 - e);
+    const sb = vb.mag * 10n ** BigInt(vb.exp10 - e);
+    c = cmp3(sa, sb);
+  }
   return va.sign < 0 ? -c : c;
 }
 
@@ -826,14 +858,23 @@ function compareExactFloat(e: Element, f: number): number {
   const signF = f > 0 ? 1 : f < 0 ? -1 : 0;
   if (v.sign !== signF) return cmp3(v.sign, signF);
   if (v.sign === 0) return 0; // both zero (-0 included)
-  const { mant, exp } = decomposeDouble(Math.abs(f)); // f = ±mant·2^exp
-  // Compare mag·10^exp10 to mant·2^exp, scaling both to integers.
-  // 10^exp10 = 2^exp10 · 5^exp10. Clear the negative powers with common factors.
-  const aPow2 = Math.max(0, Math.max(-v.exp10, -exp)); // common 2^ multiplier
-  const bPow5 = Math.max(0, -v.exp10); // common 5^ multiplier
-  const lhs = v.mag * 5n ** BigInt(v.exp10 + bPow5) * 2n ** BigInt(v.exp10 + aPow2);
-  const rhs = mant * 5n ** BigInt(bPow5) * 2n ** BigInt(exp + aPow2);
-  const c = cmp3(lhs, rhs);
+  // Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If the exact value's order
+  // of magnitude is clear of that window, decide without scaling — this stops a huge
+  // decimal exponent from driving a 2^31-iteration scale (Item 2).
+  const bnd = b10OomBounds(v);
+  let c: number;
+  if (bnd.lo >= 310) c = 1;
+  else if (bnd.hi <= -325) c = -1;
+  else {
+    const { mant, exp } = decomposeDouble(Math.abs(f)); // f = ±mant·2^exp
+    // Compare mag·10^exp10 to mant·2^exp, scaling both to integers.
+    // 10^exp10 = 2^exp10 · 5^exp10. Clear the negative powers with common factors.
+    const aPow2 = Math.max(0, Math.max(-v.exp10, -exp)); // common 2^ multiplier
+    const bPow5 = Math.max(0, -v.exp10); // common 5^ multiplier
+    const lhs = v.mag * 5n ** BigInt(v.exp10 + bPow5) * 2n ** BigInt(v.exp10 + aPow2);
+    const rhs = mant * 5n ** BigInt(bPow5) * 2n ** BigInt(exp + aPow2);
+    c = cmp3(lhs, rhs);
+  }
   return v.sign < 0 ? -c : c;
 }
 
@@ -994,6 +1035,10 @@ function appendDecimalInto(buf: number[], negative: boolean, digits: number[], e
   // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
   // Trailing zeros (already stripped) change neither the value nor E.
   const adjExp = digits.length - lead + exp; // == sig.length (post-trailing-strip) + (exp + trailing)
+  // Bound the adjusted exponent to i32 so it round-trips through decode's i32 cap
+  // and downstream exponent math never over/underflows (Item 2).
+  if (adjExp > DEC_EXP_MAX || adjExp < DEC_EXP_MIN)
+    throw new Error("struple: invalid decimal");
   // Order-bearing tail: [E as a struple int][base-100 digits][terminator].
   const tail: number[] = [];
   appendInteger(tail, BigInt(adjExp));
@@ -1046,22 +1091,40 @@ function appendDecimalStringInto(buf: number[], s: string): void {
     for (; i < s.length; i++) {
       if (s[i] < "0" || s[i] > "9") throw new Error("struple: invalid decimal");
       ev = ev * 10 + (s.charCodeAt(i) - 48);
+      // Reject an exponent magnitude beyond i32 before it can lose precision — far
+      // beyond any real exponent, and stops "1e9999999999" overflowing (Item 2).
+      if (ev > DEC_EXP_MAX) throw new Error("struple: invalid decimal");
       edig = true;
     }
     if (!edig) throw new Error("struple: invalid decimal");
     exp += esign * ev;
   }
+  // Bound the exponent magnitude to i32; the adjusted exponent is re-checked in
+  // appendDecimalInto against the same bound (Item 2).
+  if (exp > DEC_EXP_MAX || exp < DEC_EXP_MIN) throw new Error("struple: invalid decimal");
   appendDecimalInto(buf, negative, digits, exp);
 }
 
-// Render a decoded decimal as an exact plain decimal literal (no exponent).
+// Render a decoded decimal as an exact decimal literal: plain notation for normal
+// scales, with a scientific fallback past a 40-zero pad threshold so a huge
+// (i32-bounded) exponent can't emit gigabytes of zeros (Item 2). Kept byte-for-byte
+// identical to json.ts renderDecimal.
 function decimalToPlainString(d: { negative: boolean; digits: number[]; exp: number }): string {
   if (d.digits.length === 0) return "0";
   const k = d.digits.length;
+  const exp10 = d.exp; // value = C · 10^exp10
   const sign = d.negative ? "-" : "";
   const ds = d.digits.map((x) => String(x)).join("");
-  if (d.exp >= 0) return sign + ds + "0".repeat(d.exp);
-  const pointPos = k + d.exp; // number of integer-part digits
+  // Zeros plain notation would emit; past the threshold, switch to scientific.
+  const pad = exp10 >= 0 ? exp10 : k + exp10 > 0 ? 0 : -(k + exp10);
+  if (pad > 40) {
+    // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+    const sciExp = exp10 + k - 1;
+    const mantissa = k > 1 ? ds[0] + "." + ds.slice(1) : ds;
+    return sign + mantissa + "e" + (sciExp >= 0 ? "+" : "-") + Math.abs(sciExp);
+  }
+  if (exp10 >= 0) return sign + ds + "0".repeat(exp10);
+  const pointPos = k + exp10; // number of integer-part digits
   if (pointPos > 0) return sign + ds.slice(0, pointPos) + "." + ds.slice(pointPos);
   return sign + "0." + "0".repeat(-pointPos) + ds;
 }

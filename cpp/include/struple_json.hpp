@@ -373,12 +373,39 @@ inline void render(std::string& out, const Element& e, size_t depth) {
         case Kind::F32: render_float(out, double(e.f32)); break;
         case Kind::F64: render_float(out, e.f64); break;
         case Kind::Decimal: {
-            // Exact plain decimal literal (no exponent), one-way.
+            // Exact decimal literal, one-way: plain notation up to a padding
+            // threshold, then scientific so a huge (i32-bounded) exponent can't
+            // emit gigabytes of zeros (Item 2).
             if (e.decIsZero()) { out += '0'; break; }
             const Bytes& digs = e.data;  // 0–9 values, MSD first
             int64_t k = int64_t(digs.size());
             int64_t exp10 = e.dec_exp;  // value = C · 10^exp10
             if (e.big_negative) out += '-';
+
+            // Plain notation would pad this many zeros; past the threshold, switch
+            // to scientific (mirrors the Zig reference writeDecimal).
+            const int64_t max_plain_pad = 40;
+            int64_t pad;
+            if (exp10 >= 0) {
+                pad = exp10;
+            } else {
+                int64_t pp = k + exp10;
+                pad = pp > 0 ? 0 : -pp;
+            }
+            if (pad > max_plain_pad) {
+                // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+                out += char('0' + digs[0]);
+                if (digs.size() > 1) {
+                    out += '.';
+                    for (size_t i = 1; i < digs.size(); i++) out += char('0' + digs[i]);
+                }
+                int64_t sci_exp = exp10 + k - 1;
+                out += 'e';
+                out += (sci_exp >= 0) ? '+' : '-';
+                out += std::to_string(sci_exp >= 0 ? sci_exp : -sci_exp);
+                break;
+            }
+
             if (exp10 >= 0) {
                 for (uint8_t d : digs) out += char('0' + d);
                 for (int64_t z = 0; z < exp10; z++) out += '0';

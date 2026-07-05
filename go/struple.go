@@ -87,6 +87,17 @@ var (
 // all 12 ports; no real value nests anywhere near this deep.
 const maxDepth = 256
 
+// Decimal adjusted-exponent bounds (Item 2). The adjusted exponent (= the power
+// of ten of the most-significant digit) is capped to the signed 32-bit range so
+// it round-trips through decode, the decimal-string parser can't overflow while
+// accumulating it, and downstream exponent math — Exponent() = AdjExp − digitCount,
+// toJson padding, semantic scaling — can never blow up. This is ~2× any real
+// decimal Emax; a larger value is malformed.
+const (
+	decMaxAdjExp int64 = 2147483647  // math.MaxInt32
+	decMinAdjExp int64 = -2147483648 // math.MinInt32
+)
+
 // Kind identifies the type of a decoded Element.
 type Kind int
 
@@ -300,7 +311,7 @@ func (w *Writer) AppendF64(v float64) {
 // digits (each 0..9, most-significant first). Canonicalized on the way in:
 // leading/trailing zeros are stripped and any all-zero coefficient collapses to
 // the single zero form.
-func (w *Writer) AppendDecimal(negative bool, digits []byte, exp int) {
+func (w *Writer) AppendDecimal(negative bool, digits []byte, exp int) error {
 	lead := 0
 	for lead < len(digits) && digits[lead] == 0 {
 		lead++
@@ -310,11 +321,17 @@ func (w *Writer) AppendDecimal(negative bool, digits []byte, exp int) {
 	w.buf = append(w.buf, tcDecimal)
 	if len(sig) == 0 { // canonical zero — one form regardless of scale
 		w.buf = append(w.buf, decSignZero)
-		return
+		return nil
 	}
 
 	// Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
 	adjExp := int64(len(sig)) + int64(exp)
+	// Bound the adjusted exponent to i32 (Item 2) so it round-trips through
+	// decode's cap and downstream exponent math never overflows. A larger value
+	// is rejected here rather than encoded.
+	if adjExp > decMaxAdjExp || adjExp < decMinAdjExp {
+		return ErrInvalidDecimal
+	}
 	end := len(sig)
 	for end > 0 && sig[end-1] == 0 {
 		end--
@@ -345,6 +362,7 @@ func (w *Writer) AppendDecimal(negative bool, digits []byte, exp int) {
 			w.buf[i] = ^w.buf[i]
 		}
 	}
+	return nil
 }
 
 // AppendDecimalString appends a decimal parsed from text:
@@ -357,7 +375,7 @@ func (w *Writer) AppendDecimalString(s string) error {
 		i++
 	}
 	var digits []byte
-	exp := 0
+	var exp int64 // i64 so the parse can't overflow before the i32 bound check
 	seenPoint := false
 	any := false
 	for ; i < len(s); i++ {
@@ -386,20 +404,23 @@ func (w *Writer) AppendDecimalString(s string) error {
 	}
 	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
 		i++
-		esign := 1
+		var esign int64 = 1
 		if i < len(s) && (s[i] == '+' || s[i] == '-') {
 			if s[i] == '-' {
 				esign = -1
 			}
 			i++
 		}
-		ev := 0
+		var ev int64
 		edig := false
 		for ; i < len(s); i++ {
 			if s[i] < '0' || s[i] > '9' {
 				return ErrInvalidDecimal
 			}
-			ev = ev*10 + int(s[i]-'0')
+			ev = ev*10 + int64(s[i]-'0')
+			if ev > decMaxAdjExp { // far beyond any real exponent
+				return ErrInvalidDecimal
+			}
 			edig = true
 		}
 		if !edig {
@@ -407,8 +428,12 @@ func (w *Writer) AppendDecimalString(s string) error {
 		}
 		exp += esign * ev
 	}
-	w.AppendDecimal(negative, digits, exp)
-	return nil
+	// Bound the exponent magnitude to i32; AppendDecimal additionally bounds the
+	// adjusted exponent (significant-digit count + exp).
+	if exp > decMaxAdjExp || exp < decMinAdjExp {
+		return ErrInvalidDecimal
+	}
+	return w.AppendDecimal(negative, digits, int(exp))
 }
 
 // AppendTimestamp appends a timestamp: microseconds since the Unix epoch, UTC.
@@ -788,10 +813,17 @@ func (r *Reader) readDecExponent(complement bool) (int64, error) {
 			return 0, ErrInvalidType
 		}
 		v := decodeIntPayload(positive, tmp)
+		// Bound the adjusted exponent to i32 (Item 2): keeps Decimal.Exponent()
+		// (= AdjExp − digitCount) from underflowing i64 and downstream exponent
+		// math from overflowing. A larger stored exponent is malformed.
 		if !v.IsInt64() {
 			return 0, ErrInvalidType
 		}
-		return v.Int64(), nil
+		iv := v.Int64()
+		if iv > decMaxAdjExp || iv < decMinAdjExp {
+			return 0, ErrInvalidType
+		}
+		return iv, nil
 	}
 	return 0, ErrInvalidType
 }
@@ -872,7 +904,7 @@ func reencode(w *Writer, e Element) error {
 	case KindFloat64:
 		w.AppendF64(e.Float64)
 	case KindDecimal:
-		reencodeDecimal(w, e.Decimal)
+		return reencodeDecimal(w, e.Decimal)
 	case KindTimestamp:
 		w.AppendTimestamp(e.Timestamp)
 	case KindUUID:
@@ -917,12 +949,11 @@ func containerTypeCode(k Kind) byte {
 	}
 }
 
-func reencodeDecimal(w *Writer, d Decimal) {
+func reencodeDecimal(w *Writer, d Decimal) error {
 	if d.IsZero() {
-		w.AppendDecimal(false, nil, 0)
-		return
+		return w.AppendDecimal(false, nil, 0)
 	}
-	w.AppendDecimal(d.Negative, d.CoefficientDigits(), int(d.Exponent()))
+	return w.AppendDecimal(d.Negative, d.CoefficientDigits(), int(d.Exponent()))
 }
 
 // ---------------------------------------------------------------------------

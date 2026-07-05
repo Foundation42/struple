@@ -15,7 +15,7 @@ import { Writer, Reader, transcode, fromJson, toJson, semanticOrder } from "../s
 
 const here = dirname(fileURLToPath(import.meta.url));
 const corpusPath = join(here, "..", "..", "conformance", "vectors.json");
-type Vector = { json?: string; build?: any; bytes: string };
+type Vector = { json?: string; build?: any; bytes: string; to_json?: string };
 const vectors = JSON.parse(readFileSync(corpusPath, "utf8")) as Vector[];
 
 const semanticPath = join(here, "..", "..", "conformance", "semantic_vectors.json");
@@ -89,6 +89,11 @@ for (const v of vectors) {
   } else {
     test(`build   ${label}`, () => assert.equal(toHex(buildBytes(v.build)), v.bytes));
     test(`transcode ${label}`, () => assert.equal(toHex(transcode(fromHex(v.bytes))), v.bytes));
+    // Build vectors that carry a one-way `to_json` field additionally pin the
+    // plain + scientific decimal rendering cross-language (Item 2).
+    if (v.to_json !== undefined) {
+      test(`to_json ${label}`, () => assert.equal(toJson(fromHex(v.bytes)), v.to_json));
+    }
   }
 }
 

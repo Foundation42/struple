@@ -179,6 +179,26 @@ fn build_transcode() {
     }
 }
 
+// Build vectors may carry a one-way `to_json` field pinning the canonical JSON
+// rendering (plain + scientific decimal notation) cross-language (Item 2). Where
+// present, assert `to_json(bytes) == to_json`.
+#[test]
+fn build_to_json() {
+    let mut checked = 0usize;
+    for v in corpus() {
+        if field(&v, "build").is_none() {
+            continue;
+        }
+        if let Some(want) = field(&v, "to_json") {
+            let bytes = from_hex(as_str(field(&v, "bytes").unwrap()));
+            assert_eq!(&to_json(&bytes).unwrap(), as_str(want), "to_json {}", to_hex(&bytes));
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no build vectors carried a `to_json` field");
+    println!("build to_json: {checked} vectors checked");
+}
+
 /// Negative counterpart to the encode-only corpus: every entry in
 /// conformance/malformed.json is a hostile encoding that a valid encoder cannot
 /// produce, and the decoder MUST reject it cleanly — never a panic, OOB read, or

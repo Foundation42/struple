@@ -163,6 +163,13 @@ func compareNumbers(a, b Element) int {
 	if ca != 1 {
 		return 0 // both -inf, both +inf, or both NaN
 	}
+	// When a decimal is involved, decide by base-10 order of magnitude first: a
+	// huge (i32-bounded) exponent must never drive an exact big.Rat that
+	// materializes 10^exp (Item 2 DoS). The non-decimal number classes never
+	// build such a power, so they keep the exact-rational path.
+	if a.Kind == KindDecimal || b.Kind == KindDecimal {
+		return compareWithDecimal(a, b)
+	}
 	return numToRat(a).Cmp(numToRat(b))
 }
 
@@ -210,6 +217,193 @@ func decimalToRat(d Decimal) *big.Rat {
 		r.Quo(r, new(big.Rat).SetInt(pow))
 	}
 	return r
+}
+
+// ---------------------------------------------------------------------------
+// Base-10 order-of-magnitude comparison (Item 2 DoS short-circuit)
+//
+// A decimal carries an i32-sized exponent, so an exact big.Rat that materializes
+// 10^exp — or that aligns two vastly different scales — would let a tiny input
+// (e.g. "1e2000000000") drive billions of digits of work. Instead: reduce each
+// operand to a base-10 magnitude (sign · mag · 10^exp10), bound its order of
+// magnitude cheaply from the byte length of mag, and decide by that when the
+// operands are far apart. Only when the bounds overlap (so the exponents are
+// close) is the exact comparison performed — and then it scales by the *bounded*
+// exponent difference, never by the raw exponent. Mirrors src/semantic.zig.
+// ---------------------------------------------------------------------------
+
+// b10 is an exact base-10 value sign · mag · 10^exp10 (mag big-endian; empty mag
+// means zero).
+type b10 struct {
+	sign  int
+	mag   []byte
+	exp10 int64
+}
+
+// isExactKind reports whether e is an exact (non-float) number: int/bigint/decimal.
+func isExactKind(e Element) bool {
+	return e.Kind == KindInt || e.Kind == KindBigInt || e.Kind == KindDecimal
+}
+
+// numToB10 reduces an int / big-int / decimal to its exact base-10 value.
+func numToB10(e Element) b10 {
+	switch e.Kind {
+	case KindInt, KindBigInt:
+		s := e.Int.Sign()
+		if s == 0 {
+			return b10{sign: 0}
+		}
+		return b10{sign: s, mag: new(big.Int).Abs(e.Int).Bytes(), exp10: 0}
+	case KindDecimal:
+		d := e.Decimal
+		if d.IsZero() {
+			return b10{sign: 0}
+		}
+		sign := 1
+		if d.Negative {
+			sign = -1
+		}
+		// Coefficient magnitude (bounded by the significant-digit count, never by
+		// the exponent).
+		coeff := new(big.Int)
+		ten := big.NewInt(10)
+		for _, dch := range d.CoefficientDigits() {
+			coeff.Mul(coeff, ten)
+			coeff.Add(coeff, big.NewInt(int64(dch)))
+		}
+		return b10{sign: sign, mag: coeff.Bytes(), exp10: d.Exponent()}
+	}
+	return b10{}
+}
+
+// b10OomBounds bounds the base-10 order of magnitude of a nonzero mag · 10^exp10:
+// returns lo, hi with |value| ∈ [10^lo, 10^hi). Uses byte-length bounds on the
+// base-256 magnitude (256^(n-1) ≥ 10^(2(n-1)), 256^n < 10^(3n)).
+func b10OomBounds(v b10) (lo, hi int64) {
+	n := int64(len(trimLeadingZeros(v.mag))) // ≥ 1 for a nonzero value
+	return v.exp10 + 2*n - 2, v.exp10 + 3*n
+}
+
+// compareWithDecimal compares two finite numbers when at least one is a decimal,
+// via the base-10 order-of-magnitude path.
+func compareWithDecimal(a, b Element) int {
+	if isExactKind(a) && isExactKind(b) {
+		va := numToB10(a)
+		vb := numToB10(b)
+		if va.sign != vb.sign {
+			return cmpInt(va.sign, vb.sign)
+		}
+		if va.sign == 0 {
+			return 0
+		}
+		c := compareB10Mag(va, vb)
+		if va.sign < 0 {
+			return -c
+		}
+		return c
+	}
+	// Exactly one side is a finite float.
+	if isExactKind(a) {
+		return compareB10Float(numToB10(a), floatVal(b))
+	}
+	return -compareB10Float(numToB10(b), floatVal(a))
+}
+
+// compareB10Mag compares two same-sign, nonzero base-10 magnitudes exactly.
+func compareB10Mag(a, b b10) int {
+	aLo, aHi := b10OomBounds(a)
+	bLo, bHi := b10OomBounds(b)
+	if aHi <= bLo {
+		return -1
+	}
+	if bHi <= aLo {
+		return 1
+	}
+	// Overlap: |a.exp10 − b.exp10| is bounded by the digit counts, so scaling by
+	// the difference (never the raw exponent) is cheap.
+	e := a.exp10
+	if b.exp10 < e {
+		e = b.exp10
+	}
+	sa := scaleMagPow10(a.mag, a.exp10-e)
+	sb := scaleMagPow10(b.mag, b.exp10-e)
+	return sa.Cmp(sb)
+}
+
+// compareB10Float compares a nonzero-capable base-10 value to a finite float.
+func compareB10Float(v b10, f float64) int {
+	sf := signRankF(f)
+	if v.sign != sf {
+		return cmpInt(v.sign, sf)
+	}
+	if v.sign == 0 {
+		return 0 // both zero
+	}
+	// Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If the exact value's
+	// order of magnitude is clear of that window, decide without scaling — this is
+	// what stops a huge decimal exponent from driving a 2^31-iteration scale.
+	lo, hi := b10OomBounds(v)
+	var c int
+	switch {
+	case lo >= 310:
+		c = 1
+	case hi <= -325:
+		c = -1
+	default:
+		c = compareB10MagToFloat(v, f)
+	}
+	if v.sign < 0 {
+		return -c
+	}
+	return c
+}
+
+// compareB10MagToFloat compares |v| = mag · 10^exp10 to |f|, exactly. Reached only
+// when the order-of-magnitude bounds overlap the float window, so exp10 is bounded
+// and materializing 10^|exp10| is bounded work.
+func compareB10MagToFloat(v b10, f float64) int {
+	coeff := new(big.Int).SetBytes(v.mag) // nonnegative magnitude
+	r := new(big.Rat).SetInt(coeff)
+	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(absInt64(v.exp10)), nil)
+	if v.exp10 >= 0 {
+		r.Mul(r, new(big.Rat).SetInt(pow))
+	} else {
+		r.Quo(r, new(big.Rat).SetInt(pow))
+	}
+	fr := new(big.Rat).SetFloat64(math.Abs(f)) // |f|, exact
+	return r.Cmp(fr)
+}
+
+// scaleMagPow10 returns SetBytes(mag) · 10^p as a big.Int (p ≥ 0).
+func scaleMagPow10(mag []byte, p int64) *big.Int {
+	v := new(big.Int).SetBytes(mag)
+	if p > 0 {
+		v.Mul(v, new(big.Int).Exp(big.NewInt(10), big.NewInt(p), nil))
+	}
+	return v
+}
+
+// floatVal returns a float element's value as a float64.
+func floatVal(e Element) float64 {
+	switch e.Kind {
+	case KindFloat32:
+		return float64(e.Float32)
+	case KindFloat64:
+		return e.Float64
+	}
+	return 0
+}
+
+// signRankF ranks a float's sign: 1 (>0), -1 (<0), 0 (±0).
+func signRankF(f float64) int {
+	switch {
+	case f > 0:
+		return 1
+	case f < 0:
+		return -1
+	default:
+		return 0
+	}
 }
 
 // ---------------------------------------------------------------------------

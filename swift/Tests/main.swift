@@ -158,6 +158,7 @@ func runConformance() {
     var jsonDec = 0
     var buildEnc = 0
     var buildTrans = 0
+    var toJsonChecks = 0
 
     for v in vectors {
         let wantBytes = v["bytes"] as! String
@@ -195,12 +196,23 @@ func runConformance() {
             } catch {
                 check(false, "transcode \(wantBytes) threw \(error)")
             }
+            // If the vector pins a one-way toJson rendering, assert it too (Item 2:
+            // pins the plain + scientific decimal rendering cross-language).
+            if let wantJson = v["to_json"] as? String {
+                do {
+                    let got = try toJson(fromHex(wantBytes))
+                    check(got == wantJson, "toJson \(wantBytes) -> \(got) want \(wantJson)")
+                    if got == wantJson { toJsonChecks += 1 }
+                } catch {
+                    check(false, "toJson \(wantBytes) threw \(error)")
+                }
+            }
         } else {
             check(false, "vector has neither json nor build: \(v)")
         }
     }
     print(
-        "  vectors: json encode \(jsonEnc), json decode \(jsonDec), build encode \(buildEnc), transcode \(buildTrans)"
+        "  vectors: json encode \(jsonEnc), json decode \(jsonDec), build encode \(buildEnc), transcode \(buildTrans), to_json \(toJsonChecks)"
     )
 
     let sem = loadCorpus("semantic_vectors.json")
@@ -495,6 +507,54 @@ func runDepthCap() {
     print("  depth cap: fromJson / toJson / semanticOrder all reject deep nesting")
 }
 
+// MARK: - Phase 6: decimal exponent bounds & DoS short-circuit (Item 2)
+
+// Encode-side bounds reject an out-of-range exponent; the semantic comparator
+// decides an astronomically large/small (but i32-valid) exponent by order of
+// magnitude, returning PROMPTLY instead of materializing a 2^31-scaled value.
+func runDecimalBounds() {
+    // Exponent literal / adjusted exponent past i32 are rejected on encode.
+    for bad in ["1e9999999999", "1e2147483647"] {  // "1e2147483647" => adj_exp 2^31
+        var w = Writer()
+        do {
+            try w.appendDecimalString(bad)
+            check(false, "appendDecimalString(\(bad)) was ACCEPTED")
+        } catch is StrupleError {
+            check(true, "appendDecimalString(\(bad)) rejected")
+        } catch {
+            check(false, "appendDecimalString(\(bad)) threw non-StrupleError \(error)")
+        }
+    }
+    // Valid boundary: adjusted exponent == i32 max encodes cleanly.
+    do {
+        var w = Writer()
+        try w.appendDecimalString("1e2147483646")  // adj_exp = 2147483647 = i32 max
+        check(!w.bytes.isEmpty, "appendDecimalString(1e2147483646) accepted")
+    } catch {
+        check(false, "appendDecimalString(1e2147483646) threw \(error)")
+    }
+
+    // Semantic short-circuit: huge/tiny exponents must decide by magnitude alone.
+    func pack(_ build: (inout Writer) throws -> Void) -> [UInt8] {
+        var w = Writer()
+        try! build(&w)
+        return w.bytes
+    }
+    let huge = pack { try $0.appendDecimalString("1e2000000000") }
+    let tiny = pack { try $0.appendDecimalString("1e-2000000000") }
+    let five = pack { $0.appendInt(5) }
+    let onef = pack { $0.appendF64(1.0) }
+    do {
+        check(try semanticOrder(huge, five) == 1, "1e2000000000 > int 5")
+        check(try semanticOrder(tiny, five) == -1, "1e-2000000000 < int 5")
+        check(try semanticOrder(huge, onef) == 1, "1e2000000000 > float 1.0")
+        check(try semanticOrder(tiny, onef) == -1, "1e-2000000000 < float 1.0")
+    } catch {
+        check(false, "semanticOrder of huge-exponent decimal threw \(error)")
+    }
+    print("  decimal bounds: encode reject + semantic short-circuit (no hang)")
+}
+
 // MARK: - main
 
 print("struple Swift conformance + behavior tests")
@@ -508,6 +568,8 @@ print("Phase 4: malformed / hostile decode")
 runMalformed()
 print("Phase 5: recursion depth caps")
 runDepthCap()
+print("Phase 6: decimal exponent bounds & DoS short-circuit (Item 2)")
+runDecimalBounds()
 
 print("")
 print("passed \(passed), failed \(failed)")

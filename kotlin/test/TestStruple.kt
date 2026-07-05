@@ -30,6 +30,7 @@ fun main() {
     indexedMapTest()
     cursorTest()
     depthCapTest()
+    hugeExponentTest()
 
     println("struple behavioral: passed=$pass failed=$fail")
     if (fail != 0) {
@@ -237,6 +238,42 @@ private fun depthCapTest() {
     val nested = buf
     assertRejects("depth cap: toJson 300-deep rejects") { toJson(nested) }
     assertRejects("depth cap: semanticOrder 300-deep rejects") { semanticOrder(nested, nested) }
+}
+
+// ---------------------------------------------------------------------------
+// Item 2 — huge decimal exponents: encode bounds, scientific render, and the
+// semantic-compare DoS short-circuit must return PROMPTLY (no exponent-driven
+// materialization / scale alignment).
+// ---------------------------------------------------------------------------
+
+private fun hugeExponentTest() {
+    // Encode bounds: over-large exponents reject cleanly (never overflow/hang).
+    for (bad in listOf("1e9999999999", "1e2147483647", "1e-9999999999")) {
+        assertRejects("huge decimal $bad rejects on encode") { Writer().appendDecimalString(bad) }
+    }
+    // Boundary: adjusted exponent = i32 max is accepted.
+    check("decimal 1e2147483646 accepted", Writer().appendDecimalString("1e2147483646").bytes().isNotEmpty())
+
+    // Scientific render past the plain-pad threshold.
+    check("render 1e41 scientific", toJson(Writer().appendDecimalString("1e41").bytes()) == "1e+41")
+    check("render 1e300 scientific", toJson(Writer().appendDecimalString("1e300").bytes()) == "1e+300")
+    check("render 1e40 plain", toJson(Writer().appendDecimalString("1e40").bytes()).length == 41)
+
+    // DoS short-circuit: a decimal with a ~2e9 exponent vs an int and a float must
+    // return promptly with the correct order. If the short-circuit is wrong, the
+    // BigDecimal scale alignment would hang here.
+    val big = Writer().appendDecimalString("1e2000000000").bytes()
+    val small = Writer().appendDecimalString("1e-2000000000").bytes()
+    val intVal = encode(5L)
+    val oneF = encode(1.0)
+    val t0 = System.nanoTime()
+    check("semantic 1e2000000000 > int 5", semanticOrder(big, intVal) == 1)
+    check("semantic 1e2000000000 > float 1.0", semanticOrder(big, oneF) == 1)
+    check("semantic 1e-2000000000 < int 5", semanticOrder(small, intVal) == -1)
+    check("semantic 1e-2000000000 < float 1.0", semanticOrder(small, oneF) == -1)
+    check("semantic 1e2000000000 vs itself == 0", semanticOrder(big, big) == 0)
+    val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+    check("huge-exponent semantic compares returned promptly (${elapsedMs}ms)", elapsedMs < 2000, "${elapsedMs}ms")
 }
 
 // ---------------------------------------------------------------------------

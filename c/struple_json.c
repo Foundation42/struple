@@ -546,7 +546,9 @@ static char *base64(const uint8_t *data, size_t len) {
     return out;
 }
 
-/* Render a decimal as an exact JSON number literal (plain notation, no exponent). */
+/* Render a decimal as an exact JSON number literal: plain notation, falling back
+ * to scientific (`d1[.d2…dk]e±E`) once plain would pad past the threshold, so a
+ * huge (i32-bounded) exponent can't emit gigabytes from a tiny input (Item 2). */
 static void render_decimal(struple_writer *out, const struple_element *e) {
     const uint8_t *digs = e->data;
     size_t k = e->data_len;
@@ -554,14 +556,46 @@ static void render_decimal(struple_writer *out, const struple_element *e) {
         jc(out, '0');
         return;
     }
+    int64_t kk = (int64_t)k;
     int64_t exp10 = e->dec_exponent; /* value = C · 10^exp10 */
     if (e->dec_negative) jc(out, '-');
+
+    /* Plain notation would pad this many zeros; past the threshold, switch to
+     * scientific notation. */
+    const int64_t max_plain_pad = 40;
+    int64_t pad;
+    if (exp10 >= 0) {
+        pad = exp10;
+    } else {
+        int64_t pp = kk + exp10;
+        pad = pp > 0 ? 0 : -pp;
+    }
+    if (pad > max_plain_pad) {
+        /* d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+         * The exponent's sign is ALWAYS emitted (e+/e-) followed by |E|. */
+        jc(out, (char)('0' + digs[0]));
+        if (k > 1) {
+            jc(out, '.');
+            for (size_t i = 1; i < k; i++) jc(out, (char)('0' + digs[i]));
+        }
+        int64_t sci_exp = exp10 + kk - 1;
+        jc(out, 'e');
+        jc(out, sci_exp >= 0 ? '+' : '-');
+        /* |sci_exp| without tripping over INT64_MIN (sci_exp = adj_exp − 1 here,
+         * so it stays well inside i32, but stay overflow-safe regardless). */
+        uint64_t mag = sci_exp >= 0 ? (uint64_t)sci_exp : (uint64_t)(-(sci_exp + 1)) + 1;
+        char tmp[24];
+        snprintf(tmp, sizeof tmp, "%llu", (unsigned long long)mag);
+        jw(out, tmp);
+        return;
+    }
+
     if (exp10 >= 0) {
         for (size_t i = 0; i < k; i++) jc(out, (char)('0' + digs[i]));
         for (int64_t z = 0; z < exp10; z++) jc(out, '0');
         return;
     }
-    int64_t point_pos = (int64_t)k + exp10; /* number of integer-part digits */
+    int64_t point_pos = kk + exp10; /* number of integer-part digits */
     if (point_pos > 0) {
         size_t pp = (size_t)point_pos;
         for (size_t i = 0; i < pp; i++) jc(out, (char)('0' + digs[i]));

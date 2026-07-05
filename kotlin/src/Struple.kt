@@ -369,6 +369,11 @@ private fun appendDecimal(out: java.io.ByteArrayOutputStream, negative: Boolean,
     // Adjusted exponent: place value of the most-significant digit (0.d…·10^E).
     // Trailing zeros change neither value nor E, so drop them for storage.
     val adjExp = BigInteger.valueOf(sig.size.toLong() + exp.toLong())
+    // Bound the adjusted exponent to i32 so it round-trips through decode's i32 cap
+    // and downstream exponent math can't overflow (Item 2). Mirrors appendDecimal in
+    // src/struple.zig; guards both the digits+exp API and native-BigDecimal input.
+    if (adjExp > BigInteger.valueOf(Int.MAX_VALUE.toLong()) || adjExp < BigInteger.valueOf(Int.MIN_VALUE.toLong()))
+        throw StrupleException("struple: invalid decimal")
     var end = sig.size
     while (end > 0 && sig[end - 1] == 0) end--
     val store = sig.copyOfRange(0, end)
@@ -397,7 +402,7 @@ private fun appendDecimalString(out: java.io.ByteArrayOutputStream, s: String) {
     var negative = false
     if (i < n && (s[i] == '+' || s[i] == '-')) { negative = s[i] == '-'; i++ }
     val digits = ArrayList<Int>()
-    var exp = 0
+    var exp = 0L // Long so the parse can't overflow before the i32 bound check (Item 2)
     var seenPoint = false
     var anyDigit = false
     while (i < n) {
@@ -416,18 +421,23 @@ private fun appendDecimalString(out: java.io.ByteArrayOutputStream, s: String) {
     if (!anyDigit) throw StrupleException("struple: invalid decimal")
     if (i < n && (s[i] == 'e' || s[i] == 'E')) {
         i++
-        var esign = 1
-        if (i < n && (s[i] == '+' || s[i] == '-')) { if (s[i] == '-') esign = -1; i++ }
-        var ev = 0
+        var esign = 1L
+        if (i < n && (s[i] == '+' || s[i] == '-')) { if (s[i] == '-') esign = -1L; i++ }
+        var ev = 0L
         var edig = false
         while (i < n) {
             if (s[i] < '0' || s[i] > '9') throw StrupleException("struple: invalid decimal")
-            ev = ev * 10 + (s[i] - '0'); edig = true; i++
+            ev = ev * 10 + (s[i] - '0')
+            if (ev > Int.MAX_VALUE.toLong()) throw StrupleException("struple: invalid decimal") // far beyond any real exponent
+            edig = true; i++
         }
         if (!edig) throw StrupleException("struple: invalid decimal")
         exp += esign * ev
     }
-    appendDecimal(out, negative, digits.toIntArray(), exp)
+    // Bound the parsed exponent magnitude to i32; appendDecimal re-checks the
+    // adjusted exponent (sig-len + exp) against the same bound (Item 2).
+    if (exp > Int.MAX_VALUE.toLong() || exp < Int.MIN_VALUE.toLong()) throw StrupleException("struple: invalid decimal")
+    appendDecimal(out, negative, digits.toIntArray(), exp.toInt())
 }
 
 // -- containers / framing ---------------------------------------------------
@@ -646,8 +656,12 @@ class Reader(val buf: ByteArray, var pos: Int = 0) {
             }
             val raw = BigInteger(1, payload)
             val v = if (positive) raw else raw.subtract(BigInteger.ONE.shiftLeft(8 * n))
+            // Bound the adjusted exponent to i32 (Item 2): keeps exponent()
+            // (= adj_exp − digitCount) from underflowing and BigDecimal's int scale
+            // from overflowing, and is already ~2× any real decimal Emax. A larger
+            // stored exponent is malformed — this rejects the corpus case
+            // 380324800000000b00 (adjusted exponent 2^31) cleanly on decode.
             if (v > BigInteger.valueOf(Int.MAX_VALUE.toLong()) || v < BigInteger.valueOf(Int.MIN_VALUE.toLong())) {
-                // BigDecimal can only carry an int scale; reject exponents beyond that.
                 throw StrupleException("struple: decimal exponent out of range")
             }
             return v.toInt()

@@ -217,7 +217,9 @@ func renderUUID(_ u: [UInt8]) -> String {
     return String(decoding: b, as: UTF8.self)
 }
 
-/// Render a decimal as an exact JSON number literal (plain notation, no exponent).
+/// Render a decimal as an exact JSON number literal. Plain notation for ordinary
+/// scales; a scientific fallback past the pad threshold keeps a huge (i32-bounded)
+/// exponent from emitting gigabytes of zeros (Item 2).
 func renderDecimal(_ out: inout [UInt8], _ d: Decimal) {
     if d.isZero {
         out.append(UInt8(ascii: "0"))
@@ -228,6 +230,31 @@ func renderDecimal(_ out: inout [UInt8], _ d: Decimal) {
     let exp10 = d.exponent  // value = C · 10^exp10
 
     if d.negative { out.append(UInt8(ascii: "-")) }
+
+    // Plain notation would pad this many zeros; past the threshold, render in
+    // scientific notation so a huge (i32-bounded) exponent can't emit gigabytes.
+    let maxPlainPad: Int64 = 40
+    let pad: Int64
+    if exp10 >= 0 {
+        pad = exp10
+    } else {
+        let pp = k + exp10
+        pad = pp > 0 ? 0 : -pp
+    }
+    if pad > maxPlainPad {
+        // d1[.d2…dk]e±E, where E = exp10 + k − 1 (the power of ten of the MSD).
+        out.append(UInt8(ascii: "0") + digs[0])
+        if digs.count > 1 {
+            out.append(UInt8(ascii: "."))
+            for dd in digs[1...] { out.append(UInt8(ascii: "0") + dd) }
+        }
+        let sciExp = exp10 + k - 1
+        out.append(UInt8(ascii: "e"))
+        out.append(sciExp >= 0 ? UInt8(ascii: "+") : UInt8(ascii: "-"))
+        out.append(contentsOf: Array(String(abs(sciExp)).utf8))
+        return
+    }
+
     if exp10 >= 0 {
         for dd in digs { out.append(UInt8(ascii: "0") + dd) }
         var z: Int64 = 0

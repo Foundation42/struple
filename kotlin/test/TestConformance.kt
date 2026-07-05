@@ -246,6 +246,12 @@ fun main() {
             // transcode(bytes) == bytes
             val tc = transcode(fromHex(expectedBytes))
             check("transcode ${jsonText(op)}", toHex(tc) == expectedBytes, "got ${toHex(tc)} want $expectedBytes")
+            // Optional one-way to_json check: pins plain + scientific decimal render.
+            val tj = byKey["to_json"]
+            if (tj is J.S) {
+                val got = toJson(fromHex(expectedBytes))
+                check("to_json $expectedBytes", got == tj.v, "got $got want ${tj.v}")
+            }
         }
     }
 

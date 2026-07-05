@@ -356,8 +356,25 @@ private func compareWithDecimal(_ a: Element, _ b: Element) throws -> Int {
     return -compareB10Float(vb, floatVal(a))
 }
 
+/// Bounds on the base-10 order of magnitude of a nonzero `mag · 10^exp10` value:
+/// returns `(lo, hi)` with `|value| ∈ [10^lo, 10^hi)`. Uses byte-length bounds on
+/// the base-256 magnitude (`256^(n-1) ≥ 10^(2(n-1))`, `256^n < 10^(3n)`). Lets the
+/// comparators reject a far-apart pair without materializing a magnitude scaled by
+/// an i32-sized exponent (Item 2 DoS short-circuit).
+private func b10OomBounds(_ v: B10) -> (lo: Int64, hi: Int64) {
+    let na = Int64(trimLeadingZeros(v.mag).count)  // ≥ 1 for a nonzero value
+    return (lo: v.exp10 + 2 * na - 2, hi: v.exp10 + 3 * na)
+}
+
 /// Compare two same-sign, nonzero base-10 magnitudes (`mag · 10^exp10`), exactly.
 private func compareB10Mag(_ a: B10, _ b: B10) -> Int {
+    // If the orders of magnitude are disjoint, decide by them — no scaling. When
+    // they overlap, `|a.exp10 − b.exp10|` is bounded by the digit counts, so the
+    // exact scaling below is cheap (never proportional to the raw exponent).
+    let ba = b10OomBounds(a)
+    let bb = b10OomBounds(b)
+    if ba.hi <= bb.lo { return -1 }
+    if bb.hi <= ba.lo { return 1 }
     let e = min(a.exp10, b.exp10)
     let sa = mulPow10(a.mag, Int(a.exp10 - e))
     let sb = mulPow10(b.mag, Int(b.exp10 - e))
@@ -368,8 +385,19 @@ private func compareB10Float(_ v: B10, _ f: Double) -> Int {
     let sf = signRank(f)
     if v.sign != sf { return cmpInt(v.sign, sf) }
     if v.sign == 0 { return 0 }  // both zero
-    let d = decompose(abs(f))
-    let c = compareB10MagToFloat(v.mag, v.exp10, d.mant, d.exp)
+    // Any finite nonzero f64 has |f| ∈ (10^-324, 10^309). If the exact value's
+    // order of magnitude is clear of that window, decide without scaling — this is
+    // what stops a huge decimal exponent from driving a 2^31-iteration scale (Item 2).
+    let bnd = b10OomBounds(v)
+    let c: Int
+    if bnd.lo >= 310 {
+        c = 1
+    } else if bnd.hi <= -325 {
+        c = -1
+    } else {
+        let d = decompose(abs(f))
+        c = compareB10MagToFloat(v.mag, v.exp10, d.mant, d.exp)
+    }
     return v.sign < 0 ? -c : c
 }
 

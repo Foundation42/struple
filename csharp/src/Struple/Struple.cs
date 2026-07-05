@@ -271,6 +271,9 @@ public static class Struple
         // Adjusted exponent: place value of the most-significant digit (0.d…·10^E). Trailing zeros
         // change neither the value nor E, so drop them for storage.
         long adjExp = (long)sigLen + exp;
+        // Bound the adjusted exponent to i32 so it round-trips through decode's i32 cap and
+        // downstream exponent math never overflows (Item 2).
+        if (adjExp > int.MaxValue || adjExp < int.MinValue) throw new StrupleException("invalid decimal");
         int end = digits.Length;
         while (end > lead && digits[end - 1] == 0) end--;
 
@@ -305,7 +308,7 @@ public static class Struple
         }
         var digits = new int[n];
         int dlen = 0;
-        int exp = 0;
+        long exp = 0; // long so the parse can't overflow before the i32 bound check
         bool seenPoint = false;
         bool anyDigit = false;
         for (; i < n; i++)
@@ -333,21 +336,23 @@ public static class Struple
                 if (s[i] == '-') esign = -1;
                 i++;
             }
-            int ev = 0;
+            long ev = 0;
             bool edig = false;
             for (; i < n; i++)
             {
                 char c = s[i];
                 if (c < '0' || c > '9') throw new StrupleException("invalid decimal");
                 ev = ev * 10 + (c - '0');
+                if (ev > int.MaxValue) throw new StrupleException("invalid decimal"); // far beyond any real exponent
                 edig = true;
             }
             if (!edig) throw new StrupleException("invalid decimal");
             exp += esign * ev;
         }
+        if (exp > int.MaxValue || exp < int.MinValue) throw new StrupleException("invalid decimal");
         var trimmed = new int[dlen];
         System.Array.Copy(digits, trimmed, dlen);
-        AppendDecimalImpl(outBuf, negative, trimmed, exp);
+        AppendDecimalImpl(outBuf, negative, trimmed, (int)exp);
     }
 
     /// <summary>Decimal digits (0–9, most-significant first) of a non-negative BigInteger.</summary>
@@ -1029,7 +1034,10 @@ public static class Struple
                 }
                 BigInteger v = new BigInteger(payload, isUnsigned: true, isBigEndian: true);
                 BigInteger value = positive ? v : v - (BigInteger.One << (8 * n));
-                if (value < long.MinValue || value > long.MaxValue)
+                // Bound the adjusted exponent to i32 (Item 2): keeps Decimal.Exponent()
+                // (= adjExp − digitCount) from underflowing long, and is already ~2× any
+                // real decimal Emax. A larger stored exponent is malformed.
+                if (value < int.MinValue || value > int.MaxValue)
                 {
                     throw new StrupleException("decimal exponent out of range");
                 }
