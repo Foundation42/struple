@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { Writer, transcode, fromJson, toJson, semanticOrder } from "../src/index.ts";
+import { Writer, Reader, transcode, fromJson, toJson, semanticOrder } from "../src/index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const corpusPath = join(here, "..", "..", "conformance", "vectors.json");
@@ -21,6 +21,10 @@ const vectors = JSON.parse(readFileSync(corpusPath, "utf8")) as Vector[];
 const semanticPath = join(here, "..", "..", "conformance", "semantic_vectors.json");
 type SemVector = { a: string; b: string; order: number };
 const semVectors = JSON.parse(readFileSync(semanticPath, "utf8")) as SemVector[];
+
+const malformedPath = join(here, "..", "..", "conformance", "malformed.json");
+type MalformedCase = { hex: string; item: number; note: string };
+const malformed = (JSON.parse(readFileSync(malformedPath, "utf8")) as { cases: MalformedCase[] }).cases;
 
 function toHex(bytes: Uint8Array): string {
   let s = "";
@@ -93,3 +97,47 @@ for (const [i, sv] of semVectors.entries()) {
   test(`semantic ${i}: ${sv.a} <=> ${sv.b}`, () =>
     assert.equal(sgn(semanticOrder(fromHex(sv.a), fromHex(sv.b))), sv.order));
 }
+
+// Negative corpus: every hostile encoding must be REJECTED with a clean decode
+// error. Fully drive the decoder over the whole stream (walk every element via
+// the Reader, then transcode) — a malformed input must throw an Error, never
+// return a wrong value and never crash with a non-Error.
+function walkAll(bytes: Uint8Array): void {
+  const r = new Reader(bytes);
+  while (r.next() !== null) {
+    /* consume every element to end of stream */
+  }
+  transcode(bytes); // second, independent full walk of the same bytes
+}
+
+test("malformed corpus is non-empty", () => assert.ok(malformed.length > 0));
+
+for (const c of malformed) {
+  test(`malformed [item ${c.item}] ${c.hex} — ${c.note}`, () => {
+    assert.throws(
+      () => walkAll(fromHex(c.hex)),
+      // A clean decode error: a thrown Error, not a silent wrong value nor a
+      // non-Error crash (TypeError from OOB indexing still counts as an Error,
+      // but the fix should surface the port's own "truncated"/invalid message).
+      (err: unknown) => err instanceof Error,
+      `expected ${c.hex} to be cleanly rejected`,
+    );
+  });
+}
+
+test("malformed: all hostile inputs cleanly rejected", () => {
+  let rejected = 0;
+  for (const c of malformed) {
+    let threw: unknown = null;
+    try {
+      walkAll(fromHex(c.hex));
+    } catch (err) {
+      threw = err;
+    }
+    assert.ok(threw !== null, `case ${c.hex} (${c.note}) decoded without throwing — WRONG VALUE`);
+    assert.ok(threw instanceof Error, `case ${c.hex} threw a non-Error: ${String(threw)}`);
+    rejected++;
+  }
+  console.log(`malformed: ${rejected}/${malformed.length} rejected`);
+  assert.equal(rejected, malformed.length);
+});

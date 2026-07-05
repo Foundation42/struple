@@ -1,0 +1,14 @@
+{
+  "description": "Malformed / hostile struple encodings that EVERY port must reject with its own clean decode error — never a crash, OOB read, panic, abort, wrong native-exception type, or silent wrong value. This is the negative counterpart to vectors.json: the shared corpus is encode-only (a valid encoder can't produce these), so hostile inputs live here as a hand-authored hex list. Each port's conformance runner decodes every `hex` (walking the whole stream) and asserts it fails cleanly. Grown alongside HARDENING.md items 1,2,5,6,7.",
+  "cases": [
+    { "hex": "3108ffffffffffffffff", "item": 1, "note": "big-int (pos) length header claims magnitude length n=2^64-1, far beyond the buffer — the CRITICAL repro (OOB/panic/SIGILL/silent-0 before the fix)" },
+    { "hex": "0ff70000000000000000", "item": 1, "note": "big-int (neg) same class: length bytes are bit-complemented, so m byte 0xF7 = 8 and magnitude bytes 0x00 = n=2^64-1" },
+    { "hex": "3109ffffffffffffffffff", "item": 1, "note": "length-of-length m=9 exceeds the 8-byte cap (n could not fit u64)" },
+    { "hex": "3101", "item": 1, "note": "truncated big-int: m=1 announced but the length byte itself is missing" },
+    { "hex": "310108", "item": 1, "note": "truncated big-int: n=8 announced but the 8 magnitude bytes are missing" },
+    { "hex": "31", "item": 1, "note": "truncated big-int: bare type code, no length-of-length byte" },
+    { "hex": "10", "item": 1, "note": "truncated fixed int: 0x10 declares a 16-byte negative payload that is absent" },
+    { "hex": "3803", "item": 2, "note": "truncated decimal: sign=pos but the adjusted-exponent byte is missing" },
+    { "hex": "44", "item": 1, "note": "truncated uuid: type code with fewer than 16 payload bytes" }
+  ]
+}

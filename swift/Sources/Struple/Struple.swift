@@ -561,9 +561,17 @@ public struct Reader {
         case TypeCode.intNegBig, TypeCode.intPosBig:
             let negative = typeCode == TypeCode.intNegBig
             let m = Int(decodeByte(try take(1).first!, negative))
-            var n = 0
-            for b in try take(m) { n = (n << 8) | Int(decodeByte(b, negative)) }
-            let mag = try take(n)
+            // Length-of-length is capped at 8 bytes: no real magnitude needs a
+            // length that doesn't fit in u64, and without this bound `m` (0–255)
+            // lets the shift below overflow and `n` address the whole space.
+            if m > 8 { throw StrupleError.invalidType }
+            // Assemble `n` in UInt64 (a value up to 2^64-1 can't trap) and reject
+            // any `n` beyond the remaining buffer BEFORE take/allocation — so the
+            // repro's 2^64-1 throws cleanly instead of trapping on Int(n).
+            var n: UInt64 = 0
+            for b in try take(m) { n = (n << 8) | UInt64(decodeByte(b, negative)) }
+            if n > UInt64(buf.count - pos) { throw StrupleError.truncated }
+            let mag = try take(Int(n))
             return .bigInt(BigInt(negative: negative, magStored: Array(mag)))
         case TypeCode.float32:
             return .float32(decodeF32(try take(4)))
@@ -649,7 +657,11 @@ public struct Reader {
     }
 
     private mutating func take(_ n: Int) throws -> ArraySlice<UInt8> {
-        if pos + n > buf.count { throw StrupleError.truncated }
+        // Guard written as `n > remaining` (never `pos + n > len`): the addition
+        // would overflow/trap for an attacker-supplied length before it could be
+        // caught. `pos <= buf.count` is a Reader invariant, so the subtraction
+        // never underflows.
+        if n > buf.count - pos { throw StrupleError.truncated }
         let slice = buf[pos..<pos + n]
         pos += n
         return slice

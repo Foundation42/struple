@@ -73,6 +73,23 @@ func loadCorpus(_ name: String) -> [[String: Any]] {
     return arr
 }
 
+// malformed.json is a top-level object `{ description, cases: [ {hex,item,note} ] }`
+// (the negative counterpart to vectors.json), so read its `cases` array.
+func loadMalformedCases() -> [[String: Any]] {
+    let path = "../conformance/malformed.json"
+    guard let data = FileManager.default.contents(atPath: path) else {
+        print("FATAL: cannot read \(path)")
+        exit(2)
+    }
+    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let cases = obj["cases"] as? [[String: Any]]
+    else {
+        print("FATAL: cannot parse \(path)")
+        exit(2)
+    }
+    return cases
+}
+
 // MARK: - Build-op interpreter (mirrors src/gen_vectors.zig buildInto)
 
 func buildInto(_ w: inout Writer, _ op: [String: Any]) throws {
@@ -401,6 +418,33 @@ func runGolden() {
     check(toHex(aw.bytes) == "4861707000", "\"app\" -> 4861707000")
 }
 
+// MARK: - Phase 4: malformed / hostile decode (must reject cleanly)
+
+// Every hostile encoding in malformed.json must fail with the port's own
+// StrupleError — never a trap/abort/OOB/panic or a non-struple exception. We
+// fully walk each stream via transcode (decode every element + re-encode); a
+// clean throw is success, anything else (no throw, or a non-StrupleError) fails.
+func runMalformed() {
+    let cases = loadMalformedCases()
+    check(!cases.isEmpty, "malformed corpus is non-empty")
+    var rejected = 0
+    for c in cases {
+        let hex = c["hex"] as! String
+        let note = c["note"] as? String ?? ""
+        let bytes = fromHex(hex)
+        do {
+            _ = try transcode(bytes)
+            check(false, "malformed \(hex) was ACCEPTED (\(note))")
+        } catch is StrupleError {
+            rejected += 1
+        } catch {
+            check(false, "malformed \(hex) threw non-StrupleError \(error) (\(note))")
+        }
+    }
+    check(rejected == cases.count, "malformed: \(rejected)/\(cases.count) rejected")
+    print("  malformed: \(rejected)/\(cases.count) rejected")
+}
+
 // MARK: - main
 
 print("struple Swift conformance + behavior tests")
@@ -410,6 +454,8 @@ print("Phase 2: navigation / IndexedMap")
 runNavigation()
 print("Phase 3: golden / round-trip")
 runGolden()
+print("Phase 4: malformed / hostile decode")
+runMalformed()
 
 print("")
 print("passed \(passed), failed \(failed)")

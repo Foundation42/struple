@@ -484,7 +484,9 @@ public:
 
 private:
     const uint8_t* take(size_t n) {
-        if (pos_ + n > len_) throw Error("struple: truncated");
+        // Guard as `n > remaining`, never `pos_ + n > len_`: the addition overflows
+        // size_t for an attacker-supplied n and wraps past the check. pos_ <= len_ holds.
+        if (n > len_ - pos_) throw Error("struple: truncated");
         const uint8_t* p = buf_ + pos_;
         pos_ += n;
         return p;
@@ -533,6 +535,7 @@ private:
                 bool neg = (t == tc::INT_NEG_BIG);
                 auto comp = [neg](uint8_t b) { return neg ? uint8_t(~b) : b; };
                 size_t m = comp(take(1)[0]);
+                if (m > 8) throw Error("struple: big-int length-of-length too large");
                 const uint8_t* nb = take(m);
                 size_t n = 0;
                 for (size_t i = 0; i < m; i++) n = (n << 8) | comp(nb[i]);
@@ -613,6 +616,7 @@ private:
         bool neg = (t == tc::INT_NEG_BIG);
         auto comp = [neg](uint8_t b) { return neg ? uint8_t(~b) : b; };
         size_t m = comp(take(1)[0]);
+        if (m > 8) throw Error("struple: big-int length-of-length too large");
         const uint8_t* nb = take(m);
         size_t n = 0;
         for (size_t i = 0; i < m; i++) n = (n << 8) | comp(nb[i]);

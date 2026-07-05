@@ -22,6 +22,7 @@ public static class Program
     public static int Main()
     {
         Conformance();
+        Malformed();
         Behavioral();
 
         Console.WriteLine($"TOTAL: {s_checks} checks | {s_failures} failures");
@@ -101,6 +102,53 @@ public static class Program
 
         Console.WriteLine(
             $"Conformance: json encode {jsonEnc} decode {jsonDec} | build {buildEnc} transcode {buildTrc} | semantic {semOk} | {s_failures} failures");
+    }
+
+    // =======================================================================
+    // Malformed / hostile corpus — every case MUST be rejected with the port's
+    // own decode exception (StrupleException). A non-throw, or a native
+    // exception of any other type (OverflowException, IndexOutOfRange, ...),
+    // is a hardening FAILURE.
+    // =======================================================================
+
+    private static void Malformed()
+    {
+        string corpus = File.ReadAllText("../conformance/malformed.json");
+        var doc = (Json.JsonObject)Json.Parse(corpus)!;
+        var cases = (List<object?>)doc.Get("cases")!;
+
+        int total = cases.Count;
+        int rejected = 0;
+        foreach (var o in cases)
+        {
+            var c = (Json.JsonObject)o!;
+            string hex = (string)c.Get("hex")!;
+            string note = (string)c.Get("note")!;
+            byte[] bin = HexDecode(hex);
+
+            s_checks++;
+            bool ok = false;
+            try
+            {
+                // Fully walk (decode + re-encode) the ENTIRE stream; a clean decoder
+                // rejects the hostile bytes with StrupleException before completing.
+                Transcode(bin);
+                Console.Error.WriteLine($"MALFORMED FAIL [{hex}]: decoded without error (want StrupleException) — {note}");
+            }
+            catch (Struple.StrupleException)
+            {
+                ok = true;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"MALFORMED FAIL [{hex}]: threw {ex.GetType().Name}, want StrupleException — {note}");
+            }
+
+            if (ok) rejected++;
+            else s_failures++;
+        }
+
+        Console.WriteLine($"Malformed: {rejected}/{total} rejected | {s_failures} failures");
     }
 
     // -----------------------------------------------------------------------

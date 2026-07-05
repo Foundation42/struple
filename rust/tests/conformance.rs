@@ -8,7 +8,7 @@
 
 use std::fs;
 use struple::json::{from_json, parse, to_json, Json};
-use struple::{transcode, Writer};
+use struple::{transcode, unpack, Writer};
 
 fn corpus() -> Vec<Json> {
     let path = format!("{}/../conformance/vectors.json", env!("CARGO_MANIFEST_DIR"));
@@ -177,6 +177,40 @@ fn build_transcode() {
             assert_eq!(to_hex(&transcode(&from_hex(bytes)).unwrap()), bytes, "transcode {bytes}");
         }
     }
+}
+
+/// Negative counterpart to the encode-only corpus: every entry in
+/// conformance/malformed.json is a hostile encoding that a valid encoder cannot
+/// produce, and the decoder MUST reject it cleanly — never a panic, OOB read, or
+/// `Ok(value)`. Each case is fully decoded (recursively, via `unpack`, which
+/// walks nested containers) and also transcoded, so every element is forced to be
+/// read; both paths must return `Err`.
+#[test]
+fn malformed_rejected() {
+    let path = format!("{}/../conformance/malformed.json", env!("CARGO_MANIFEST_DIR"));
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let doc = parse(&text).expect("parse malformed corpus");
+    let cases = match field(&doc, "cases") {
+        Some(Json::Array(v)) => v,
+        _ => panic!("malformed corpus has no `cases` array"),
+    };
+    assert!(!cases.is_empty(), "malformed corpus is empty");
+
+    let total = cases.len();
+    let mut rejected = 0usize;
+    for c in cases {
+        let hex = as_str(field(c, "hex").unwrap());
+        let note = field(c, "note").map(as_str).unwrap_or("");
+        let bytes = from_hex(hex);
+        // Force reads of the whole stream on both decode paths.
+        let unpacked = unpack(&bytes);
+        let transcoded = transcode(&bytes);
+        assert!(unpacked.is_err(), "NOT rejected by unpack: hex={hex} note=\"{note}\" got={unpacked:?}");
+        assert!(transcoded.is_err(), "NOT rejected by transcode: hex={hex} note=\"{note}\" got={transcoded:?}");
+        rejected += 1;
+    }
+    println!("malformed: {rejected}/{total} rejected");
+    assert_eq!(rejected, total, "some malformed cases were not cleanly rejected");
 }
 
 #[test]

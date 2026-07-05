@@ -562,6 +562,11 @@ class Reader {
     if (tc == TypeCode.intNegBig || tc == TypeCode.intPosBig) {
       final negative = tc == TypeCode.intNegBig;
       final m = _decodeByte(_take(1)[0], negative);
+      // Length-of-length is capped at 8 bytes: no real magnitude needs a length
+      // that doesn't fit in 64 bits, and without this bound `m` (0..255) lets the
+      // shift below wrap `n` around the 64-bit int. `_take(n)` then rejects any n
+      // beyond the buffer cleanly (including a wrapped-negative n on the VM).
+      if (m > 8) throw const StrupleException('invalid type code');
       final nbytes = _take(m);
       var n = 0;
       for (final b in nbytes) {
@@ -660,7 +665,14 @@ class Reader {
   }
 
   Uint8List _take(int n) {
-    if (pos + n > buf.length) throw const StrupleException('truncated input');
+    // Guard written as `n > remaining` (never `pos + n > len`): for an attacker-
+    // supplied length the addition would overflow before it could catch anything.
+    // `pos <= buf.length` is a Reader invariant, so `buf.length - pos` never goes
+    // negative. The `n < 0` arm rejects a big-int length header whose assembled
+    // 64-bit value has wrapped negative (a Dart VM int is signed 64-bit).
+    if (n < 0 || n > buf.length - pos) {
+      throw const StrupleException('truncated input');
+    }
     final s = Uint8List.sublistView(buf, pos, pos + n);
     pos += n;
     return s;

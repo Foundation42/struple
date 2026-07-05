@@ -31,6 +31,17 @@ List<dynamic> _loadCorpus(String name) {
   return v;
 }
 
+// The malformed corpus is an object { description, cases: [ {hex, item, note} ] }
+// (unlike vectors.json, which is a top-level array), so it needs its own loader.
+List<dynamic> _loadMalformed() {
+  final text = File('../conformance/malformed.json').readAsStringSync();
+  final v = jsonDecode(text);
+  if (v is! Map || v['cases'] is! List) {
+    throw StateError('malformed.json is not an object with a cases array');
+  }
+  return v['cases'] as List;
+}
+
 String _toHex(Uint8List b) {
   final sb = StringBuffer();
   for (final x in b) {
@@ -182,6 +193,31 @@ void main() {
     final got = semanticOrder(_fromHex(a), _fromHex(b));
     _check(got == want, 'semanticOrder($a, $b) = $got, want $want');
   }
+
+  // 6. Malformed corpus: every hostile encoding must be rejected with the port's
+  //    own decode error (StrupleException) when the whole stream is decoded — never
+  //    a RangeError / other native exception, and never a silent (no-throw) decode.
+  final malformed = _loadMalformed();
+  var malformedRejected = 0;
+  for (final raw in malformed) {
+    final c = (raw as Map).cast<String, dynamic>();
+    final hex = c['hex'] as String;
+    final note = c['note'] as String? ?? '';
+    final bytes = _fromHex(hex);
+    var rejected = false;
+    try {
+      // transcode walks and fully decodes the entire element stream.
+      transcode(bytes);
+    } on StrupleException {
+      rejected = true; // the port's own clean decode error — the required outcome
+    } catch (_) {
+      rejected = false; // RangeError or any other type is a hard failure
+    }
+    _check(rejected, 'malformed [$hex] ($note) rejected with StrupleException');
+    if (rejected) malformedRejected++;
+  }
+  stdout.writeln(
+      'conformance: malformed: $malformedRejected/${malformed.length} rejected');
 
   stdout.writeln('conformance: $jsonCount json vectors (both directions), '
       '$buildCount build vectors (both directions), '

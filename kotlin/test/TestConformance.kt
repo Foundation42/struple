@@ -263,6 +263,38 @@ fun main() {
         semCount++
     }
 
+    // -----------------------------------------------------------------------
+    // Malformed / hostile inputs (../conformance/malformed.json). Each case must
+    // be rejected with the port's own clean decode error (StrupleException) when
+    // the ENTIRE stream is decoded — never a native crash (AIOOBE / RangeError /
+    // wrong exception type) and never a silent success. HARDENING items 1,2,5,6,7.
+    val malformedText = File("../conformance/malformed.json").readText()
+    val malformedTop = CorpusJson(malformedText).parseTop() as J.O
+    val cases = (malformedTop.members.toMap()["cases"] as J.A).items
+    var mfRejected = 0
+    for (c in cases) {
+        c as J.O
+        val byKey = c.members.toMap()
+        val hexStr = (byKey["hex"] as J.S).v
+        val note = (byKey["note"] as? J.S)?.v ?: ""
+        val bytes = fromHex(hexStr)
+        var rejected = false
+        try {
+            // Walk & re-encode the WHOLE stream; a clean StrupleException is a pass.
+            transcode(bytes)
+        } catch (e: StrupleException) {
+            rejected = true
+        } catch (e: Throwable) {
+            // Any other throwable (AIOOBE, IllegalArgument, Overflow, …) is a
+            // FAILURE: the port must surface its own decode error, not leak a
+            // native exception or crash.
+            rejected = false
+        }
+        check("malformed $hexStr", rejected, "expected StrupleException; $note")
+        if (rejected) mfRejected++
+    }
+    println("  malformed: $mfRejected/${cases.size} rejected")
+
     println("conformance: $jsonCount json vectors (x2), $buildCount build vectors (x2), $semCount semantic pairs")
     println("  passed=$pass failed=$fail")
     if (fail != 0) {

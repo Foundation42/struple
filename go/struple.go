@@ -592,6 +592,14 @@ func (r *Reader) Next() (e Element, ok bool, err error) {
 			return Element{}, false, err
 		}
 		m := int(decodeByte(mb[0], negative))
+		// Length-of-length is capped at 8 bytes: no real magnitude needs a length
+		// that doesn't fit in a u64, and without this bound m (0..255) lets the
+		// shift below run past the width of n and address the whole space. take(n)
+		// then rejects any n beyond the buffer (or one that wrapped negative)
+		// cleanly, so it is the real backstop.
+		if m > 8 {
+			return Element{}, false, ErrInvalidType
+		}
 		nbytes, err := r.take(m)
 		if err != nil {
 			return Element{}, false, err
@@ -782,7 +790,12 @@ func (r *Reader) readDecExponent(complement bool) (int64, error) {
 }
 
 func (r *Reader) take(n int) ([]byte, error) {
-	if r.pos+n > len(r.buf) {
+	// Guard written as `n > remaining` (never `pos + n > len`): the addition would
+	// overflow int for an attacker-supplied length before it could be caught, and
+	// an assembled length can even wrap negative (int is 64-bit here). `pos <= len`
+	// is a Reader invariant, so `len - pos` never underflows; the `n < 0` arm
+	// rejects a wrapped length before it can slice with high < low.
+	if n < 0 || n > len(r.buf)-r.pos {
 		return nil, ErrTruncated
 	}
 	s := r.buf[r.pos : r.pos+n]

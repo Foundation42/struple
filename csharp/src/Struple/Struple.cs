@@ -949,15 +949,27 @@ public static class Struple
         {
             bool negative = type == IntNegBig;
             int m = DecByte(Take(1)[0], negative);
+            // Length-of-length is capped at 8 bytes: no real magnitude needs a length
+            // that doesn't fit in u64, and without this bound `m` (0–255) lets the shift
+            // below overflow and `n` address the whole address space. The take below then
+            // rejects any n beyond the buffer cleanly.
+            if (m > 8) throw new StrupleException("big-int length-of-length too large");
             byte[] mbytes = Take(m);
-            int n = 0;
+            // Assemble `n` as unsigned 64-bit (mirroring Zig's usize): a hostile length
+            // stays a huge positive here rather than wrapping to a negative int32 (which
+            // would slip past the guard and blow up at `new byte[n]` with OverflowException).
+            ulong n = 0;
             foreach (byte b in mbytes)
             {
-                n = (n << 8) | DecByte(b, negative);
+                n = (n << 8) | (byte)DecByte(b, negative);
             }
-            byte[] stored = Take(n);
-            var mag = new byte[n];
-            for (int i = 0; i < n; i++)
+            // Guard as `n > remaining` so the huge length can't overflow; once it passes,
+            // n fits an int (buffer length is an int) and the take is safe.
+            if (n > (ulong)(_buf.Length - _pos)) throw new StrupleException("truncated");
+            int nn = (int)n;
+            byte[] stored = Take(nn);
+            var mag = new byte[nn];
+            for (int i = 0; i < nn; i++)
             {
                 mag[i] = (byte)DecByte(stored[i], negative);
             }
@@ -1034,7 +1046,11 @@ public static class Struple
 
         private byte[] Take(int n)
         {
-            if (_pos + n > _buf.Length) throw new StrupleException("truncated");
+            // Guard written as `n > remaining` (never `pos + n > len`): the addition
+            // would overflow for an attacker-supplied length before it could be
+            // caught. `_pos <= _buf.Length` is a Reader invariant, so `_buf.Length - _pos`
+            // never underflows.
+            if (n > _buf.Length - _pos) throw new StrupleException("truncated");
             var slice = new byte[n];
             System.Array.Copy(_buf, _pos, slice, 0, n);
             _pos += n;

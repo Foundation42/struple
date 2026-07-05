@@ -507,7 +507,11 @@ class Reader(val buf: ByteArray, var pos: Int = 0) {
     fun skip(): Boolean = nextView() != null
 
     private fun take(n: Int): ByteArray {
-        if (pos + n > buf.size) throw StrupleException("struple: truncated")
+        // Guard as `n > remaining` (never `pos + n > size`): the addition would
+        // overflow Int for an attacker-supplied length before it could be caught.
+        // `pos <= buf.size` is a Reader invariant, so `buf.size - pos` never
+        // underflows; a negative n (from an overflowed length) is rejected too.
+        if (n < 0 || n > buf.size - pos) throw StrupleException("struple: truncated")
         val s = buf.copyOfRange(pos, pos + n)
         pos += n
         return s
@@ -547,11 +551,20 @@ class Reader(val buf: ByteArray, var pos: Int = 0) {
     private fun readBigInt(t: Int): BigInteger {
         val negative = t == Tc.INT_NEG_BIG
         val comp = { b: Int -> if (negative) b.inv() and 0xFF else b and 0xFF }
-        val m = comp(byteAt(pos)); pos++
-        var n = 0
-        for (b in take(m)) n = (n shl 8) or comp(b.toInt() and 0xFF)
-        val magBytes = take(n)
-        val mag = ByteArray(n) { comp(magBytes[it].toInt() and 0xFF).toByte() }
+        val m = comp(take(1)[0].toInt() and 0xFF)
+        // Length-of-length is capped at 8 bytes: no real magnitude needs a length
+        // that doesn't fit in u64, and without this bound `m` (0-255) lets the
+        // assembled `n` overflow and address the whole space. The take() bound then
+        // rejects any n beyond the buffer cleanly.
+        if (m > 8) throw StrupleException("struple: big-int length header too large")
+        var n = 0L
+        for (b in take(m)) n = (n shl 8) or comp(b.toInt() and 0xFF).toLong()
+        // `n` is assembled unsigned into 64 bits; reject before allocating/reading.
+        // A negative value here means the top bit is set (n >= 2^63) — astronomically
+        // past any real buffer — so treat it (and any n past the buffer) as truncated.
+        if (n < 0L || n > (buf.size - pos).toLong()) throw StrupleException("struple: truncated")
+        val magBytes = take(n.toInt())
+        val mag = ByteArray(magBytes.size) { comp(magBytes[it].toInt() and 0xFF).toByte() }
         val v = BigInteger(1, mag)
         return if (negative) v.negate() else v
     }
@@ -577,7 +590,7 @@ class Reader(val buf: ByteArray, var pos: Int = 0) {
     }
 
     private fun readDecimal(): BigDecimal {
-        val sign = byteAt(pos); pos++
+        val sign = take(1)[0].toInt() and 0xFF
         if (sign == DEC_SIGN_ZERO) return BigDecimal.ZERO
         if (sign != DEC_SIGN_NEG && sign != DEC_SIGN_POS) throw StrupleException("struple: invalid decimal sign")
         val negative = sign == DEC_SIGN_NEG
@@ -611,13 +624,13 @@ class Reader(val buf: ByteArray, var pos: Int = 0) {
 
     private fun readDecExponent(complement: Boolean): Int {
         val comp = { b: Int -> if (complement) b xor 0xFF else b }
-        val tb = comp(byteAt(pos)); pos++
+        val tb = comp(take(1)[0].toInt() and 0xFF)
         if (tb == Tc.INT_ZERO) return 0
         if ((tb in 0x10..0x1F) || (tb in 0x21..0x30)) {
             val positive = tb > Tc.INT_ZERO
             val n = if (positive) tb - Tc.INT_ZERO else Tc.INT_ZERO - tb
-            val payload = ByteArray(n) { comp(byteAt(pos + it)).toByte() }
-            pos += n
+            val rawBytes = take(n)
+            val payload = ByteArray(n) { comp(rawBytes[it].toInt() and 0xFF).toByte() }
             if (n == 16 && ((positive && (payload[0].toInt() and 0xFF) >= 0x80) ||
                     (!positive && (payload[0].toInt() and 0xFF) < 0x80))) {
                 throw StrupleException("struple: non-canonical 16-byte decimal exponent")

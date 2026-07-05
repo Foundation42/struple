@@ -88,9 +88,39 @@ public final class TestConformance {
             }
         }
 
+        // malformed / hostile corpus — every case must reject with the port's own clean decode
+        // error (StrupleException). A different exception type (IllegalArgumentException,
+        // ArrayIndexOutOfBoundsException, ...) or no throw at all is a hardening FAILURE.
+        int malformedTotal = 0;
+        int malformedRejected = 0;
+        String malCorpus = read("../conformance/malformed.json");
+        JsonObject malRoot = (JsonObject) Json.parse(malCorpus);
+        @SuppressWarnings("unchecked")
+        List<Object> malCases = (List<Object>) malRoot.get("cases");
+        for (Object o : malCases) {
+            JsonObject c = (JsonObject) o;
+            String hex = (String) c.get("hex");
+            byte[] bin = hexDecode(hex);
+            malformedTotal++;
+            try {
+                transcode(bin); // fully walk the stream: decode + re-encode every element
+                System.err.println("MALFORMED FAIL [" + hex + "]: accepted, should reject — "
+                        + c.get("note"));
+                failures++;
+            } catch (Struple.StrupleException ok) {
+                malformedRejected++; // the port's clean decode error — the only acceptable outcome
+            } catch (RuntimeException wrong) {
+                System.err.println("MALFORMED FAIL [" + hex + "]: wrong exception type "
+                        + wrong.getClass().getName() + ": " + wrong.getMessage());
+                failures++;
+            }
+        }
+
         System.out.printf(
-                "TestConformance: json encode %d decode %d | build %d transcode %d | semantic %d | %d failures%n",
-                jsonEnc, jsonDec, buildEnc, buildTrc, semOk, failures);
+                "TestConformance: json encode %d decode %d | build %d transcode %d | semantic %d "
+                        + "| malformed %d/%d rejected | %d failures%n",
+                jsonEnc, jsonDec, buildEnc, buildTrc, semOk, malformedRejected, malformedTotal,
+                failures);
         if (failures != 0) {
             System.exit(1);
         }

@@ -139,7 +139,33 @@ int main() {
         }
     }
 
-    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | %d failures\n",
-                je, jd, be, bt, sem, fails);
+    // malformed / hostile corpus: every case must be rejected with struple::Error
+    // (never an OOB read under ASan, an abort, a std::length_error, or acceptance).
+    int mal_ok = 0, mal_tot = 0;
+    Json mroot = json_parse(read_file("../conformance/malformed.json"));
+    const Json* cases = obj_get(mroot, "cases");
+    if (cases) {
+        for (auto& c : cases->items) {
+            const std::string& hex = obj_get(c, "hex")->text;
+            Bytes bin = from_hex(hex);
+            mal_tot++;
+            try {
+                transcode(bin);
+                std::fprintf(stderr, "MALFORMED FAIL %s: transcode accepted it\n", hex.c_str());
+                fails++;
+            } catch (const struple::Error&) {
+                mal_ok++;
+            } catch (const std::exception& ex) {
+                std::fprintf(stderr, "MALFORMED FAIL %s: wrong exception type: %s\n", hex.c_str(), ex.what());
+                fails++;
+            }
+        }
+    } else {
+        std::fprintf(stderr, "could not parse malformed corpus\n");
+        fails++;
+    }
+
+    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | malformed %d/%d rejected | %d failures\n",
+                je, jd, be, bt, sem, mal_ok, mal_tot, fails);
     return fails ? 1 : 0;
 }

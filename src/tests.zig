@@ -621,6 +621,28 @@ test "decode: truncated and invalid input" {
         var r = struple.reader(&buf);
         try testing.expectError(error.InvalidType, r.next());
     }
+    {
+        // Item 1 — big-int length header claims n=2^64-1 (10 bytes total). Must be a
+        // clean Truncated, never an overflow-driven OOB read / panic.
+        var r = struple.reader(&.{ 0x31, 0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
+        try testing.expectError(error.Truncated, r.next());
+    }
+    {
+        // Item 1 — negative big-int, same class. Length bytes are bit-complemented,
+        // so m byte 0xF7 = 8 and magnitude-length bytes 0x00 = n=2^64-1.
+        var r = struple.reader(&.{ 0x0f, 0xf7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+        try testing.expectError(error.Truncated, r.next());
+    }
+    {
+        // Item 1 — length-of-length m=9 exceeds the 8-byte cap.
+        var r = struple.reader(&.{ 0x31, 0x09, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
+        try testing.expectError(error.InvalidType, r.next());
+    }
+    {
+        // Item 1 — truncated big-int: m announced, length byte missing.
+        var r = struple.reader(&.{ 0x31, 0x01 });
+        try testing.expectError(error.Truncated, r.next());
+    }
 }
 
 // ---------------------------------------------------------------------------

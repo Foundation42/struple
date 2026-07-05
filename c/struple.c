@@ -432,7 +432,9 @@ static uint8_t *r_scratch(struple_reader *r, size_t needed) {
 }
 
 static const uint8_t *take(struple_reader *r, size_t n) {
-    if (r->pos + n > r->len) return NULL;
+    /* Guard as `n > remaining`, never `pos + n > len`: for an attacker-supplied n
+     * the addition overflows size_t and wraps past the check. pos <= len always. */
+    if (n > r->len - r->pos) return NULL;
     const uint8_t *p = r->buf + r->pos;
     r->pos += n;
     return p;
@@ -563,6 +565,9 @@ static int read_big_int(struple_reader *r, uint8_t t, struple_element *out) {
     const uint8_t *p = take(r, 1);
     if (!p) return -1;
     size_t m = negative ? (uint8_t)~p[0] : p[0];
+    /* Length-of-length cap: a real magnitude length fits in <= 8 bytes. Without
+     * this the shift below overflows and n can address the whole buffer. */
+    if (m > 8) return -1;
     const uint8_t *nb = take(r, m);
     if (!nb) return -1;
     size_t n = 0;
@@ -820,13 +825,16 @@ static int element_span(const uint8_t *buf, size_t len, size_t pos, size_t *out)
         if (p >= len) return -1;
         size_t m = neg ? (uint8_t)~buf[p] : buf[p];
         p++;
-        if (p + m > len) return -1;
+        if (m > 8) return -1;        /* length-of-length cap (Item 1) */
+        if (m > len - p) return -1;  /* length bytes must fit (no pos+m overflow) */
         size_t n = 0;
         for (size_t i = 0; i < m; i++) {
             uint8_t b = neg ? (uint8_t)~buf[p + i] : buf[p + i];
             n = (n << 8) | b;
         }
-        p += m + n;
+        p += m;
+        if (n > len - p) return -1;  /* magnitude must fit (no p+m+n overflow) */
+        p += n;
     } else if (t == FLOAT32) {
         p += 4;
     } else if (t == FLOAT64 || t == TIMESTAMP) {

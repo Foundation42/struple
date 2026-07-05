@@ -22,6 +22,10 @@ _SEMANTIC = os.path.join(os.path.dirname(__file__), "..", "..", "conformance", "
 with open(_SEMANTIC, encoding="utf-8") as _f:
     SEM_VECTORS = json.load(_f)
 
+_MALFORMED = os.path.join(os.path.dirname(__file__), "..", "..", "conformance", "malformed.json")
+with open(_MALFORMED, encoding="utf-8") as _f:
+    MALFORMED = json.load(_f)["cases"]
+
 
 def build_bytes(op):
     w = Writer()
@@ -109,6 +113,30 @@ class Conformance(unittest.TestCase):
             a, b = bytes.fromhex(sv["a"]), bytes.fromhex(sv["b"])
             with self.subTest(a=sv["a"], b=sv["b"]):
                 self.assertEqual(semantic_order(a, b), sv["order"])
+
+
+class Malformed(unittest.TestCase):
+    """Negative counterpart to vectors.json: hostile/truncated encodings that the
+    decoder must reject with the port's clean struple error (ValueError) — never a
+    crash, a wrong exception type, or a silent wrong value. Covers HARDENING.md
+    Item 1 (unbounded big-int length header) and neighbouring truncation cases.
+    """
+
+    def test_all_rejected(self):
+        rejected = 0
+        for case in MALFORMED:
+            data = bytes.fromhex(case["hex"])
+            with self.subTest(hex=case["hex"], note=case.get("note", "")):
+                # Walk the ENTIRE stream both ways: unpack (fully materialize) and
+                # transcode (re-serialize). Either surfacing a non-ValueError, or
+                # returning silently, is a failure.
+                with self.assertRaises(ValueError):
+                    unpack(data)
+                with self.assertRaises(ValueError):
+                    transcode(data)
+            rejected += 1
+        self.assertEqual(rejected, len(MALFORMED))
+        print(f"malformed: {rejected}/{len(MALFORMED)} rejected")
 
 
 class DecimalUnit(unittest.TestCase):

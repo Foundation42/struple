@@ -256,7 +256,11 @@ export class Reader {
   }
 
   take(n: number): Uint8Array {
-    if (this.pos + n > this.buf.length) throw new Error("struple: truncated");
+    // Guard written as `n > remaining` (never `pos + n > length`): the addition
+    // would overflow past Number.MAX_SAFE_INTEGER for an attacker-supplied length
+    // before it could be caught. `pos <= length` is a Reader invariant, so
+    // `length - pos` never goes negative.
+    if (n > this.buf.length - this.pos) throw new Error("struple: truncated");
     const s = this.buf.subarray(this.pos, this.pos + n);
     this.pos += n;
     return s;
@@ -297,10 +301,19 @@ export class Reader {
     const negative = t === T.intNegBig;
     const comp = (b: number): number => (negative ? ~b & 0xff : b);
     const m = comp(this.take(1)[0]);
-    let n = 0;
-    for (const b of this.take(m)) n = (n << 8) | comp(b);
+    // Length-of-length is capped at 8 bytes: no real magnitude needs a length
+    // that doesn't fit in u64, and without this bound `m` (0–255) lets `n` address
+    // the whole numeric space. The take guard below then rejects any n beyond the
+    // buffer cleanly. Assemble `n` as a bigint, not with JS `<<` (which is 32-bit
+    // and would silently truncate a large length into a small — or negative — one).
+    if (m > 8) throw new Error("struple: invalid big-int length-of-length");
+    let n = 0n;
+    for (const b of this.take(m)) n = (n << 8n) | BigInt(comp(b));
+    // Reject an out-of-range magnitude length before narrowing to a Number: a 2^64
+    // length must throw "truncated", never wrap or read past the buffer.
+    if (n > BigInt(this.buf.length - this.pos)) throw new Error("struple: truncated");
     let mag = 0n;
-    for (const b of this.take(n)) mag = (mag << 8n) | BigInt(comp(b));
+    for (const b of this.take(Number(n))) mag = (mag << 8n) | BigInt(comp(b));
     return { kind: "int", value: negative ? -mag : mag };
   }
 

@@ -6,6 +6,7 @@ package struple
 
 import (
 	"encoding/hex"
+	"fmt"
 	"os"
 	"strconv"
 	"testing"
@@ -224,6 +225,110 @@ func TestBuildTranscode(t *testing.T) {
 		if toHex(got) != asStr(t, bytesField) {
 			t.Errorf("transcode %s\n got %s", asStr(t, bytesField), toHex(got))
 		}
+	}
+}
+
+// loadMalformed reads conformance/malformed.json — the negative counterpart to
+// vectors.json. Its top level is an object { "description", "cases": [...] }, so
+// (unlike loadCorpus) it pulls out the "cases" array.
+func loadMalformed(t *testing.T) []jsonValue {
+	t.Helper()
+	text, err := os.ReadFile("../conformance/malformed.json")
+	if err != nil {
+		t.Fatalf("read malformed.json: %v", err)
+	}
+	v, err := parseJSON(string(text))
+	if err != nil {
+		t.Fatalf("parse malformed.json: %v", err)
+	}
+	cases, ok := field(v, "cases")
+	if !ok || cases.kind != jArray {
+		t.Fatalf("malformed.json: missing \"cases\" array")
+	}
+	return cases.arr
+}
+
+// decodeWalk decodes every element of buf in sequence, returning the first decode
+// error (nil means the whole buffer decoded as a valid stream — which for a
+// malformed case is itself a failure). Any panic is captured and surfaced via
+// panicked=true; the hardening fix must make a decode-time panic impossible, so
+// the test treats a panic as a hard failure rather than a clean rejection.
+func decodeWalk(buf []byte) (err error, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	r := NewReader(buf)
+	for {
+		_, ok, e := r.Next()
+		if e != nil {
+			return e, false
+		}
+		if !ok {
+			return nil, false
+		}
+	}
+}
+
+// transcodeSafe runs Transcode (which walks and re-encodes the entire stream)
+// under a recover guard, so a stray panic is reported rather than crashing the
+// test binary.
+func transcodeSafe(buf []byte) (err error, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	_, err = Transcode(buf)
+	return err, false
+}
+
+// TestMalformedRejected asserts every hostile encoding in malformed.json is
+// rejected cleanly by a full-stream walk (Reader.Next loop) and by Transcode —
+// a non-nil decode error, never a panic, crash, or silently-accepted value.
+func TestMalformedRejected(t *testing.T) {
+	cases := loadMalformed(t)
+	if len(cases) == 0 {
+		t.Fatal("malformed corpus is empty")
+	}
+	rejected := 0
+	for _, c := range cases {
+		hexField, _ := field(c, "hex")
+		hexStr := asStr(t, hexField)
+		note := ""
+		if nf, ok := field(c, "note"); ok && nf.kind == jStr {
+			note = nf.str
+		}
+		buf := fromHex(t, hexStr)
+
+		// Path 1: raw element walk.
+		err, panicked := decodeWalk(buf)
+		if panicked {
+			t.Errorf("malformed %s: PANICKED during walk (must reject cleanly) — %s", hexStr, note)
+			continue
+		}
+		if err == nil {
+			t.Errorf("malformed %s: accepted as valid by walk (want a decode error) — %s", hexStr, note)
+			continue
+		}
+		// Path 2: Transcode the whole stream.
+		tErr, tPanicked := transcodeSafe(buf)
+		if tPanicked {
+			t.Errorf("malformed %s: Transcode PANICKED (must reject cleanly) — %s", hexStr, note)
+			continue
+		}
+		if tErr == nil {
+			t.Errorf("malformed %s: Transcode accepted as valid (want a decode error) — %s", hexStr, note)
+			continue
+		}
+		rejected++
+	}
+	t.Logf("malformed: %d/%d rejected", rejected, len(cases))
+	if rejected != len(cases) {
+		t.Fatalf("malformed corpus: only %d of %d cases rejected cleanly", rejected, len(cases))
 	}
 }
 

@@ -632,7 +632,10 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if self.pos + n > self.buf.len() {
+        // Guard written as `n > remaining` (never `pos + n > len`): the addition
+        // would overflow usize for an attacker-supplied length before it could be
+        // caught. `pos <= len` is a Reader invariant, so `len - pos` never underflows.
+        if n > self.buf.len() - self.pos {
             return Err(Error::Truncated);
         }
         let s = &self.buf[self.pos..self.pos + n];
@@ -681,6 +684,13 @@ impl<'a> Reader<'a> {
         let negative = t == INT_NEG_BIG;
         let comp = |b: u8| if negative { !b } else { b };
         let m = comp(self.take(1)?[0]) as usize;
+        // Length-of-length is capped at 8 bytes: no real magnitude needs a length
+        // that doesn't fit in u64, and without this bound `m` (0–255) lets the shift
+        // below overflow and `n` address the whole address space. `take(n)` then
+        // rejects any n beyond the buffer cleanly.
+        if m > 8 {
+            return Err(Error::InvalidType(t));
+        }
         let mut n = 0usize;
         for &b in self.take(m)? {
             n = (n << 8) | comp(b) as usize;

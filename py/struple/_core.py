@@ -480,7 +480,12 @@ class Reader:
         return self.next_view() is not None
 
     def _take(self, n: int) -> bytes:
-        if self.pos + n > len(self.buf):
+        # Guard written as `n > remaining`, never `pos + n > len`: mirrors the Zig
+        # reference (`take`). The addition is the overflow site in fixed-width ports,
+        # and here it avoids materializing a huge (pos + n) bignum for an
+        # attacker-supplied n before the bound is even checked. `pos <= len` is a
+        # Reader invariant, so `len - pos` never goes negative.
+        if n > len(self.buf) - self.pos:
             raise ValueError("struple: truncated")
         s = self.buf[self.pos : self.pos + n]
         self.pos += n
@@ -525,6 +530,14 @@ class Reader:
         negative = t == INT_NEG_BIG
         comp = (lambda b: ~b & 0xFF) if negative else (lambda b: b)
         m = comp(self._take(1)[0])
+        # Length-of-length is capped at 8 bytes: no real magnitude needs a length
+        # that doesn't fit in u64. Without this bound, m (0–255) lets an attacker
+        # assemble an arbitrarily large n from hostile bytes; the _take(n) below then
+        # rejects any n beyond the buffer cleanly (its guard is written as
+        # `n > remaining`, never `pos + n`). Mirrors the Zig reference
+        # (src/struple.zig: `if (m > 8) return error.InvalidType`).
+        if m > 8:
+            raise ValueError("struple: big-int length-of-length exceeds 8 bytes")
         n = 0
         for b in self._take(m):
             n = (n << 8) | comp(b)

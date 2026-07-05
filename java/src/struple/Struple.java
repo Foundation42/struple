@@ -614,14 +614,23 @@ public final class Struple {
         private Element readBigInt(int type) {
             boolean negative = type == INT_NEG_BIG;
             int m = decByte(take(1)[0], negative);
+            // Length-of-length is capped at 8 bytes: no real magnitude needs a length that
+            // doesn't fit in u64, and without this bound `m` (0–255) lets the shift below
+            // overflow and `n` address the whole space. `take(n)` then rejects any `n` beyond
+            // the buffer cleanly. `n` is assembled into a long (not an int) so a legitimate
+            // m<=8 length can't silently wrap to a small/negative value and decode a wrong
+            // (truncated) magnitude instead of being rejected.
+            if (m > 8) {
+                throw new StrupleException("big-int length-of-length exceeds 8 bytes");
+            }
             byte[] mbytes = take(m);
-            int n = 0;
+            long n = 0;
             for (byte b : mbytes) {
                 n = (n << 8) | decByte(b, negative);
             }
             byte[] stored = take(n);
-            byte[] mag = new byte[n];
-            for (int i = 0; i < n; i++) {
+            byte[] mag = new byte[stored.length];
+            for (int i = 0; i < mag.length; i++) {
                 mag[i] = (byte) decByte(stored[i], negative);
             }
             return Element.ofBigInt(new BigInt(negative, mag));
@@ -698,12 +707,18 @@ public final class Struple {
             return Double.longBitsToDouble(bits);
         }
 
-        private byte[] take(int n) {
-            if (pos + n > buf.length) {
+        private byte[] take(long n) {
+            // Guard written as `n > remaining` (never `pos + n > len`): the addition would
+            // overflow for an attacker-supplied length before it could be caught. A "negative"
+            // n (top bit set — a huge unsigned magnitude length that wrapped past 2^63) is
+            // rejected outright. `pos <= buf.length` is a Reader invariant, so `buf.length - pos`
+            // never underflows.
+            if (n < 0 || n > buf.length - pos) {
                 throw new StrupleException("truncated");
             }
-            byte[] slice = Arrays.copyOfRange(buf, pos, pos + n);
-            pos += n;
+            int len = (int) n;
+            byte[] slice = Arrays.copyOfRange(buf, pos, pos + len);
+            pos += len;
             return slice;
         }
 

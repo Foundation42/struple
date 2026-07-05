@@ -243,7 +243,40 @@ int main(void) {
     struple_json_free(sroot);
     free(stext);
 
-    printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | %d failures\n",
-           json_enc, json_dec, build_enc, build_trc, sem_ok, failures);
+    /* malformed / hostile corpus: every case must be rejected cleanly (transcode
+     * returns -1) — never an OOB read (ASan), abort, or accepted stream. */
+    int malformed_ok = 0, malformed_total = 0;
+    size_t mlen;
+    char *mtext = read_file("../conformance/malformed.json", &mlen);
+    sj_value *mroot = struple_json_parse(mtext, mlen);
+    const sj_value *cases = mroot ? obj_get(mroot, "cases") : NULL;
+    if (cases && cases->kind == SJ_ARRAY) {
+        for (size_t i = 0; i < cases->count; i++) {
+            const char *hex = obj_get(&cases->items[i], "hex")->str;
+            uint8_t *bin;
+            size_t blen;
+            hexdec(hex, &bin, &blen);
+            struple_writer tw;
+            struple_writer_init(&tw);
+            int rc = struple_transcode(bin, blen, &tw);
+            if (rc == 0) { /* accepted a hostile stream — a decoder bug */
+                fprintf(stderr, "MALFORMED FAIL %s: transcode accepted it\n", hex);
+                failures++;
+            } else {
+                malformed_ok++;
+            }
+            malformed_total++;
+            struple_writer_free(&tw);
+            free(bin);
+        }
+    } else {
+        fprintf(stderr, "could not parse malformed corpus\n");
+        failures++;
+    }
+    struple_json_free(mroot);
+    free(mtext);
+
+    printf("test_conformance: json encode %d decode %d | build %d transcode %d | semantic %d | malformed %d/%d rejected | %d failures\n",
+           json_enc, json_dec, build_enc, build_trc, sem_ok, malformed_ok, malformed_total, failures);
     return failures ? 1 : 0;
 }
