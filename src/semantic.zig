@@ -30,10 +30,17 @@ const DecodeError = struple.DecodeError;
 const Order = std.math.Order;
 const Allocator = std.mem.Allocator;
 
-pub const SemanticError = DecodeError || Allocator.Error;
+pub const SemanticError = DecodeError || Allocator.Error || error{NestingTooDeep};
 
 /// Compare two encoded streams element-by-element by semantic value.
 pub fn semanticOrder(allocator: Allocator, a: []const u8, b: []const u8) SemanticError!Order {
+    return semanticOrderDepth(allocator, a, b, 0);
+}
+
+fn semanticOrderDepth(allocator: Allocator, a: []const u8, b: []const u8, depth: usize) SemanticError!Order {
+    // Bound recursion into nested containers so hostile deeply-nested input is
+    // rejected rather than overflowing the stack (Item 5).
+    if (depth > struple.max_depth) return error.NestingTooDeep;
     var ra = Reader.init(a);
     var rb = Reader.init(b);
     while (true) {
@@ -42,7 +49,7 @@ pub fn semanticOrder(allocator: Allocator, a: []const u8, b: []const u8) Semanti
         if (ea == null and eb == null) return .eq;
         if (ea == null) return .lt; // a is a prefix of b
         if (eb == null) return .gt;
-        const c = try compareElements(allocator, ea.?, eb.?);
+        const c = try compareElements(allocator, ea.?, eb.?, depth);
         if (c != .eq) return c;
     }
 }
@@ -72,7 +79,7 @@ fn classRank(k: Kind) u8 {
     };
 }
 
-fn compareElements(allocator: Allocator, a: Element, b: Element) SemanticError!Order {
+fn compareElements(allocator: Allocator, a: Element, b: Element, depth: usize) SemanticError!Order {
     const ra = classRank(a);
     const rb = classRank(b);
     if (ra != rb) return std.math.order(ra, rb);
@@ -86,18 +93,18 @@ fn compareElements(allocator: Allocator, a: Element, b: Element) SemanticError!O
         // built so memcmp of the framed slice already gives content order).
         .string => |x| std.mem.order(u8, x, b.string),
         .bytes => |x| std.mem.order(u8, x, b.bytes),
-        .array => |x| semanticOrderContainer(allocator, x, b.array),
-        .set => |x| semanticOrderContainer(allocator, x, b.set),
-        .map => |x| semanticOrderContainer(allocator, x, b.map),
+        .array => |x| semanticOrderContainer(allocator, x, b.array, depth),
+        .set => |x| semanticOrderContainer(allocator, x, b.set, depth),
+        .map => |x| semanticOrderContainer(allocator, x, b.map, depth),
     };
 }
 
-fn semanticOrderContainer(allocator: Allocator, fa: []const u8, fb: []const u8) SemanticError!Order {
+fn semanticOrderContainer(allocator: Allocator, fa: []const u8, fb: []const u8, depth: usize) SemanticError!Order {
     const ia = try struple.unescapeAlloc(allocator, fa);
     defer allocator.free(ia);
     const ib = try struple.unescapeAlloc(allocator, fb);
     defer allocator.free(ib);
-    return semanticOrder(allocator, ia, ib);
+    return semanticOrderDepth(allocator, ia, ib, depth + 1);
 }
 
 // ---------------------------------------------------------------------------

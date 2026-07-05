@@ -22,7 +22,13 @@ package struple
 import java.math.BigDecimal
 
 /** Compare two encoded streams element-by-element by semantic value: -1 / 0 / 1. */
-fun semanticOrder(a: ByteArray, b: ByteArray): Int {
+fun semanticOrder(a: ByteArray, b: ByteArray): Int = semanticOrderDepth(a, b, 0)
+
+private fun semanticOrderDepth(a: ByteArray, b: ByteArray, depth: Int): Int {
+    // Bound recursion into nested containers so hostile deeply-nested input is
+    // rejected rather than overflowing the stack (mirrors semanticOrderDepth in
+    // semantic.zig).
+    if (depth > MAX_DEPTH) throw StrupleException("struple/semantic: nesting too deep")
     val ra = Reader(a)
     val rb = Reader(b)
     while (true) {
@@ -31,7 +37,7 @@ fun semanticOrder(a: ByteArray, b: ByteArray): Int {
         if (ea == null && eb == null) return 0
         if (ea == null) return -1 // a is a prefix of b
         if (eb == null) return 1
-        val c = compareElements(ea, eb)
+        val c = compareElements(ea, eb, depth)
         if (c != 0) return c
     }
 }
@@ -55,7 +61,7 @@ private fun classRank(e: Element): Int = when (e) {
 
 private fun sign(x: Int): Int = if (x < 0) -1 else if (x > 0) 1 else 0
 
-private fun compareElements(a: Element, b: Element): Int {
+private fun compareElements(a: Element, b: Element, depth: Int): Int {
     val ra = classRank(a)
     val rb = classRank(b)
     if (ra != rb) return sign(ra - rb)
@@ -68,9 +74,9 @@ private fun compareElements(a: Element, b: Element): Int {
         // string/bytes content order == UTF-8 / raw byte order.
         is Element.Str -> order(a.value.toByteArray(Charsets.UTF_8), (b as Element.Str).value.toByteArray(Charsets.UTF_8))
         is Element.Bin -> order(a.value, (b as Element.Bin).value)
-        is Element.Arr -> semanticOrder(a.inner, (b as Element.Arr).inner)
-        is Element.SetElem -> semanticOrder(a.inner, (b as Element.SetElem).inner)
-        is Element.MapElem -> semanticOrder(a.inner, (b as Element.MapElem).inner)
+        is Element.Arr -> semanticOrderDepth(a.inner, (b as Element.Arr).inner, depth + 1)
+        is Element.SetElem -> semanticOrderDepth(a.inner, (b as Element.SetElem).inner, depth + 1)
+        is Element.MapElem -> semanticOrderDepth(a.inner, (b as Element.MapElem).inner, depth + 1)
     }
 }
 

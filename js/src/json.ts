@@ -7,19 +7,48 @@
 // native JSON.parse -> f64 would corrupt round-trips losslessly). Objects encode
 // to canonical (key-sorted) maps.
 
-import { Writer, Reader, type Element } from "./struple.ts";
+import { Writer, Reader, type Element, MAX_DEPTH } from "./struple.ts";
 
 /** Parse JSON text and return its struple encoding. */
 export function fromJson(text: string): Uint8Array {
+  // Reject hostile deeply-nested JSON before parsing: the native JSON.parse
+  // recurses in V8 and throws a native RangeError ("Maximum call stack size
+  // exceeded") on deep input. This linear bracket-depth pre-scan bounds both
+  // that recursion and encodeJson below, surfacing the port's own Error (Item 5).
+  checkJsonDepth(text);
   const w = new Writer();
-  encodeJson(w, parseJsonPreservingBigInts(text));
+  encodeJson(w, parseJsonPreservingBigInts(text), 0);
   return w.bytes();
+}
+
+/** Scan JSON text and reject if `[`/`{` nesting exceeds MAX_DEPTH. Brackets
+ *  inside string literals (and after `\`) don't count. */
+function checkJsonDepth(text: string): void {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === "[" || c === "{") {
+      depth++;
+      if (depth > MAX_DEPTH) throw new Error("struple: nesting too deep");
+    } else if (c === "]" || c === "}") {
+      if (depth > 0) depth--;
+    }
+  }
 }
 
 /** Render a struple encoding's first element as canonical JSON text. */
 export function toJson(bytes: Uint8Array): string {
   const e = new Reader(bytes).next();
-  return e === null ? "null" : renderElement(e);
+  return e === null ? "null" : renderElement(e, 0);
 }
 
 // JSON.parse with the source-access reviver: integer-valued number tokens become
@@ -33,7 +62,10 @@ function parseJsonPreservingBigInts(text: string): unknown {
   });
 }
 
-function encodeJson(w: Writer, value: unknown): void {
+function encodeJson(w: Writer, value: unknown, depth: number): void {
+  // Defense in depth: bound the struple-build recursion too, so even a value
+  // tree that slipped past checkJsonDepth can't overflow the stack (Item 5).
+  if (depth > MAX_DEPTH) throw new Error("struple: nesting too deep");
   if (value === null) {
     w.appendNil();
     return;
@@ -54,7 +86,7 @@ function encodeJson(w: Writer, value: unknown): void {
     case "object": {
       if (Array.isArray(value)) {
         const child = new Writer();
-        for (const item of value) encodeJson(child, item);
+        for (const item of value) encodeJson(child, item, depth + 1);
         w.appendArray(child.bytes());
         return;
       }
@@ -64,7 +96,7 @@ function encodeJson(w: Writer, value: unknown): void {
         const kp = new Writer();
         kp.appendString(key);
         const vp = new Writer();
-        encodeJson(vp, obj[key]);
+        encodeJson(vp, obj[key], depth + 1);
         entries.push([kp.bytes(), vp.bytes()]);
       }
       w.appendMap(entries);
@@ -74,7 +106,10 @@ function encodeJson(w: Writer, value: unknown): void {
   throw new Error(`struple/json: cannot encode value of type ${typeof value}`);
 }
 
-function renderElement(e: Element): string {
+function renderElement(e: Element, depth: number): string {
+  // Bound recursion into nested containers so hostile deeply-nested input is
+  // rejected rather than overflowing the stack (Item 5).
+  if (depth > MAX_DEPTH) throw new Error("struple: nesting too deep");
   switch (e.kind) {
     case "nil":
     case "undef":
@@ -98,29 +133,29 @@ function renderElement(e: Element): string {
       return JSON.stringify(toBase64(e.value));
     case "array":
     case "set":
-      return renderArray(e.body);
+      return renderArray(e.body, depth);
     case "map":
-      return renderMap(e.body);
+      return renderMap(e.body, depth);
   }
 }
 
-function renderArray(body: Uint8Array): string {
+function renderArray(body: Uint8Array, depth: number): string {
   const r = new Reader(body);
   const parts: string[] = [];
   let e: Element | null;
-  while ((e = r.next()) !== null) parts.push(renderElement(e));
+  while ((e = r.next()) !== null) parts.push(renderElement(e, depth + 1));
   return "[" + parts.join(",") + "]";
 }
 
-function renderMap(body: Uint8Array): string {
+function renderMap(body: Uint8Array, depth: number): string {
   const r = new Reader(body);
   const parts: string[] = [];
   let k: Element | null;
   while ((k = r.next()) !== null) {
     const v = r.next();
     if (v === null) throw new Error("struple/json: malformed map");
-    const key = k.kind === "string" ? JSON.stringify(k.value) : JSON.stringify(renderElement(k));
-    parts.push(key + ":" + renderElement(v));
+    const key = k.kind === "string" ? JSON.stringify(k.value) : JSON.stringify(renderElement(k, depth + 1));
+    parts.push(key + ":" + renderElement(v, depth + 1));
   }
   return "{" + parts.join(",") + "}";
 }

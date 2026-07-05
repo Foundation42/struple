@@ -1569,9 +1569,9 @@ static int sem_numbers(const struple_element *a, const struple_element *b, int *
     return -sem_int_finite(b, sem_float(a), err);
 }
 
-static int sem_order_impl(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int *order, int *err);
+static int sem_order_impl(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int *order, int *err, int depth);
 
-static int sem_elements(const struple_element *a, const struple_element *b, int *err) {
+static int sem_elements(const struple_element *a, const struple_element *b, int *err, int depth) {
     int ra = sem_class_rank(a->kind), rb = sem_class_rank(b->kind);
     if (ra != rb) return (ra > rb) - (ra < rb);
     switch (a->kind) {
@@ -1591,14 +1591,18 @@ static int sem_elements(const struple_element *a, const struple_element *b, int 
         case STRUPLE_MAP:
         case STRUPLE_SET: {
             int ord = 0;
-            sem_order_impl(a->data, a->data_len, b->data, b->data_len, &ord, err);
+            /* Descending into a nested container: one level deeper. */
+            sem_order_impl(a->data, a->data_len, b->data, b->data_len, &ord, err, depth + 1);
             return ord;
         }
     }
     return 0;
 }
 
-static int sem_order_impl(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int *order, int *err) {
+static int sem_order_impl(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int *order, int *err, int depth) {
+    /* Bound recursion into nested containers so hostile deeply-nested input is
+     * rejected (via *err) rather than overflowing the stack (Item 5). */
+    if (depth > STRUPLE_MAX_DEPTH) { *err = 1; *order = 0; return -1; }
     struple_reader ra, rb;
     struple_reader_init(&ra, a, alen);
     struple_reader_init(&rb, b, blen);
@@ -1611,7 +1615,7 @@ static int sem_order_impl(const uint8_t *a, size_t alen, const uint8_t *b, size_
         if (sa == 0 && sb == 0) { *order = 0; break; }
         if (sa == 0) { *order = -1; break; }
         if (sb == 0) { *order = 1; break; }
-        int c = sem_elements(&ea, &eb, err);
+        int c = sem_elements(&ea, &eb, err, depth);
         if (*err) break;
         if (c != 0) { *order = c < 0 ? -1 : 1; break; }
     }
@@ -1623,7 +1627,7 @@ static int sem_order_impl(const uint8_t *a, size_t alen, const uint8_t *b, size_
 int struple_semantic_order(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int *order) {
     int err = 0;
     int ord = 0;
-    sem_order_impl(a, alen, b, blen, &ord, &err);
+    sem_order_impl(a, alen, b, blen, &ord, &err, 0);
     if (err) return -1;
     *order = ord;
     return 0;

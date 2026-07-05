@@ -51,6 +51,15 @@ private const val DEC_SIGN_POS = 0x03
 
 private const val ESCAPE_BYTE = 0xFF
 
+/**
+ * Maximum container/JSON nesting depth accepted by the recursive walks (JSON
+ * parse, JSON render, semantic compare). Bounds stack use so hostile
+ * deeply-nested input is rejected with a StrupleException instead of a
+ * StackOverflowError. Mirrors `struple.max_depth` in src/struple.zig; shared
+ * across all 12 ports — no real value nests anywhere near this deep.
+ */
+const val MAX_DEPTH = 256
+
 // The fixed integer slots span the i128 range; values beyond use the big-int codes.
 private val I128_MAX: BigInteger = BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE)
 private val I128_MIN: BigInteger = BigInteger.ONE.shiftLeft(127).negate()

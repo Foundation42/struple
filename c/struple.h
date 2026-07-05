@@ -19,6 +19,12 @@
 extern "C" {
 #endif
 
+/* Maximum container nesting depth for the recursive walks (JSON parse, JSON
+ * render, semantic compare). Hostile deeply-nested input beyond this is rejected
+ * with the port's error path rather than overflowing the C stack (mirrors the
+ * Zig reference `struple.max_depth`). */
+#define STRUPLE_MAX_DEPTH 256
+
 /* ---- Writer: builds an encoded buffer ---- */
 
 typedef struct {

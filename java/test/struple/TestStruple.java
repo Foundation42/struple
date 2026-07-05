@@ -33,6 +33,7 @@ public final class TestStruple {
         navMapLookup();
         navIndexedMap();
         semanticSpot();
+        depthCap();
 
         System.out.printf("TestStruple: %d checks | %d failures%n", checks, failures);
         if (failures != 0) {
@@ -314,6 +315,52 @@ public final class TestStruple {
         // nil < bool, string < bytes
         check(Semantic.semanticOrder(new Packer().appendNil().bytes(),
                 new Packer().appendBool(false).bytes()) == -1, "sem nil < bool");
+    }
+
+    // -----------------------------------------------------------------------
+    // depth cap: deeply nested input is rejected, not a stack overflow
+    // (mirrors src/tests.zig "depth cap")
+    // -----------------------------------------------------------------------
+
+    private static void depthCap() {
+        // fromJson: a 1000-deep JSON array (> MAX_DEPTH) is rejected by the recursive-descent
+        // parser as a StrupleException — never a StackOverflowError.
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < 1000; i++) {
+            s.append('[');
+        }
+        for (int i = 0; i < 1000; i++) {
+            s.append(']');
+        }
+        String deepJson = s.toString();
+        check(throwsStruple(() -> Json.fromJson(deepJson)),
+                "depth cap: fromJson 1000-deep rejects (StrupleException)");
+
+        // Build a 300-deep nested-array encoding with the port's own encoder, then toJson and
+        // semanticOrder must reject it at the cap rather than recursing to overflow.
+        byte[] buf = new Packer().appendInt(0).bytes();
+        for (int d = 0; d < 300; d++) {
+            buf = new Packer().appendArray(buf).bytes();
+        }
+        final byte[] nested = buf;
+        check(throwsStruple(() -> Json.toJson(nested)),
+                "depth cap: toJson 300-deep rejects (StrupleException)");
+        check(throwsStruple(() -> Semantic.semanticOrder(nested, nested)),
+                "depth cap: semanticOrder 300-deep rejects (StrupleException)");
+    }
+
+    /**
+     * True iff {@code r} throws a {@link Struple.StrupleException}. A {@code StackOverflowError} is
+     * an {@link Error}, not caught here, so it propagates and fails the run — exactly the
+     * regression the depth cap guards against.
+     */
+    private static boolean throwsStruple(Runnable r) {
+        try {
+            r.run();
+            return false;
+        } catch (Struple.StrupleException e) {
+            return true;
+        }
     }
 
     private TestStruple() {}

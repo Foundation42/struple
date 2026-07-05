@@ -32,6 +32,16 @@ public final class Semantic {
 
     /** Compare two encoded streams element-by-element by semantic value (-1/0/1). */
     public static int semanticOrder(byte[] a, byte[] b) {
+        return semanticOrderDepth(a, b, 0);
+    }
+
+    private static int semanticOrderDepth(byte[] a, byte[] b, int depth) {
+        // Bound recursion into nested containers so hostile deeply-nested input is rejected rather
+        // than overflowing the stack (mirrors src/semantic.zig semanticOrderDepth: depth 0 at the
+        // top-level element, +1 per container descent, reject when depth > max_depth).
+        if (depth > Struple.MAX_DEPTH) {
+            throw new Struple.StrupleException("nesting too deep");
+        }
         Reader ra = new Reader(a);
         Reader rb = new Reader(b);
         while (true) {
@@ -46,7 +56,7 @@ public final class Semantic {
             if (eb == null) {
                 return 1;
             }
-            int c = compareElements(ea, eb);
+            int c = compareElements(ea, eb, depth);
             if (c != 0) {
                 return c;
             }
@@ -90,7 +100,7 @@ public final class Semantic {
         }
     }
 
-    private static int compareElements(Element a, Element b) {
+    private static int compareElements(Element a, Element b, int depth) {
         int ra = classRank(a.kind);
         int rb = classRank(b.kind);
         if (ra != rb) {
@@ -123,7 +133,7 @@ public final class Semantic {
             case MAP:
             case SET:
                 // a.inner()/b.inner() are already the un-escaped inner streams
-                return semanticOrder(a.inner(), b.inner());
+                return semanticOrderDepth(a.inner(), b.inner(), depth + 1);
             default:
                 throw new IllegalStateException();
         }

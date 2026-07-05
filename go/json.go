@@ -78,7 +78,7 @@ func ToJson(encoded []byte) (string, error) {
 		return "null", nil
 	}
 	var sb strings.Builder
-	if err := renderJSON(&sb, e); err != nil {
+	if err := renderJSON(&sb, e, 0); err != nil {
 		return "", err
 	}
 	return sb.String(), nil
@@ -134,7 +134,12 @@ func encodeJSON(w *Writer, v jsonValue) {
 // struple -> JSON
 // ---------------------------------------------------------------------------
 
-func renderJSON(sb *strings.Builder, e Element) error {
+func renderJSON(sb *strings.Builder, e Element, depth int) error {
+	// Bound recursion into nested containers so hostile deeply-nested input is
+	// rejected rather than overflowing the stack (Item 5).
+	if depth > maxDepth {
+		return ErrNestingTooDeep
+	}
 	switch e.Kind {
 	case KindNil, KindUndefined:
 		sb.WriteString("null")
@@ -161,9 +166,9 @@ func renderJSON(sb *strings.Builder, e Element) error {
 	case KindBytes:
 		renderString(sb, base64Std(Unescape(e.Body)))
 	case KindArray, KindSet:
-		return renderArray(sb, e.Body)
+		return renderArray(sb, e.Body, depth)
 	case KindMap:
-		return renderMap(sb, e.Body)
+		return renderMap(sb, e.Body, depth)
 	default:
 		return ErrInvalidType
 	}
@@ -182,7 +187,7 @@ func isFinite(f float64) bool {
 	return f == f && f-f == 0 // not NaN and not Inf
 }
 
-func renderArray(sb *strings.Builder, framed []byte) error {
+func renderArray(sb *strings.Builder, framed []byte, depth int) error {
 	content := Unescape(framed)
 	r := NewReader(content)
 	sb.WriteByte('[')
@@ -199,7 +204,7 @@ func renderArray(sb *strings.Builder, framed []byte) error {
 			sb.WriteByte(',')
 		}
 		first = false
-		if err := renderJSON(sb, e); err != nil {
+		if err := renderJSON(sb, e, depth+1); err != nil {
 			return err
 		}
 	}
@@ -207,7 +212,7 @@ func renderArray(sb *strings.Builder, framed []byte) error {
 	return nil
 }
 
-func renderMap(sb *strings.Builder, framed []byte) error {
+func renderMap(sb *strings.Builder, framed []byte, depth int) error {
 	content := Unescape(framed)
 	r := NewReader(content)
 	sb.WriteByte('{')
@@ -236,13 +241,13 @@ func renderMap(sb *strings.Builder, framed []byte) error {
 		} else {
 			// Non-string key: render its JSON and quote the result.
 			var tmp strings.Builder
-			if err := renderJSON(&tmp, k); err != nil {
+			if err := renderJSON(&tmp, k, depth+1); err != nil {
 				return err
 			}
 			renderString(sb, tmp.String())
 		}
 		sb.WriteByte(':')
-		if err := renderJSON(sb, v); err != nil {
+		if err := renderJSON(sb, v, depth+1); err != nil {
 			return err
 		}
 	}
@@ -379,7 +384,7 @@ func base64Std(data []byte) string {
 
 func parseJSON(s string) (jsonValue, error) {
 	p := &jsonParser{b: []byte(s)}
-	v, err := p.value()
+	v, err := p.value(0)
 	if err != nil {
 		return jsonValue{}, err
 	}
@@ -412,7 +417,12 @@ func (p *jsonParser) ws() {
 	}
 }
 
-func (p *jsonParser) value() (jsonValue, error) {
+func (p *jsonParser) value(depth int) (jsonValue, error) {
+	// Bound recursion into nested arrays/objects so hostile deeply-nested input
+	// is rejected rather than overflowing the stack (Item 5).
+	if depth > maxDepth {
+		return jsonValue{}, ErrNestingTooDeep
+	}
 	p.ws()
 	c, ok := p.peek()
 	if !ok {
@@ -441,9 +451,9 @@ func (p *jsonParser) value() (jsonValue, error) {
 		}
 		return jsonValue{kind: jStr, str: s}, nil
 	case c == '[':
-		return p.array()
+		return p.array(depth)
 	case c == '{':
-		return p.object()
+		return p.object(depth)
 	case c == '-' || (c >= '0' && c <= '9'):
 		return p.number()
 	default:
@@ -586,7 +596,7 @@ func (p *jsonParser) number() (jsonValue, error) {
 	return jsonValue{kind: jBigInt, str: tok}, nil
 }
 
-func (p *jsonParser) array() (jsonValue, error) {
+func (p *jsonParser) array(depth int) (jsonValue, error) {
 	p.i++ // [
 	var items []jsonValue
 	p.ws()
@@ -595,7 +605,7 @@ func (p *jsonParser) array() (jsonValue, error) {
 		return jsonValue{kind: jArray, arr: items}, nil
 	}
 	for {
-		v, err := p.value()
+		v, err := p.value(depth + 1)
 		if err != nil {
 			return jsonValue{}, err
 		}
@@ -618,7 +628,7 @@ func (p *jsonParser) array() (jsonValue, error) {
 	return jsonValue{kind: jArray, arr: items}, nil
 }
 
-func (p *jsonParser) object() (jsonValue, error) {
+func (p *jsonParser) object(depth int) (jsonValue, error) {
 	p.i++ // {
 	var members []jsonMember
 	p.ws()
@@ -640,7 +650,7 @@ func (p *jsonParser) object() (jsonValue, error) {
 			return jsonValue{}, errors.New("struple: expected :")
 		}
 		p.i++
-		val, err := p.value()
+		val, err := p.value(depth + 1)
 		if err != nil {
 			return jsonValue{}, err
 		}

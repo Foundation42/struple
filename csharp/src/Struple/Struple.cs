@@ -82,6 +82,14 @@ public static class Struple
     public static readonly BigInteger I128Max = (BigInteger.One << 127) - BigInteger.One;
     public static readonly BigInteger I128Min = -(BigInteger.One << 127);
 
+    /// <summary>
+    /// Maximum container/JSON nesting depth accepted by the recursive walks (JSON parse, JSON render,
+    /// semantic compare). Bounds stack use so hostile deeply-nested input is rejected with a
+    /// <see cref="StrupleException"/> instead of an uncatchable <c>StackOverflowException</c>. Shared
+    /// across all ports; no real value nests anywhere near this deep.
+    /// </summary>
+    public const int MaxDepth = 256;
+
     // -----------------------------------------------------------------------
     // Ordering (ordering IS memcmp)
     // -----------------------------------------------------------------------

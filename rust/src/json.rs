@@ -8,7 +8,7 @@
 //! i128; fractional/exponent numbers become f64. Objects encode to canonical
 //! (key-sorted) maps.
 
-use crate::codec::{Decimal, Element, Error, Reader, Writer};
+use crate::codec::{Decimal, Element, Error, Reader, Writer, MAX_DEPTH};
 
 /// A parsed JSON value (also used by the conformance tests to read the corpus).
 #[derive(Debug, Clone, PartialEq)]
@@ -38,7 +38,7 @@ pub fn to_json(bytes: &[u8]) -> Result<String, Error> {
         None => Ok("null".to_string()),
         Some(e) => {
             let mut s = String::new();
-            render(&mut s, &e)?;
+            render(&mut s, &e, 0)?;
             Ok(s)
         }
     }
@@ -91,7 +91,12 @@ fn encode_json(w: &mut Writer, v: &Json) {
     }
 }
 
-fn render(out: &mut String, e: &Element) -> Result<(), Error> {
+fn render(out: &mut String, e: &Element, depth: usize) -> Result<(), Error> {
+    // Bound recursion into nested containers so hostile deeply-nested input is
+    // rejected rather than overflowing the stack (Item 5).
+    if depth > MAX_DEPTH {
+        return Err(Error::NestingTooDeep);
+    }
     match e {
         Element::Nil | Element::Undefined => out.push_str("null"),
         Element::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -109,8 +114,8 @@ fn render(out: &mut String, e: &Element) -> Result<(), Error> {
         Element::Uuid(u) => render_string(out, &render_uuid(u)),
         Element::Str(s) => render_string(out, s),
         Element::Bytes(b) => render_string(out, &base64(b)),
-        Element::Array(body) | Element::Set(body) => render_array(out, body)?,
-        Element::Map(body) => render_map(out, body)?,
+        Element::Array(body) | Element::Set(body) => render_array(out, body, depth)?,
+        Element::Map(body) => render_map(out, body, depth)?,
     }
     Ok(())
 }
@@ -177,7 +182,7 @@ fn render_float(out: &mut String, f: f64) {
     }
 }
 
-fn render_array(out: &mut String, body: &[u8]) -> Result<(), Error> {
+fn render_array(out: &mut String, body: &[u8], depth: usize) -> Result<(), Error> {
     let mut r = Reader::new(body);
     out.push('[');
     let mut first = true;
@@ -186,13 +191,13 @@ fn render_array(out: &mut String, body: &[u8]) -> Result<(), Error> {
             out.push(',');
         }
         first = false;
-        render(out, &e)?;
+        render(out, &e, depth + 1)?;
     }
     out.push(']');
     Ok(())
 }
 
-fn render_map(out: &mut String, body: &[u8]) -> Result<(), Error> {
+fn render_map(out: &mut String, body: &[u8], depth: usize) -> Result<(), Error> {
     let mut r = Reader::new(body);
     out.push('{');
     let mut first = true;
@@ -206,12 +211,12 @@ fn render_map(out: &mut String, body: &[u8]) -> Result<(), Error> {
             Element::Str(s) => render_string(out, s),
             other => {
                 let mut tmp = String::new();
-                render(&mut tmp, other)?;
+                render(&mut tmp, other, depth + 1)?;
                 render_string(out, &tmp);
             }
         }
         out.push(':');
-        render(out, &v)?;
+        render(out, &v, depth + 1)?;
     }
     out.push('}');
     Ok(())
@@ -300,7 +305,7 @@ fn base64(data: &[u8]) -> String {
 /// Parse JSON text into a `Json` value.
 pub fn parse(s: &str) -> Result<Json, String> {
     let mut p = Parser { b: s.as_bytes(), i: 0 };
-    let v = p.value()?;
+    let v = p.value(0)?;
     p.ws();
     if p.i != p.b.len() {
         return Err("trailing data after JSON value".into());
@@ -324,7 +329,12 @@ impl Parser<'_> {
         }
     }
 
-    fn value(&mut self) -> Result<Json, String> {
+    fn value(&mut self, depth: usize) -> Result<Json, String> {
+        // Bound recursion into nested arrays/objects so hostile deeply-nested JSON
+        // is rejected here rather than overflowing the stack (Item 5).
+        if depth > MAX_DEPTH {
+            return Err("JSON nesting too deep".into());
+        }
         self.ws();
         match self.peek().ok_or("unexpected end of input")? {
             b'n' => {
@@ -340,8 +350,8 @@ impl Parser<'_> {
                 Ok(Json::Bool(false))
             }
             b'"' => Ok(Json::Str(self.string()?)),
-            b'[' => self.array(),
-            b'{' => self.object(),
+            b'[' => self.array(depth),
+            b'{' => self.object(depth),
             b'-' | b'0'..=b'9' => self.number(),
             c => Err(format!("unexpected byte {c:#x}")),
         }
@@ -443,7 +453,7 @@ impl Parser<'_> {
         }
     }
 
-    fn array(&mut self) -> Result<Json, String> {
+    fn array(&mut self, depth: usize) -> Result<Json, String> {
         self.i += 1; // [
         let mut items = Vec::new();
         self.ws();
@@ -452,7 +462,7 @@ impl Parser<'_> {
             return Ok(Json::Array(items));
         }
         loop {
-            items.push(self.value()?);
+            items.push(self.value(depth + 1)?);
             self.ws();
             match self.peek() {
                 Some(b',') => self.i += 1,
@@ -466,7 +476,7 @@ impl Parser<'_> {
         Ok(Json::Array(items))
     }
 
-    fn object(&mut self) -> Result<Json, String> {
+    fn object(&mut self, depth: usize) -> Result<Json, String> {
         self.i += 1; // {
         let mut entries = Vec::new();
         self.ws();
@@ -485,7 +495,7 @@ impl Parser<'_> {
                 return Err("expected `:`".into());
             }
             self.i += 1;
-            let val = self.value()?;
+            let val = self.value(depth + 1)?;
             entries.push((key, val));
             self.ws();
             match self.peek() {

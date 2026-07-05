@@ -108,6 +108,12 @@ pub const DecimalError = error{InvalidDecimal};
 pub const EncodeError = std.mem.Allocator.Error;
 pub const DecodeError = error{ Truncated, InvalidType, UnsupportedType };
 
+/// Maximum container/JSON nesting depth accepted by the recursive walks
+/// (JSON parse, JSON render, semantic compare). Bounds stack use so hostile
+/// deeply-nested input is rejected instead of overflowing the stack. Shared
+/// across all 12 ports; no real value nests anywhere near this deep.
+pub const max_depth: usize = 256;
+
 // ---------------------------------------------------------------------------
 // Decoded element view
 // ---------------------------------------------------------------------------

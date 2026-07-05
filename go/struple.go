@@ -78,7 +78,14 @@ var (
 	ErrTruncated      = errors.New("struple: truncated input")
 	ErrInvalidType    = errors.New("struple: invalid type code")
 	ErrInvalidDecimal = errors.New("struple: invalid decimal")
+	ErrNestingTooDeep = errors.New("struple: nesting too deep")
 )
+
+// maxDepth is the maximum container/JSON nesting depth accepted by the recursive
+// walks (JSON parse, JSON render, semantic compare). Bounds stack use so hostile
+// deeply-nested input is rejected instead of overflowing the stack. Shared across
+// all 12 ports; no real value nests anywhere near this deep.
+const maxDepth = 256
 
 // Kind identifies the type of a decoded Element.
 type Kind int

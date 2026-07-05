@@ -25,6 +25,15 @@ import (
 // SemanticOrder compares two encoded streams element-by-element by semantic
 // value, returning -1, 0, or +1.
 func SemanticOrder(a, b []byte) (int, error) {
+	return semanticOrderDepth(a, b, 0)
+}
+
+func semanticOrderDepth(a, b []byte, depth int) (int, error) {
+	// Bound recursion into nested containers so hostile deeply-nested input is
+	// rejected rather than overflowing the stack (Item 5).
+	if depth > maxDepth {
+		return 0, ErrNestingTooDeep
+	}
 	ra := NewReader(a)
 	rb := NewReader(b)
 	for {
@@ -45,7 +54,7 @@ func SemanticOrder(a, b []byte) (int, error) {
 		if !okb {
 			return 1, nil
 		}
-		c, err := compareElements(ea, eb)
+		c, err := compareElements(ea, eb, depth)
 		if err != nil {
 			return 0, err
 		}
@@ -88,7 +97,7 @@ func classRank(k Kind) int {
 	}
 }
 
-func compareElements(a, b Element) (int, error) {
+func compareElements(a, b Element, depth int) (int, error) {
 	ra, rb := classRank(a.Kind), classRank(b.Kind)
 	if ra != rb {
 		return cmpInt(ra, rb), nil
@@ -109,14 +118,14 @@ func compareElements(a, b Element) (int, error) {
 		// compare of the framed slice already gives content order).
 		return bytesCompare(a.Body, b.Body), nil
 	case KindArray, KindSet, KindMap:
-		return semanticOrderContainer(a.Body, b.Body)
+		return semanticOrderContainer(a.Body, b.Body, depth)
 	default:
 		return 0, ErrInvalidType
 	}
 }
 
-func semanticOrderContainer(fa, fb []byte) (int, error) {
-	return SemanticOrder(Unescape(fa), Unescape(fb))
+func semanticOrderContainer(fa, fb []byte, depth int) (int, error) {
+	return semanticOrderDepth(Unescape(fa), Unescape(fb), depth+1)
 }
 
 // ---------------------------------------------------------------------------

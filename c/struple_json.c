@@ -145,7 +145,7 @@ static char *parse_string_raw(P *p) {
 #undef ENSURE
 }
 
-static int parse_value(P *p, sj_value *out);
+static int parse_value(P *p, sj_value *out, int depth);
 
 static void free_internals(sj_value *v) {
     switch (v->kind) {
@@ -201,7 +201,11 @@ static int parse_number(P *p, sj_value *out) {
     return 0;
 }
 
-static int parse_array(P *p, sj_value *out) {
+static int parse_array(P *p, sj_value *out, int depth) {
+    /* `depth` is this array's nesting level (1 for a top-level array). Reject
+     * hostile deep nesting before recursing, so the parse aborts instead of
+     * overflowing the stack (Item 5). */
+    if (depth > STRUPLE_MAX_DEPTH) return -1;
     p->i++; /* [ */
     sj_value *items = NULL;
     size_t count = 0, cap = 0;
@@ -216,7 +220,7 @@ static int parse_array(P *p, sj_value *out) {
             cap = cap ? cap * 2 : 4;
             items = (sj_value *)realloc(items, cap * sizeof(sj_value));
         }
-        if (parse_value(p, &items[count]) != 0) goto fail;
+        if (parse_value(p, &items[count], depth) != 0) goto fail;
         count++;
         skip_ws(p);
         if (p->i >= p->n) goto fail;
@@ -235,7 +239,8 @@ fail:
     return -1;
 }
 
-static int parse_object(P *p, sj_value *out) {
+static int parse_object(P *p, sj_value *out, int depth) {
+    if (depth > STRUPLE_MAX_DEPTH) return -1;
     p->i++; /* { */
     char **keys = NULL;
     sj_value *vals = NULL;
@@ -263,7 +268,7 @@ static int parse_object(P *p, sj_value *out) {
             vals = (sj_value *)realloc(vals, cap * sizeof(sj_value));
         }
         keys[count] = key;
-        if (parse_value(p, &vals[count]) != 0) {
+        if (parse_value(p, &vals[count], depth) != 0) {
             free(key);
             goto fail;
         }
@@ -290,7 +295,7 @@ fail:
     return -1;
 }
 
-static int parse_value(P *p, sj_value *out) {
+static int parse_value(P *p, sj_value *out, int depth) {
     memset(out, 0, sizeof *out);
     skip_ws(p);
     if (p->i >= p->n) return -1;
@@ -305,8 +310,9 @@ static int parse_value(P *p, sj_value *out) {
         out->str = s;
         return 0;
     }
-    if (c == '[') return parse_array(p, out);
-    if (c == '{') return parse_object(p, out);
+    /* Descending into a container: its nesting level is depth + 1. */
+    if (c == '[') return parse_array(p, out, depth + 1);
+    if (c == '{') return parse_object(p, out, depth + 1);
     if (c == '-' || (c >= '0' && c <= '9')) return parse_number(p, out);
     return -1;
 }
@@ -314,7 +320,7 @@ static int parse_value(P *p, sj_value *out) {
 sj_value *struple_json_parse(const char *text, size_t len) {
     P p = {text, 0, len};
     sj_value *v = (sj_value *)malloc(sizeof(sj_value));
-    if (parse_value(&p, v) != 0) {
+    if (parse_value(&p, v, 0) != 0) {
         free(v);
         return NULL;
     }
@@ -568,9 +574,9 @@ static void render_decimal(struple_writer *out, const struple_element *e) {
     }
 }
 
-static int render(struple_writer *out, const struple_element *e);
+static int render(struple_writer *out, const struple_element *e, int depth);
 
-static int render_array(struple_writer *out, const uint8_t *body, size_t blen) {
+static int render_array(struple_writer *out, const uint8_t *body, size_t blen, int depth) {
     struple_reader r;
     struple_reader_init(&r, body, blen);
     jc(out, '[');
@@ -580,7 +586,7 @@ static int render_array(struple_writer *out, const uint8_t *body, size_t blen) {
     while ((rc = struple_reader_next(&r, &e)) == 1) {
         if (!first) jc(out, ',');
         first = false;
-        if (render(out, &e) != 0) {
+        if (render(out, &e, depth + 1) != 0) {
             struple_reader_free(&r);
             return -1;
         }
@@ -591,7 +597,7 @@ static int render_array(struple_writer *out, const uint8_t *body, size_t blen) {
     return 0;
 }
 
-static int render_map(struple_writer *out, const uint8_t *body, size_t blen) {
+static int render_map(struple_writer *out, const uint8_t *body, size_t blen, int depth) {
     struple_reader r;
     struple_reader_init(&r, body, blen);
     jc(out, '{');
@@ -608,7 +614,11 @@ static int render_map(struple_writer *out, const uint8_t *body, size_t blen) {
         } else {
             struple_writer tmp;
             struple_writer_init(&tmp);
-            render(&tmp, &k);
+            if (render(&tmp, &k, depth + 1) != 0) {
+                struple_writer_free(&tmp);
+                struple_reader_free(&r);
+                return -1;
+            }
             render_string(out, tmp.data, tmp.len);
             struple_writer_free(&tmp);
         }
@@ -617,7 +627,7 @@ static int render_map(struple_writer *out, const uint8_t *body, size_t blen) {
             struple_reader_free(&r);
             return -1;
         }
-        if (render(out, &v) != 0) {
+        if (render(out, &v, depth + 1) != 0) {
             struple_reader_free(&r);
             return -1;
         }
@@ -628,7 +638,10 @@ static int render_map(struple_writer *out, const uint8_t *body, size_t blen) {
     return 0;
 }
 
-static int render(struple_writer *out, const struple_element *e) {
+static int render(struple_writer *out, const struple_element *e, int depth) {
+    /* Bound recursion into nested containers so hostile deeply-nested input is
+     * rejected rather than overflowing the stack (Item 5). */
+    if (depth > STRUPLE_MAX_DEPTH) return -1;
     char tmp[32];
     switch (e->kind) {
         case STRUPLE_NIL:
@@ -669,8 +682,8 @@ static int render(struple_writer *out, const struple_element *e) {
             return 0;
         }
         case STRUPLE_ARRAY:
-        case STRUPLE_SET: return render_array(out, e->data, e->data_len);
-        case STRUPLE_MAP: return render_map(out, e->data, e->data_len);
+        case STRUPLE_SET: return render_array(out, e->data, e->data_len, depth);
+        case STRUPLE_MAP: return render_map(out, e->data, e->data_len, depth);
     }
     return -1;
 }
@@ -687,7 +700,7 @@ int struple_to_json(const uint8_t *buf, size_t len, struple_writer *out) {
     } else if (rc < 0) {
         result = -1;
     } else {
-        result = render(out, &e);
+        result = render(out, &e, 0);
     }
     struple_reader_free(&r);
     return result;

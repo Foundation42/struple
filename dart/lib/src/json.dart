@@ -27,6 +27,13 @@ import 'dart:typed_data';
 
 import 'codec.dart';
 
+/// Maximum container/JSON nesting depth accepted by the recursive walks (the
+/// hand-rolled JSON parse and the JSON render). Bounds stack use so hostile
+/// deeply-nested input is rejected instead of overflowing the stack (Item 5).
+/// Mirrors the Zig reference's `max_depth`; no real value nests anywhere near
+/// this deep.
+const int _maxDepth = 256;
+
 /// JSON node kinds for the hand-rolled parser (also used by the conformance
 /// runner to read the corpus).
 enum JsonKind { nullValue, boolValue, number, string_, array, object }
@@ -83,7 +90,7 @@ String toJson(Uint8List encoded) {
   final e = Reader(encoded).next();
   if (e == null) return 'null';
   final sb = StringBuffer();
-  _renderJson(sb, e);
+  _renderJson(sb, e, 0);
   return sb.toString();
 }
 
@@ -149,7 +156,12 @@ Uint8List _magBytes(BigInt v) {
 // struple -> JSON
 // ---------------------------------------------------------------------------
 
-void _renderJson(StringBuffer sb, Element e) {
+void _renderJson(StringBuffer sb, Element e, int depth) {
+  // Bound recursion into nested containers so hostile deeply-nested input is
+  // rejected rather than overflowing the stack (Item 5).
+  if (depth > _maxDepth) {
+    throw const StrupleException('JSON nesting too deep');
+  }
   switch (e.kind) {
     case Kind.nil:
     case Kind.undefined:
@@ -175,9 +187,9 @@ void _renderJson(StringBuffer sb, Element e) {
       _renderString(sb, _base64Std(unescape(e.body!)));
     case Kind.array:
     case Kind.set:
-      _renderArray(sb, e.body!);
+      _renderArray(sb, e.body!, depth);
     case Kind.map:
-      _renderMap(sb, e.body!);
+      _renderMap(sb, e.body!, depth);
   }
 }
 
@@ -189,7 +201,7 @@ void _renderFloat(StringBuffer sb, double f) {
   }
 }
 
-void _renderArray(StringBuffer sb, Uint8List framed) {
+void _renderArray(StringBuffer sb, Uint8List framed, int depth) {
   final r = Reader(unescape(framed));
   sb.write('[');
   var first = true;
@@ -197,12 +209,12 @@ void _renderArray(StringBuffer sb, Uint8List framed) {
   while ((e = r.next()) != null) {
     if (!first) sb.write(',');
     first = false;
-    _renderJson(sb, e!);
+    _renderJson(sb, e!, depth + 1);
   }
   sb.write(']');
 }
 
-void _renderMap(StringBuffer sb, Uint8List framed) {
+void _renderMap(StringBuffer sb, Uint8List framed, int depth) {
   final r = Reader(unescape(framed));
   sb.write('{');
   var first = true;
@@ -217,11 +229,11 @@ void _renderMap(StringBuffer sb, Uint8List framed) {
     } else {
       // Non-string key: render its JSON and quote the result.
       final tmp = StringBuffer();
-      _renderJson(tmp, k);
+      _renderJson(tmp, k, depth + 1);
       _renderString(sb, tmp.toString());
     }
     sb.write(':');
-    _renderJson(sb, v);
+    _renderJson(sb, v, depth + 1);
   }
   sb.write('}');
 }
@@ -425,7 +437,7 @@ String _exponential(String digits, int pointExp) {
 /// text so arbitrary-precision integers survive losslessly.
 JsonValue parseJson(String s) {
   final p = _JsonParser(s);
-  final v = p.value();
+  final v = p.value(0);
   p.ws();
   if (p.i != p.b.length) {
     throw const StrupleException('trailing data after JSON value');
@@ -451,7 +463,12 @@ class _JsonParser {
     }
   }
 
-  JsonValue value() {
+  JsonValue value(int depth) {
+    // Bound recursion into nested [ / { so hostile deeply-nested JSON is
+    // rejected rather than overflowing the stack (Item 5).
+    if (depth > _maxDepth) {
+      throw const StrupleException('JSON nesting too deep');
+    }
     ws();
     final c = _peek();
     if (c == null) throw const StrupleException('unexpected end of input');
@@ -470,8 +487,8 @@ class _JsonParser {
     if (c == 0x22 /* " */) {
       return JsonValue._(kind: JsonKind.string_, str: _string());
     }
-    if (c == 0x5B /* [ */) return _array();
-    if (c == 0x7B /* { */) return _object();
+    if (c == 0x5B /* [ */) return _array(depth);
+    if (c == 0x7B /* { */) return _object(depth);
     if (c == 0x2D /* - */ || (c >= 0x30 && c <= 0x39)) return _number();
     throw const StrupleException('unexpected byte in JSON');
   }
@@ -579,7 +596,7 @@ class _JsonParser {
     return JsonValue._(kind: JsonKind.number, numberText: tok);
   }
 
-  JsonValue _array() {
+  JsonValue _array(int depth) {
     i++; // [
     final items = <JsonValue>[];
     ws();
@@ -588,7 +605,7 @@ class _JsonParser {
       return JsonValue._(kind: JsonKind.array, arr: items);
     }
     while (true) {
-      items.add(value());
+      items.add(value(depth + 1));
       ws();
       final c = _peek();
       if (c == null) throw const StrupleException('expected , or ]');
@@ -605,7 +622,7 @@ class _JsonParser {
     return JsonValue._(kind: JsonKind.array, arr: items);
   }
 
-  JsonValue _object() {
+  JsonValue _object(int depth) {
     i++; // {
     final members = <JsonMember>[];
     ws();
@@ -624,7 +641,7 @@ class _JsonParser {
         throw const StrupleException('expected :');
       }
       i++;
-      final val = value();
+      final val = value(depth + 1);
       members.add(JsonMember(key, val));
       ws();
       final c = _peek();

@@ -24,10 +24,14 @@
 
 /// Compare two encoded streams element-by-element by semantic value (-1, 0, 1).
 public func semanticOrder(_ a: [UInt8], _ b: [UInt8]) throws -> Int {
-    try semanticOrder(a[...], b[...])
+    try semanticOrder(a[...], b[...], 0)
 }
 
-func semanticOrder(_ a: ArraySlice<UInt8>, _ b: ArraySlice<UInt8>) throws -> Int {
+// `depth` is the container nesting level of the streams being compared (0 at the
+// top level, +1 per container descent). Bounding it rejects hostile deeply-nested
+// input before the recursion overflows the stack (Item 5).
+func semanticOrder(_ a: ArraySlice<UInt8>, _ b: ArraySlice<UInt8>, _ depth: Int) throws -> Int {
+    if depth > maxDepth { throw StrupleError.nestingTooDeep }
     var ra = Reader(a)
     var rb = Reader(b)
     while true {
@@ -36,7 +40,7 @@ func semanticOrder(_ a: ArraySlice<UInt8>, _ b: ArraySlice<UInt8>) throws -> Int
         if ea == nil && eb == nil { return 0 }
         if ea == nil { return -1 }  // a is a prefix of b
         if eb == nil { return 1 }
-        let c = try compareElements(ea!, eb!)
+        let c = try compareElements(ea!, eb!, depth)
         if c != 0 { return c }
     }
 }
@@ -68,7 +72,7 @@ private func cmpInt<T: Comparable>(_ a: T, _ b: T) -> Int {
     a < b ? -1 : (a > b ? 1 : 0)
 }
 
-private func compareElements(_ a: Element, _ b: Element) throws -> Int {
+private func compareElements(_ a: Element, _ b: Element, _ depth: Int) throws -> Int {
     let ra = classRank(a.kind)
     let rb = classRank(b.kind)
     if ra != rb { return cmpInt(ra, rb) }
@@ -96,20 +100,20 @@ private func compareElements(_ a: Element, _ b: Element) throws -> Int {
         return lexCompare(x, y)
     case .array(let x):
         guard case .array(let y) = b else { return 0 }
-        return try semanticOrderContainer(x, y)
+        return try semanticOrderContainer(x, y, depth)
     case .set(let x):
         guard case .set(let y) = b else { return 0 }
-        return try semanticOrderContainer(x, y)
+        return try semanticOrderContainer(x, y, depth)
     case .map(let x):
         guard case .map(let y) = b else { return 0 }
-        return try semanticOrderContainer(x, y)
+        return try semanticOrderContainer(x, y, depth)
     }
 }
 
-private func semanticOrderContainer(_ fa: ArraySlice<UInt8>, _ fb: ArraySlice<UInt8>) throws -> Int {
+private func semanticOrderContainer(_ fa: ArraySlice<UInt8>, _ fb: ArraySlice<UInt8>, _ depth: Int) throws -> Int {
     let ia = unescape(fa)
     let ib = unescape(fb)
-    return try semanticOrder(ia[...], ib[...])
+    return try semanticOrder(ia[...], ib[...], depth + 1)
 }
 
 // MARK: - Numbers

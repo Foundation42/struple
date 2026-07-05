@@ -38,6 +38,12 @@ const DEC_SIGN_NEG: u8 = 0x01;
 const DEC_SIGN_ZERO: u8 = 0x02;
 const DEC_SIGN_POS: u8 = 0x03;
 
+/// Maximum container/JSON nesting depth accepted by the recursive walks
+/// (JSON parse, JSON render, semantic compare). Bounds stack use so hostile
+/// deeply-nested input is rejected instead of overflowing the stack (Item 5).
+/// Shared across all 12 ports; no real value nests anywhere near this deep.
+pub const MAX_DEPTH: usize = 256;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Truncated,
@@ -45,6 +51,8 @@ pub enum Error {
     UnsupportedWidth(usize),
     Utf8,
     InvalidDecimal,
+    /// Nesting exceeded `MAX_DEPTH` (deeply-nested input, JSON render / semantic compare).
+    NestingTooDeep,
 }
 
 impl fmt::Display for Error {
@@ -55,6 +63,7 @@ impl fmt::Display for Error {
             Error::UnsupportedWidth(n) => write!(f, "struple: unsupported integer width {n}"),
             Error::Utf8 => write!(f, "struple: invalid UTF-8 in string"),
             Error::InvalidDecimal => write!(f, "struple: invalid decimal literal"),
+            Error::NestingTooDeep => write!(f, "struple: nesting too deep"),
         }
     }
 }

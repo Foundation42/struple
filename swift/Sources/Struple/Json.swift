@@ -36,7 +36,7 @@ public func toJson(_ encoded: [UInt8]) throws -> String {
     var r = Reader(encoded)
     guard let e = try r.next() else { return "null" }
     var out: [UInt8] = []
-    try renderJSON(&out, e)
+    try renderJSON(&out, e, 0)
     return String(decoding: out, as: UTF8.self)
 }
 
@@ -92,7 +92,11 @@ func encodeJSON(_ w: inout Writer, _ v: JSONValue) {
 
 // MARK: - struple -> JSON
 
-func renderJSON(_ out: inout [UInt8], _ e: Element) throws {
+// `depth` is the container nesting level of the element being rendered (0 at the
+// root, +1 per array/map/set descent). Bounding it rejects hostile deeply-nested
+// input before the recursion overflows the stack (Item 5).
+func renderJSON(_ out: inout [UInt8], _ e: Element, _ depth: Int) throws {
+    if depth > maxDepth { throw StrupleError.nestingTooDeep }
     switch e {
     case .nil_, .undef:
         out.append(contentsOf: Array("null".utf8))
@@ -118,9 +122,9 @@ func renderJSON(_ out: inout [UInt8], _ e: Element) throws {
     case .bytes(let framed):
         renderString(&out, base64Std(unescape(framed)))
     case .array(let framed), .set(let framed):
-        try renderArray(&out, framed)
+        try renderArray(&out, framed, depth)
     case .map(let framed):
-        try renderMap(&out, framed)
+        try renderMap(&out, framed, depth)
     }
 }
 
@@ -132,7 +136,7 @@ func renderFloat(_ out: inout [UInt8], _ f: Double) {
     }
 }
 
-func renderArray(_ out: inout [UInt8], _ framed: ArraySlice<UInt8>) throws {
+func renderArray(_ out: inout [UInt8], _ framed: ArraySlice<UInt8>, _ depth: Int) throws {
     let content = unescape(framed)
     var r = Reader(content)
     out.append(UInt8(ascii: "["))
@@ -140,12 +144,12 @@ func renderArray(_ out: inout [UInt8], _ framed: ArraySlice<UInt8>) throws {
     while let e = try r.next() {
         if !first { out.append(UInt8(ascii: ",")) }
         first = false
-        try renderJSON(&out, e)
+        try renderJSON(&out, e, depth + 1)
     }
     out.append(UInt8(ascii: "]"))
 }
 
-func renderMap(_ out: inout [UInt8], _ framed: ArraySlice<UInt8>) throws {
+func renderMap(_ out: inout [UInt8], _ framed: ArraySlice<UInt8>, _ depth: Int) throws {
     let content = unescape(framed)
     var r = Reader(content)
     out.append(UInt8(ascii: "{"))
@@ -161,11 +165,11 @@ func renderMap(_ out: inout [UInt8], _ framed: ArraySlice<UInt8>) throws {
         default:
             // Non-string key: render its JSON and quote the result.
             var tmp: [UInt8] = []
-            try renderJSON(&tmp, k)
+            try renderJSON(&tmp, k, depth + 1)
             renderStringBytes(&out, tmp)
         }
         out.append(UInt8(ascii: ":"))
-        try renderJSON(&out, v)
+        try renderJSON(&out, v, depth + 1)
     }
     out.append(UInt8(ascii: "}"))
 }
@@ -325,7 +329,7 @@ func magnitudeToDecimal(_ mag: [UInt8]) -> [UInt8] {
 
 func parseJSON(_ s: String) throws -> JSONValue {
     var p = JSONParser(Array(s.utf8))
-    let v = try p.value()
+    let v = try p.value(0)
     p.skipWS()
     if !p.atEnd { throw StrupleError.invalidNumber }  // trailing data
     return v
@@ -345,7 +349,11 @@ struct JSONParser {
         while let c = peek(), c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D { i += 1 }
     }
 
-    mutating func value() throws -> JSONValue {
+    // `depth` is the container nesting level of the value about to be parsed
+    // (0 at the root, +1 per array/object descent). Bounding it rejects hostile
+    // deeply-nested input before the recursion overflows the stack (Item 5).
+    mutating func value(_ depth: Int) throws -> JSONValue {
+        if depth > maxDepth { throw StrupleError.nestingTooDeep }
         skipWS()
         guard let c = peek() else { throw StrupleError.invalidNumber }
         switch c {
@@ -361,9 +369,9 @@ struct JSONParser {
         case UInt8(ascii: "\""):
             return .str(try string())
         case UInt8(ascii: "["):
-            return try array()
+            return try array(depth)
         case UInt8(ascii: "{"):
-            return try object()
+            return try object(depth)
         case UInt8(ascii: "-"), UInt8(ascii: "0")...UInt8(ascii: "9"):
             return try number()
         default:
@@ -470,7 +478,7 @@ struct JSONParser {
         return .bigInt(tok)
     }
 
-    mutating func array() throws -> JSONValue {
+    mutating func array(_ depth: Int) throws -> JSONValue {
         i += 1  // [
         var items: [JSONValue] = []
         skipWS()
@@ -479,7 +487,7 @@ struct JSONParser {
             return .array(items)
         }
         while true {
-            items.append(try value())
+            items.append(try value(depth + 1))
             skipWS()
             guard let c = peek() else { throw StrupleError.invalidNumber }
             if c == UInt8(ascii: ",") {
@@ -495,7 +503,7 @@ struct JSONParser {
         return .array(items)
     }
 
-    mutating func object() throws -> JSONValue {
+    mutating func object(_ depth: Int) throws -> JSONValue {
         i += 1  // {
         var members: [(String, JSONValue)] = []
         skipWS()
@@ -512,7 +520,7 @@ struct JSONParser {
                 throw StrupleError.invalidNumber
             }
             i += 1
-            let val = try value()
+            let val = try value(depth + 1)
             members.append((key, val))
             skipWS()
             guard let c = peek() else { throw StrupleError.invalidNumber }

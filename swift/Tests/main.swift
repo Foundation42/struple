@@ -445,6 +445,56 @@ func runMalformed() {
     print("  malformed: \(rejected)/\(cases.count) rejected")
 }
 
+// MARK: - Phase 5: recursion depth caps (Item 5)
+
+// Hostile deeply-nested input must be rejected with the port's own StrupleError,
+// never a stack-overflow crash. Mirrors src/tests.zig "depth cap".
+func runDepthCap() {
+    // fromJson: a 1000-deep JSON bracket string (> maxDepth) rejects on the
+    // recursive-descent depth guard rather than overflowing the stack.
+    do {
+        let deep = String(repeating: "[", count: 1000) + String(repeating: "]", count: 1000)
+        _ = try fromJson(deep)
+        check(false, "fromJson of 1000-deep brackets was ACCEPTED")
+    } catch is StrupleError {
+        check(true, "fromJson of 1000-deep brackets rejected with StrupleError")
+    } catch {
+        check(false, "fromJson of 1000-deep brackets threw non-StrupleError \(error)")
+    }
+
+    // Build a 300-deep nested array via the port's OWN encoder (wrap the prior
+    // bytes in an array 300 times); toJson and semanticOrder must both reject it
+    // at the cap rather than recursing to overflow.
+    var buf: [UInt8]
+    do {
+        var inner = Writer()
+        inner.appendInt(0)
+        buf = inner.bytes
+    }
+    for _ in 0..<300 {
+        var w = Writer()
+        w.appendArray(buf)
+        buf = w.bytes
+    }
+    do {
+        _ = try toJson(buf)
+        check(false, "toJson of 300-deep array was ACCEPTED")
+    } catch is StrupleError {
+        check(true, "toJson of 300-deep array rejected with StrupleError")
+    } catch {
+        check(false, "toJson of 300-deep array threw non-StrupleError \(error)")
+    }
+    do {
+        _ = try semanticOrder(buf, buf)
+        check(false, "semanticOrder of 300-deep array was ACCEPTED")
+    } catch is StrupleError {
+        check(true, "semanticOrder of 300-deep array rejected with StrupleError")
+    } catch {
+        check(false, "semanticOrder of 300-deep array threw non-StrupleError \(error)")
+    }
+    print("  depth cap: fromJson / toJson / semanticOrder all reject deep nesting")
+}
+
 // MARK: - main
 
 print("struple Swift conformance + behavior tests")
@@ -456,6 +506,8 @@ print("Phase 3: golden / round-trip")
 runGolden()
 print("Phase 4: malformed / hostile decode")
 runMalformed()
+print("Phase 5: recursion depth caps")
+runDepthCap()
 
 print("")
 print("passed \(passed), failed \(failed)")

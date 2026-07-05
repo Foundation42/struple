@@ -649,6 +649,40 @@ test "decode: truncated and invalid input" {
 // JSON <-> struple
 // ---------------------------------------------------------------------------
 
+test "depth cap: deeply nested input is rejected, not a stack overflow" {
+    const a = testing.allocator;
+    // fromJson: 1000-deep JSON array (> max_depth) rejects on the pre-parse scan.
+    {
+        var s = std.ArrayList(u8).init(a);
+        defer s.deinit();
+        try s.appendNTimes('[', 1000);
+        try s.appendNTimes(']', 1000);
+        try testing.expectError(error.NestingTooDeep, struple.fromJson(a, s.items));
+    }
+    // Build a 300-deep nested array encoding, then toJson / semanticOrder must
+    // reject it at the cap rather than recursing to overflow.
+    {
+        var buf = std.ArrayList(u8).init(a);
+        defer buf.deinit();
+        {
+            var inner = struple.Packer.init(a);
+            defer inner.deinit();
+            try inner.appendInt(0);
+            try buf.appendSlice(inner.bytes());
+        }
+        var d: usize = 0;
+        while (d < 300) : (d += 1) {
+            var p = struple.Packer.init(a);
+            defer p.deinit();
+            try p.appendArray(buf.items);
+            buf.clearRetainingCapacity();
+            try buf.appendSlice(p.bytes());
+        }
+        try testing.expectError(error.NestingTooDeep, struple.toJson(a, buf.items));
+        try testing.expectError(error.NestingTooDeep, struple.semanticOrder(a, buf.items, buf.items));
+    }
+}
+
 fn expectJsonRoundtrip(canonical: []const u8) !void {
     const a = testing.allocator;
     const encoded = try struple.fromJson(a, canonical);

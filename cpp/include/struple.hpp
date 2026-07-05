@@ -49,6 +49,14 @@ namespace detail {
 constexpr uint64_t SIGN64 = 0x8000000000000000ull;
 constexpr uint32_t SIGN32 = 0x80000000u;
 
+// Maximum container/JSON nesting depth accepted by the recursive walks (JSON
+// parse, JSON render, semantic compare). Bounds stack use so hostile deeply-
+// nested input is rejected (throwing struple::Error) instead of overflowing the
+// stack (Item 5). Mirrors the Zig reference's struple.max_depth; no real value
+// nests anywhere near this deep. Depth is 0 at the top level, +1 per container
+// descent, and a walk is rejected once depth exceeds MAX_DEPTH.
+constexpr size_t MAX_DEPTH = 256;
+
 inline size_t byte_len(uint64_t x) {
     size_t n = 0;
     while (x) { n++; x >>= 8; }
@@ -971,6 +979,12 @@ inline int semanticOrder(const uint8_t* a, size_t alen, const uint8_t* b, size_t
 
 namespace detail {
 
+// Depth-bounded element-by-element semantic compare over two encoded streams.
+// Bounds recursion into nested containers so hostile deeply-nested input is
+// rejected (throwing struple::Error) rather than overflowing the stack (Item 5);
+// depth 0 at the top level, +1 per container descent.
+inline int sem_order_depth(const uint8_t* a, size_t alen, const uint8_t* b, size_t blen, size_t depth);
+
 inline int sem_class_rank(Kind k) {
     switch (k) {
         case Kind::Nil: return 0;
@@ -1260,7 +1274,7 @@ inline int sem_cmp_with_decimal(const Element& a, const Element& b) {
     return -sem_cmp_b10_float(sem_num_to_b10(b), sem_float(a));
 }
 
-inline int sem_elements(const Element& a, const Element& b) {
+inline int sem_elements(const Element& a, const Element& b, size_t depth) {
     int ra = sem_class_rank(a.kind), rb = sem_class_rank(b.kind);
     if (ra != rb) return (ra > rb) - (ra < rb);
     switch (a.kind) {
@@ -1279,9 +1293,24 @@ inline int sem_elements(const Element& a, const Element& b) {
         case Kind::Array:
         case Kind::Map:
         case Kind::Set:
-            return struple::semanticOrder(a.data.data(), a.data.size(), b.data.data(), b.data.size());
+            // e.data is the already-unescaped inner stream; descend one level.
+            return sem_order_depth(a.data.data(), a.data.size(), b.data.data(), b.data.size(), depth + 1);
     }
     return 0;
+}
+
+inline int sem_order_depth(const uint8_t* a, size_t alen, const uint8_t* b, size_t blen, size_t depth) {
+    if (depth > MAX_DEPTH) throw Error("struple: nesting too deep");
+    Reader ra(a, alen), rb(b, blen);
+    for (;;) {
+        auto ea = ra.next();
+        auto eb = rb.next();
+        if (!ea && !eb) return 0;
+        if (!ea) return -1;
+        if (!eb) return 1;
+        int c = sem_elements(*ea, *eb, depth);
+        if (c != 0) return c;
+    }
 }
 
 }  // namespace detail
@@ -1290,16 +1319,7 @@ inline int sem_elements(const Element& a, const Element& b) {
 /// representations. Returns -1/0/1. NaN sorts greatest; -0.0 == 0; containers
 /// recurse. Throws struple::Error on malformed input.
 inline int semanticOrder(const uint8_t* a, size_t alen, const uint8_t* b, size_t blen) {
-    Reader ra(a, alen), rb(b, blen);
-    for (;;) {
-        auto ea = ra.next();
-        auto eb = rb.next();
-        if (!ea && !eb) return 0;
-        if (!ea) return -1;
-        if (!eb) return 1;
-        int c = detail::sem_elements(*ea, *eb);
-        if (c != 0) return c;
-    }
+    return detail::sem_order_depth(a, alen, b, blen, 0);
 }
 inline int semanticOrder(const Bytes& a, const Bytes& b) {
     return semanticOrder(a.data(), a.size(), b.data(), b.size());

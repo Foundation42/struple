@@ -50,6 +50,13 @@ _I128_MAX = (1 << 127) - 1
 _I128_MIN = -(1 << 127)
 _EPOCH = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
 
+# Maximum container/JSON nesting depth accepted by the recursive walks (JSON
+# parse, JSON render, semantic compare). Bounds stack use so hostile deeply-nested
+# input is rejected with a ValueError instead of overflowing the stack (a native
+# RecursionError). Shared across all 12 ports; no real value nests near this deep.
+# Mirrors the Zig reference (src/struple.zig: `pub const max_depth: usize = 256`).
+_MAX_DEPTH = 256
+
 # Element kinds yielded by Reader.next() as (kind, payload) tuples.
 Element = tuple
 
@@ -953,6 +960,16 @@ def semantic_order(a: bytes, b: bytes) -> int:
     """Compare two encoded streams by *value* (not bytes): int, float32 and
     float64 compare by exact mathematical value, so ``int 5 == float 5.0``.
     Returns -1, 0 or 1. NaN sorts greatest; -0.0 == 0; containers recurse."""
+    return _semantic_order_depth(a, b, 0)
+
+
+def _semantic_order_depth(a: bytes, b: bytes, depth: int) -> int:
+    # Bound recursion into nested containers so hostile deeply-nested input is
+    # rejected with a ValueError rather than overflowing the stack (a native
+    # RecursionError). depth 0 at the top-level stream, +1 per container descent;
+    # mirrors the Zig reference (src/semantic.zig: `semanticOrderDepth`).
+    if depth > _MAX_DEPTH:
+        raise ValueError("struple: nesting too deep")
     ra, rb = Reader(a), Reader(b)
     while True:
         ea, eb = ra.next(), rb.next()
@@ -962,7 +979,7 @@ def semantic_order(a: bytes, b: bytes) -> int:
             return -1
         if eb is None:
             return 1
-        c = _compare_elements(ea, eb)
+        c = _compare_elements(ea, eb, depth)
         if c:
             return c
 
@@ -971,7 +988,7 @@ def semantic_eq(a: bytes, b: bytes) -> bool:
     return semantic_order(a, b) == 0
 
 
-def _compare_elements(ea: tuple, eb: tuple) -> int:
+def _compare_elements(ea: tuple, eb: tuple, depth: int) -> int:
     ka, va = ea
     kb, vb = eb
     ra, rb = _CLASS_RANK[ka], _CLASS_RANK[kb]
@@ -991,7 +1008,8 @@ def _compare_elements(ea: tuple, eb: tuple) -> int:
         ba, bb = va.encode("utf-8"), vb.encode("utf-8")  # UTF-8 byte order
         return (ba > bb) - (ba < bb)
     if ka in ("array", "set", "map"):
-        return semantic_order(va, vb)  # va/vb are the (un-escaped) inner streams
+        # va/vb are the (un-escaped) inner streams; +1 for the container descent.
+        return _semantic_order_depth(va, vb, depth + 1)
     raise ValueError(f"struple: unknown element kind {ka!r}")
 
 

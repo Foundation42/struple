@@ -25,7 +25,7 @@ public static class Json
     public static byte[] FromJson(string json)
     {
         var p = new Parser(json);
-        object? root = p.ParseValue();
+        object? root = p.ParseValue(0);
         p.SkipWs();
         if (!p.AtEnd()) throw new Struple.StrupleException("trailing JSON content");
         var outP = new Struple.Packer();
@@ -42,7 +42,7 @@ public static class Json
     public static object? Parse(string json)
     {
         var p = new Parser(json);
-        object? root = p.ParseValue();
+        object? root = p.ParseValue(0);
         p.SkipWs();
         if (!p.AtEnd()) throw new Struple.StrupleException("trailing JSON content");
         return root;
@@ -54,7 +54,7 @@ public static class Json
         var e = new Struple.Reader(encoded).Next();
         if (e == null) return "null";
         var sb = new StringBuilder();
-        RenderElement(sb, e);
+        RenderElement(sb, e, 0);
         return sb.ToString();
     }
 
@@ -111,8 +111,11 @@ public static class Json
     // struple -> JSON
     // -----------------------------------------------------------------------
 
-    private static void RenderElement(StringBuilder sb, Struple.Element e)
+    // depth = 0 at the top-level element, +1 per container descent; reject past MaxDepth so a
+    // hostile deeply-nested encoding is rejected instead of overflowing the stack.
+    private static void RenderElement(StringBuilder sb, Struple.Element e, int depth)
     {
+        if (depth > Struple.MaxDepth) throw new Struple.StrupleException("JSON nesting too deep");
         switch (e.Kind)
         {
             case Struple.Kind.Nil:
@@ -149,10 +152,10 @@ public static class Json
                 return;
             case Struple.Kind.Array:
             case Struple.Kind.Set:
-                RenderArray(sb, e.Inner);
+                RenderArray(sb, e.Inner, depth);
                 return;
             case Struple.Kind.Map:
-                RenderMap(sb, e.Inner);
+                RenderMap(sb, e.Inner, depth);
                 return;
             default:
                 throw new InvalidOperationException();
@@ -165,7 +168,7 @@ public static class Json
         return DoubleFormat.ToStr(v);
     }
 
-    private static void RenderArray(StringBuilder sb, byte[] body)
+    private static void RenderArray(StringBuilder sb, byte[] body, int depth)
     {
         var r = new Struple.Reader(body);
         sb.Append('[');
@@ -175,12 +178,12 @@ public static class Json
         {
             if (!first) sb.Append(',');
             first = false;
-            RenderElement(sb, e);
+            RenderElement(sb, e, depth + 1);
         }
         sb.Append(']');
     }
 
-    private static void RenderMap(StringBuilder sb, byte[] body)
+    private static void RenderMap(StringBuilder sb, byte[] body, int depth)
     {
         var r = new Struple.Reader(body);
         sb.Append('{');
@@ -200,11 +203,11 @@ public static class Json
             {
                 // Non-string key: render its JSON, then quote the result.
                 var tmp = new StringBuilder();
-                RenderElement(tmp, k);
+                RenderElement(tmp, k, depth + 1);
                 WriteQuoted(sb, tmp.ToString());
             }
             sb.Append(':');
-            RenderElement(sb, v);
+            RenderElement(sb, v, depth + 1);
         }
         sb.Append('}');
     }
@@ -352,15 +355,18 @@ public static class Json
             }
         }
 
-        public object? ParseValue()
+        // depth = 0 at the top-level value, +1 per container descent; reject past MaxDepth so a
+        // hostile deeply-nested document is rejected here instead of overflowing the stack.
+        public object? ParseValue(int depth)
         {
+            if (depth > Struple.MaxDepth) throw new Struple.StrupleException("JSON nesting too deep");
             SkipWs();
             if (_i >= _s.Length) throw new Struple.StrupleException("unexpected end of JSON");
             char c = _s[_i];
             switch (c)
             {
-                case '{': return ParseObject();
-                case '[': return ParseArray();
+                case '{': return ParseObject(depth);
+                case '[': return ParseArray(depth);
                 case '"': return ParseString();
                 case 't': Expect("true"); return true;
                 case 'f': Expect("false"); return false;
@@ -379,7 +385,7 @@ public static class Json
             _i += lit.Length;
         }
 
-        private JsonObject ParseObject()
+        private JsonObject ParseObject(int depth)
         {
             var obj = new JsonObject();
             _i++; // '{'
@@ -397,7 +403,7 @@ public static class Json
                 SkipWs();
                 if (_i >= _s.Length || _s[_i] != ':') throw new Struple.StrupleException("expected ':'");
                 _i++;
-                object? value = ParseValue();
+                object? value = ParseValue(depth + 1);
                 obj.Keys.Add(key);
                 obj.Values.Add(value);
                 SkipWs();
@@ -409,7 +415,7 @@ public static class Json
             return obj;
         }
 
-        private List<object?> ParseArray()
+        private List<object?> ParseArray(int depth)
         {
             var arr = new List<object?>();
             _i++; // '['
@@ -421,7 +427,7 @@ public static class Json
             }
             while (true)
             {
-                arr.Add(ParseValue());
+                arr.Add(ParseValue(depth + 1));
                 SkipWs();
                 if (_i >= _s.Length) throw new Struple.StrupleException("unterminated array");
                 char c = _s[_i++];

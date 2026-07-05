@@ -380,6 +380,47 @@ int main(void) {
         struple_writer_free(&minner);
     }
 
+    /* depth cap: hostile deeply-nested input is rejected, not a SIGSEGV (Item 5) */
+    {
+        /* from_json: a 1000-deep JSON array (> STRUPLE_MAX_DEPTH) must return the
+         * error status, never crash. */
+        size_t nd = 1000;
+        char *js = (char *)malloc(nd * 2 + 1);
+        for (size_t i = 0; i < nd; i++) js[i] = '[';
+        for (size_t i = 0; i < nd; i++) js[nd + i] = ']';
+        js[nd * 2] = 0;
+        struple_writer w;
+        struple_writer_init(&w);
+        CHECK(struple_from_json(js, nd * 2, &w) != 0,
+              "depth cap: from_json of 1000-deep brackets rejected");
+        struple_writer_free(&w);
+        free(js);
+    }
+    {
+        /* Build a 300-deep nested array via the port's OWN writer (wrap the prior
+         * bytes with struple_append_array 300x), then to_json and semantic_order
+         * must both reject at the cap rather than recursing to overflow. */
+        struple_writer buf;
+        struple_writer_init(&buf);
+        struple_append_int(&buf, 0);
+        for (int d = 0; d < 300; d++) {
+            struple_writer p;
+            struple_writer_init(&p);
+            struple_append_array(&p, buf.data, buf.len);
+            struple_writer_free(&buf);
+            buf = p; /* p owns the freshly-wrapped bytes now */
+        }
+        struple_writer js;
+        struple_writer_init(&js);
+        CHECK(struple_to_json(buf.data, buf.len, &js) != 0,
+              "depth cap: to_json of 300-deep array rejected");
+        struple_writer_free(&js);
+        int ord = 0;
+        CHECK(struple_semantic_order(buf.data, buf.len, buf.data, buf.len, &ord) != 0,
+              "depth cap: semantic_order of 300-deep array rejected");
+        struple_writer_free(&buf);
+    }
+
     if (failures == 0)
         printf("test_struple: all checks passed\n");
     else

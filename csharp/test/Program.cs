@@ -282,6 +282,7 @@ public static class Program
         NavMapLookup();
         NavIndexedMap();
         SemanticSpot();
+        DepthCap();
 
         Console.WriteLine($"Behavioral: complete ({s_failures} failures so far)");
     }
@@ -507,9 +508,51 @@ public static class Program
             new Struple.Packer().AppendBool(false).Bytes()) == -1, "sem nil < bool");
     }
 
+    // Recursion depth caps (HARDENING Item 5): hostile deeply-nested input must be rejected with
+    // the port's own StrupleException, never an uncatchable StackOverflowException. Mirrors the
+    // Zig "depth cap" test.
+    private static void DepthCap()
+    {
+        // fromJson: a 1000-deep bracket string (> MaxDepth) rejects on the recursive-descent cap.
+        string deepJson = new string('[', 1000) + new string(']', 1000);
+        CheckThrows(() => Json.FromJson(deepJson), "depth cap: 1000-deep JSON rejected");
+
+        // Build a ~300-deep nested array via the port's OWN encoder (wrap the prior bytes 300x),
+        // then ToJson / SemanticOrder must reject it at the cap rather than recursing to overflow.
+        byte[] deep = new Struple.Packer().AppendInt(0).Bytes();
+        for (int d = 0; d < 300; d++)
+        {
+            deep = new Struple.Packer().AppendArray(deep).Bytes();
+        }
+        CheckThrows(() => Json.ToJson(deep), "depth cap: 300-deep ToJson rejected");
+        CheckThrows(() => Semantic.SemanticOrder(deep, deep), "depth cap: 300-deep SemanticOrder rejected");
+    }
+
     // =======================================================================
     // helpers
     // =======================================================================
+
+    /// <summary>Assert <paramref name="action"/> throws a <see cref="Struple.StrupleException"/> (any
+    /// other exception type — e.g. StackOverflow surrogate — is a hardening FAILURE).</summary>
+    private static void CheckThrows(Action action, string label)
+    {
+        s_checks++;
+        try
+        {
+            action();
+            Console.Error.WriteLine("FAIL " + label + ": no exception (want StrupleException)");
+            s_failures++;
+        }
+        catch (Struple.StrupleException)
+        {
+            // expected
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("FAIL " + label + ": threw " + ex.GetType().Name + ", want StrupleException");
+            s_failures++;
+        }
+    }
 
     private static void Check(bool cond, string label)
     {

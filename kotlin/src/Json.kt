@@ -38,7 +38,7 @@ fun fromJson(text: String): ByteArray {
 fun toJson(encoded: ByteArray): String {
     val e = Reader(encoded).next() ?: return "null"
     val sb = StringBuilder()
-    render(sb, e)
+    render(sb, e, 0)
     return sb.toString()
 }
 
@@ -90,7 +90,11 @@ private fun encodeJson(out: Writer, value: JsonValue) {
 // struple -> JSON
 // ---------------------------------------------------------------------------
 
-private fun render(sb: StringBuilder, e: Element) {
+// `depth` = number of containers already open around this element (root = 0).
+private fun render(sb: StringBuilder, e: Element, depth: Int) {
+    // Bound recursion into nested containers so hostile deeply-nested input is
+    // rejected rather than overflowing the stack (mirrors writeValue in json.zig).
+    if (depth > MAX_DEPTH) throw StrupleException("struple/json: nesting too deep")
     when (e) {
         is Element.Nil, is Element.Undef -> sb.append("null")
         is Element.Bool -> sb.append(if (e.value) "true" else "false")
@@ -102,9 +106,9 @@ private fun render(sb: StringBuilder, e: Element) {
         is Element.Uuid -> renderQuoted(sb, uuidToString(e.bytes))
         is Element.Str -> renderQuoted(sb, e.value)
         is Element.Bin -> renderQuoted(sb, base64(e.value))
-        is Element.Arr -> renderArray(sb, e.inner)
-        is Element.SetElem -> renderArray(sb, e.inner)
-        is Element.MapElem -> renderMap(sb, e.inner)
+        is Element.Arr -> renderArray(sb, e.inner, depth)
+        is Element.SetElem -> renderArray(sb, e.inner, depth)
+        is Element.MapElem -> renderMap(sb, e.inner, depth)
     }
 }
 
@@ -113,7 +117,7 @@ private fun renderFloat(sb: StringBuilder, f: Double) {
     sb.append(shortestDouble(f))
 }
 
-private fun renderArray(sb: StringBuilder, inner: ByteArray) {
+private fun renderArray(sb: StringBuilder, inner: ByteArray, depth: Int) {
     val r = Reader(inner)
     sb.append('[')
     var first = true
@@ -121,12 +125,12 @@ private fun renderArray(sb: StringBuilder, inner: ByteArray) {
         val e = r.next() ?: break
         if (!first) sb.append(',')
         first = false
-        render(sb, e)
+        render(sb, e, depth + 1)
     }
     sb.append(']')
 }
 
-private fun renderMap(sb: StringBuilder, inner: ByteArray) {
+private fun renderMap(sb: StringBuilder, inner: ByteArray, depth: Int) {
     val r = Reader(inner)
     sb.append('{')
     var first = true
@@ -140,11 +144,11 @@ private fun renderMap(sb: StringBuilder, inner: ByteArray) {
         } else {
             // Non-string key: render its JSON then quote the result.
             val tmp = StringBuilder()
-            render(tmp, k)
+            render(tmp, k, depth + 1)
             renderQuoted(sb, tmp.toString())
         }
         sb.append(':')
-        render(sb, v)
+        render(sb, v, depth + 1)
     }
     sb.append('}')
 }
@@ -253,7 +257,7 @@ private class JsonParser(private val s: String) {
 
     fun parse(): JsonValue {
         skipWs()
-        return parseValue()
+        return parseValue(0)
     }
 
     fun expectEnd() {
@@ -268,11 +272,12 @@ private class JsonParser(private val s: String) {
         }
     }
 
-    private fun parseValue(): JsonValue {
+    // `depth` = number of containers already open around this value (root = 0).
+    private fun parseValue(depth: Int): JsonValue {
         if (i >= s.length) throw StrupleException("struple/json: unexpected end")
         return when (s[i]) {
-            '{' -> parseObject()
-            '[' -> parseArray()
+            '{' -> parseObject(depth)
+            '[' -> parseArray(depth)
             '"' -> JsonValue.Str(parseString())
             't', 'f' -> parseBool()
             'n' -> parseNull()
@@ -280,7 +285,11 @@ private class JsonParser(private val s: String) {
         }
     }
 
-    private fun parseObject(): JsonValue {
+    private fun parseObject(depth: Int): JsonValue {
+        // Reject hostile deeply-nested input before recursing into it — a bounded
+        // stack instead of a StackOverflowError (mirrors checkJsonDepth in json.zig).
+        val d = depth + 1
+        if (d > MAX_DEPTH) throw StrupleException("struple/json: nesting too deep")
         i++ // '{'
         val members = ArrayList<Pair<String, JsonValue>>()
         skipWs()
@@ -293,7 +302,7 @@ private class JsonParser(private val s: String) {
             if (i >= s.length || s[i] != ':') throw StrupleException("struple/json: expected ':'")
             i++
             skipWs()
-            val value = parseValue()
+            val value = parseValue(d)
             members.add(Pair(key, value))
             skipWs()
             if (i >= s.length) throw StrupleException("struple/json: unterminated object")
@@ -306,14 +315,16 @@ private class JsonParser(private val s: String) {
         return JsonValue.Obj(members)
     }
 
-    private fun parseArray(): JsonValue {
+    private fun parseArray(depth: Int): JsonValue {
+        val d = depth + 1
+        if (d > MAX_DEPTH) throw StrupleException("struple/json: nesting too deep")
         i++ // '['
         val items = ArrayList<JsonValue>()
         skipWs()
         if (i < s.length && s[i] == ']') { i++; return JsonValue.Arr(items) }
         while (true) {
             skipWs()
-            items.add(parseValue())
+            items.add(parseValue(d))
             skipWs()
             if (i >= s.length) throw StrupleException("struple/json: unterminated array")
             when (s[i]) {

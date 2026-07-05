@@ -24,9 +24,22 @@ import 'dart:typed_data';
 
 import 'codec.dart';
 
+/// Maximum container nesting depth accepted by the recursive semantic compare.
+/// Bounds stack use so hostile deeply-nested input is rejected instead of
+/// overflowing the stack (Item 5). Mirrors the Zig reference's `max_depth`; no
+/// real value nests anywhere near this deep.
+const int _maxDepth = 256;
+
 /// Compares two encoded streams element-by-element by semantic value, returning
 /// -1, 0, or +1.
-int semanticOrder(Uint8List a, Uint8List b) {
+int semanticOrder(Uint8List a, Uint8List b) => _semanticOrderDepth(a, b, 0);
+
+int _semanticOrderDepth(Uint8List a, Uint8List b, int depth) {
+  // Bound recursion into nested containers so hostile deeply-nested input is
+  // rejected rather than overflowing the stack (Item 5).
+  if (depth > _maxDepth) {
+    throw const StrupleException('nesting too deep');
+  }
   final ra = Reader(a);
   final rb = Reader(b);
   while (true) {
@@ -35,7 +48,7 @@ int semanticOrder(Uint8List a, Uint8List b) {
     if (ea == null && eb == null) return 0;
     if (ea == null) return -1; // a is a prefix of b
     if (eb == null) return 1;
-    final c = _compareElements(ea, eb);
+    final c = _compareElements(ea, eb, depth);
     if (c != 0) return c;
   }
 }
@@ -77,7 +90,7 @@ int _classRank(Kind k) {
   }
 }
 
-int _compareElements(Element a, Element b) {
+int _compareElements(Element a, Element b, int depth) {
   final ra = _classRank(a.kind);
   final rb = _classRank(b.kind);
   if (ra != rb) return _sign(ra.compareTo(rb));
@@ -105,7 +118,8 @@ int _compareElements(Element a, Element b) {
     case Kind.array:
     case Kind.set:
     case Kind.map:
-      return semanticOrder(unescape(a.body!), unescape(b.body!));
+      return _semanticOrderDepth(
+          unescape(a.body!), unescape(b.body!), depth + 1);
   }
 }
 

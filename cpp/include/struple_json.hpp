@@ -117,7 +117,7 @@ inline std::string parse_string(P& p) {
     throw Error("json: unterminated string");
 }
 
-inline Json parse_value(P& p);
+inline Json parse_value(P& p, size_t depth);
 
 inline Json parse_number(P& p) {
     size_t start = p.i;
@@ -147,14 +147,14 @@ inline Json parse_number(P& p) {
     return j;
 }
 
-inline Json parse_array(P& p) {
+inline Json parse_array(P& p, size_t depth) {
     p.i++;
     Json j;
     j.kind = Json::Kind::Array;
     ws(p);
     if (p.i < p.n && p.b[p.i] == ']') { p.i++; return j; }
     for (;;) {
-        j.items.push_back(parse_value(p));
+        j.items.push_back(parse_value(p, depth + 1));
         ws(p);
         if (p.i >= p.n) throw Error("json: array");
         char c = p.b[p.i++];
@@ -165,7 +165,7 @@ inline Json parse_array(P& p) {
     return j;
 }
 
-inline Json parse_object(P& p) {
+inline Json parse_object(P& p, size_t depth) {
     p.i++;
     Json j;
     j.kind = Json::Kind::Object;
@@ -178,7 +178,7 @@ inline Json parse_object(P& p) {
         ws(p);
         if (p.i >= p.n || p.b[p.i] != ':') throw Error("json: colon");
         p.i++;
-        Json v = parse_value(p);
+        Json v = parse_value(p, depth + 1);
         j.entries.emplace_back(std::move(k), std::move(v));
         ws(p);
         if (p.i >= p.n) throw Error("json: object");
@@ -190,7 +190,10 @@ inline Json parse_object(P& p) {
     return j;
 }
 
-inline Json parse_value(P& p) {
+inline Json parse_value(P& p, size_t depth) {
+    // Reject hostile deeply-nested JSON before descending further, so the
+    // recursive-descent parse can't overflow the stack (Item 5).
+    if (depth > detail::MAX_DEPTH) throw Error("json: nesting too deep");
     ws(p);
     if (p.i >= p.n) throw Error("json: unexpected end");
     char c = p.b[p.i];
@@ -199,8 +202,8 @@ inline Json parse_value(P& p) {
     if (c == 't') { if (!lit(p, "true")) throw Error("json"); j.kind = Json::Kind::Bool; j.b = true; return j; }
     if (c == 'f') { if (!lit(p, "false")) throw Error("json"); j.kind = Json::Kind::Bool; j.b = false; return j; }
     if (c == '"') { j.kind = Json::Kind::Str; j.text = parse_string(p); return j; }
-    if (c == '[') return parse_array(p);
-    if (c == '{') return parse_object(p);
+    if (c == '[') return parse_array(p, depth);
+    if (c == '{') return parse_object(p, depth);
     if (c == '-' || (c >= '0' && c <= '9')) return parse_number(p);
     throw Error("json: unexpected character");
 }
@@ -209,7 +212,7 @@ inline Json parse_value(P& p) {
 
 inline Json json_parse(std::string_view text) {
     json_detail::P p{text.data(), 0, text.size()};
-    Json j = json_detail::parse_value(p);
+    Json j = json_detail::parse_value(p, 0);
     json_detail::ws(p);
     if (p.i != p.n) throw Error("json: trailing data");
     return j;
@@ -353,7 +356,10 @@ inline std::string base64(const Bytes& data) {
     return out;
 }
 
-inline void render(std::string& out, const Element& e) {
+inline void render(std::string& out, const Element& e, size_t depth) {
+    // Bound recursion into nested containers so hostile deeply-nested input is
+    // rejected rather than overflowing the stack (Item 5).
+    if (depth > detail::MAX_DEPTH) throw Error("json: nesting too deep");
     switch (e.kind) {
         case Kind::Nil:
         case Kind::Undefined: out += "null"; break;
@@ -412,7 +418,7 @@ inline void render(std::string& out, const Element& e) {
             while (auto x = r.next()) {
                 if (!first) out += ',';
                 first = false;
-                render(out, *x);
+                render(out, *x, depth + 1);
             }
             out += ']';
             break;
@@ -430,11 +436,11 @@ inline void render(std::string& out, const Element& e) {
                     render_string(out, k->str);
                 } else {
                     std::string tmp;
-                    render(tmp, *k);
+                    render(tmp, *k, depth + 1);
                     render_string(out, tmp);
                 }
                 out += ':';
-                render(out, *v);
+                render(out, *v, depth + 1);
             }
             out += '}';
             break;
@@ -447,7 +453,7 @@ inline std::string to_json(const uint8_t* buf, size_t len) {
     auto e = r.next();
     if (!e) return "null";
     std::string out;
-    render(out, *e);
+    render(out, *e, 0);
     return out;
 }
 inline std::string to_json(const Bytes& v) { return to_json(v.data(), v.size()); }

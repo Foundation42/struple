@@ -20,6 +20,22 @@ void _check(bool ok, String what) {
   }
 }
 
+/// Asserts that [f] throws a [StrupleException] (and not some other error such
+/// as a stack overflow).
+void _checkThrows(void Function() f, String what) {
+  _checks++;
+  try {
+    f();
+    _failures++;
+    stderr.writeln('FAIL: $what (expected StrupleException, none thrown)');
+  } on StrupleException {
+    // expected
+  } catch (e) {
+    _failures++;
+    stderr.writeln('FAIL: $what (expected StrupleException, got $e)');
+  }
+}
+
 String _toHex(Uint8List b) {
   final sb = StringBuffer();
   for (final x in b) {
@@ -238,6 +254,24 @@ void _testFloatFormatting() {
   }
 }
 
+// Item 5 — recursion depth caps: hostile deeply-nested input is rejected with a
+// StrupleException, never a stack overflow. Mirrors src/tests.zig "depth cap".
+void _testDepthCap() {
+  // fromJson: 1000-deep JSON array (> maxDepth) rejects on the recursive parse.
+  final deepJson = '${'[' * 1000}${']' * 1000}';
+  _checkThrows(() => fromJson(deepJson), 'fromJson rejects 1000-deep nesting');
+
+  // Build a 300-deep nested array via the port's own encoder, then toJson and
+  // semanticOrder must reject it at the cap rather than recursing to overflow.
+  var buf = (Writer()..appendInt(0)).bytes();
+  for (var d = 0; d < 300; d++) {
+    buf = (Writer()..appendArray(buf)).bytes();
+  }
+  _checkThrows(() => toJson(buf), 'toJson rejects 300-deep nesting');
+  _checkThrows(
+      () => semanticOrder(buf, buf), 'semanticOrder rejects 300-deep nesting');
+}
+
 void main() {
   _testIndexedMap();
   _testViewStreamOps();
@@ -247,6 +281,7 @@ void main() {
   _testRoundTripBigIntValue();
   _testAppendString();
   _testFloatFormatting();
+  _testDepthCap();
 
   stdout.writeln('struple: ${_checks - _failures}/$_checks checks passed');
   if (_failures > 0) {

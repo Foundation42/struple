@@ -26,12 +26,48 @@ pub fn fromJson(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    // Reject hostile deeply-nested JSON before parsing: the linear bracket-depth
+    // scan bounds both std.json's recursive Value parse and encodeValue below,
+    // which would otherwise overflow the stack (Item 5).
+    try checkJsonDepth(json);
+
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
 
     var out = struple.Packer.init(allocator);
     errdefer out.deinit();
     try encodeValue(arena, &out, root);
     return out.toOwnedSlice();
+}
+
+/// Scan JSON text and reject if `[`/`{` nesting exceeds `struple.max_depth`.
+/// Brackets inside string literals (and after `\`) don't count.
+fn checkJsonDepth(json: []const u8) !void {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (json) |c| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '[', '{' => {
+                depth += 1;
+                if (depth > struple.max_depth) return error.NestingTooDeep;
+            },
+            ']', '}' => {
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
+        }
+    }
 }
 
 /// Render a struple encoding's first element as JSON text (caller owns it).
@@ -45,7 +81,7 @@ pub fn toJson(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
 
     var r = struple.reader(encoded);
     if (try r.next()) |elem| {
-        try writeValue(arena, out.writer(), elem);
+        try writeValue(arena, out.writer(), elem, 0);
     } else {
         try out.appendSlice("null");
     }
@@ -104,7 +140,8 @@ fn encodeNumberString(arena: std.mem.Allocator, out: *struple.Packer, s: []const
 // struple -> JSON
 // ---------------------------------------------------------------------------
 
-fn writeValue(arena: std.mem.Allocator, writer: anytype, elem: struple.Element) anyerror!void {
+fn writeValue(arena: std.mem.Allocator, writer: anytype, elem: struple.Element, depth: usize) anyerror!void {
+    if (depth > struple.max_depth) return error.NestingTooDeep;
     switch (elem) {
         .nil, .undef => try writer.writeAll("null"),
         .boolean => |b| try writer.writeAll(if (b) "true" else "false"),
@@ -117,8 +154,8 @@ fn writeValue(arena: std.mem.Allocator, writer: anytype, elem: struple.Element) 
         .uuid => |u| try writeUuid(writer, u),
         .string => |framed| try writeJsonString(arena, writer, framed),
         .bytes => |framed| try writeBase64(arena, writer, framed),
-        .array, .set => |framed| try writeArray(arena, writer, framed),
-        .map => |framed| try writeMap(arena, writer, framed),
+        .array, .set => |framed| try writeArray(arena, writer, framed, depth),
+        .map => |framed| try writeMap(arena, writer, framed, depth),
     }
 }
 
@@ -130,7 +167,7 @@ fn writeFloat(writer: anytype, f: anytype) !void {
     try writer.print("{d}", .{f});
 }
 
-fn writeArray(arena: std.mem.Allocator, writer: anytype, framed: []const u8) anyerror!void {
+fn writeArray(arena: std.mem.Allocator, writer: anytype, framed: []const u8, depth: usize) anyerror!void {
     const content = try struple.unescapeAlloc(arena, framed);
     var r = struple.reader(content);
     try writer.writeByte('[');
@@ -138,12 +175,12 @@ fn writeArray(arena: std.mem.Allocator, writer: anytype, framed: []const u8) any
     while (try r.next()) |e| {
         if (!first) try writer.writeByte(',');
         first = false;
-        try writeValue(arena, writer, e);
+        try writeValue(arena, writer, e, depth + 1);
     }
     try writer.writeByte(']');
 }
 
-fn writeMap(arena: std.mem.Allocator, writer: anytype, framed: []const u8) anyerror!void {
+fn writeMap(arena: std.mem.Allocator, writer: anytype, framed: []const u8, depth: usize) anyerror!void {
     const content = try struple.unescapeAlloc(arena, framed);
     var r = struple.reader(content);
     try writer.writeByte('{');
@@ -158,12 +195,12 @@ fn writeMap(arena: std.mem.Allocator, writer: anytype, framed: []const u8) anyer
             else => {
                 // Non-string key: render its JSON and quote the result.
                 var tmp = std.ArrayList(u8).init(arena);
-                try writeValue(arena, tmp.writer(), k);
+                try writeValue(arena, tmp.writer(), k, depth + 1);
                 try writeQuoted(writer, tmp.items);
             },
         }
         try writer.writeByte(':');
-        try writeValue(arena, writer, v);
+        try writeValue(arena, writer, v, depth + 1);
     }
     try writer.writeByte('}');
 }

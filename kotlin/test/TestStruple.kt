@@ -29,6 +29,7 @@ fun main() {
     mapViewTest()
     indexedMapTest()
     cursorTest()
+    depthCapTest()
 
     println("struple behavioral: passed=$pass failed=$fail")
     if (fail != 0) {
@@ -203,6 +204,39 @@ private fun indexedMapTest() {
     val it = im.iterator()
     while (it.hasNext()) { it.next(); n++ }
     check("indexed: iterator count", n == 8, "got $n")
+}
+
+// ---------------------------------------------------------------------------
+// Recursion depth caps — mirrors src/tests.zig "depth cap: deeply nested input
+// is rejected, not a stack overflow" (HARDENING.md Item 5). Hostile deeply-nested
+// input must surface as a StrupleException, never a StackOverflowError.
+// ---------------------------------------------------------------------------
+
+private fun assertRejects(name: String, body: () -> Unit) {
+    try {
+        body()
+        check(name, false, "no exception thrown")
+    } catch (e: StrupleException) {
+        check(name, true)
+    } catch (t: Throwable) {
+        // A StackOverflowError (or anything else) is a FAIL: the cap must fire first.
+        check(name, false, "threw ${t::class.java.simpleName}, not StrupleException")
+    }
+}
+
+private fun depthCapTest() {
+    // fromJson: 1000-deep JSON array (> MAX_DEPTH) rejects on the recursive parse.
+    val deepJson = "[".repeat(1000) + "]".repeat(1000)
+    assertRejects("depth cap: fromJson 1000-deep rejects") { fromJson(deepJson) }
+
+    // Build a 300-deep nested array via the port's OWN encoder (wrap prev bytes
+    // 300×), then toJson / semanticOrder must reject it at the cap rather than
+    // recursing to overflow.
+    var buf = encode(0L)
+    repeat(300) { buf = Writer().appendArray(buf).bytes() }
+    val nested = buf
+    assertRejects("depth cap: toJson 300-deep rejects") { toJson(nested) }
+    assertRejects("depth cap: semanticOrder 300-deep rejects") { semanticOrder(nested, nested) }
 }
 
 // ---------------------------------------------------------------------------

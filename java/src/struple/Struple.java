@@ -84,6 +84,14 @@ public final class Struple {
     static final BigInteger I128_MAX = BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE);
     static final BigInteger I128_MIN = BigInteger.ONE.shiftLeft(127).negate();
 
+    /**
+     * Maximum container/JSON nesting depth accepted by the recursive walks (JSON parse, JSON
+     * render, semantic compare). Bounds stack use so hostile deeply-nested input is rejected with a
+     * {@link StrupleException} instead of overflowing the stack (a {@code StackOverflowError}).
+     * Shared across all 12 ports; no real value nests anywhere near this deep.
+     */
+    public static final int MAX_DEPTH = 256;
+
     // -----------------------------------------------------------------------
     // Element kinds + decoded element view
     // -----------------------------------------------------------------------

@@ -29,7 +29,7 @@ public final class Json {
     /** Parse JSON text and return its struple encoding. */
     public static byte[] fromJson(String json) {
         Parser p = new Parser(json);
-        Object root = p.parseValue();
+        Object root = p.parseValue(0);
         p.skipWs();
         if (!p.atEnd()) {
             throw new Struple.StrupleException("trailing JSON content");
@@ -48,7 +48,7 @@ public final class Json {
      */
     public static Object parse(String json) {
         Parser p = new Parser(json);
-        Object root = p.parseValue();
+        Object root = p.parseValue(0);
         p.skipWs();
         if (!p.atEnd()) {
             throw new Struple.StrupleException("trailing JSON content");
@@ -63,7 +63,7 @@ public final class Json {
             return "null";
         }
         StringBuilder sb = new StringBuilder();
-        renderElement(sb, e);
+        renderElement(sb, e, 0);
         return sb.toString();
     }
 
@@ -107,7 +107,13 @@ public final class Json {
     // struple -> JSON
     // -----------------------------------------------------------------------
 
-    private static void renderElement(StringBuilder sb, Element e) {
+    private static void renderElement(StringBuilder sb, Element e, int depth) {
+        // Bound recursion into nested containers so hostile deeply-nested input is rejected rather
+        // than overflowing the stack (mirrors src/json.zig writeValue: depth 0 at the top-level
+        // element, +1 per container descent, reject when depth > max_depth).
+        if (depth > Struple.MAX_DEPTH) {
+            throw new Struple.StrupleException("JSON nesting too deep");
+        }
         switch (e.kind) {
             case NIL:
             case UNDEF:
@@ -143,10 +149,10 @@ public final class Json {
                 return;
             case ARRAY:
             case SET:
-                renderArray(sb, e.inner());
+                renderArray(sb, e.inner(), depth);
                 return;
             case MAP:
-                renderMap(sb, e.inner());
+                renderMap(sb, e.inner(), depth);
                 return;
             default:
                 throw new IllegalStateException();
@@ -160,7 +166,7 @@ public final class Json {
         return DoubleFormat.toString(v);
     }
 
-    private static void renderArray(StringBuilder sb, byte[] body) {
+    private static void renderArray(StringBuilder sb, byte[] body, int depth) {
         Reader r = new Reader(body);
         sb.append('[');
         boolean first = true;
@@ -170,12 +176,12 @@ public final class Json {
                 sb.append(',');
             }
             first = false;
-            renderElement(sb, e);
+            renderElement(sb, e, depth + 1);
         }
         sb.append(']');
     }
 
-    private static void renderMap(StringBuilder sb, byte[] body) {
+    private static void renderMap(StringBuilder sb, byte[] body, int depth) {
         Reader r = new Reader(body);
         sb.append('{');
         boolean first = true;
@@ -194,11 +200,11 @@ public final class Json {
             } else {
                 // Non-string key: render its JSON, then quote the result.
                 StringBuilder tmp = new StringBuilder();
-                renderElement(tmp, k);
+                renderElement(tmp, k, depth + 1);
                 writeQuoted(sb, tmp.toString());
             }
             sb.append(':');
-            renderElement(sb, v);
+            renderElement(sb, v, depth + 1);
         }
         sb.append('}');
     }
@@ -366,7 +372,13 @@ public final class Json {
             }
         }
 
-        Object parseValue() {
+        Object parseValue(int depth) {
+            // Bound recursion into nested containers so hostile deeply-nested input is rejected
+            // rather than overflowing the stack (mirrors src/json.zig checkJsonDepth: depth 0 at
+            // the top-level element, +1 per container descent, reject when depth > max_depth).
+            if (depth > Struple.MAX_DEPTH) {
+                throw new Struple.StrupleException("JSON nesting too deep");
+            }
             skipWs();
             if (i >= s.length()) {
                 throw new Struple.StrupleException("unexpected end of JSON");
@@ -374,9 +386,9 @@ public final class Json {
             char c = s.charAt(i);
             switch (c) {
                 case '{':
-                    return parseObject();
+                    return parseObject(depth);
                 case '[':
-                    return parseArray();
+                    return parseArray(depth);
                 case '"':
                     return parseString();
                 case 't':
@@ -400,7 +412,7 @@ public final class Json {
             i += lit.length();
         }
 
-        private JsonObject parseObject() {
+        private JsonObject parseObject(int depth) {
             JsonObject obj = new JsonObject();
             i++; // '{'
             skipWs();
@@ -419,7 +431,7 @@ public final class Json {
                     throw new Struple.StrupleException("expected ':'");
                 }
                 i++;
-                Object value = parseValue();
+                Object value = parseValue(depth + 1);
                 obj.keys.add(key);
                 obj.values.add(value);
                 skipWs();
@@ -437,7 +449,7 @@ public final class Json {
             return obj;
         }
 
-        private List<Object> parseArray() {
+        private List<Object> parseArray(int depth) {
             List<Object> arr = new ArrayList<>();
             i++; // '['
             skipWs();
@@ -446,7 +458,7 @@ public final class Json {
                 return arr;
             }
             while (true) {
-                arr.add(parseValue());
+                arr.add(parseValue(depth + 1));
                 skipWs();
                 if (i >= s.length()) {
                     throw new Struple.StrupleException("unterminated array");

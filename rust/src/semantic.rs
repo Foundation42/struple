@@ -5,11 +5,20 @@
 //! exact mathematical value, so `int 5 == float 5.0` and large integers compare
 //! against floats with no precision loss. NaN sorts greatest; `-0.0 == 0`.
 
-use crate::codec::{Element, Error, Reader};
+use crate::codec::{Element, Error, Reader, MAX_DEPTH};
 use std::cmp::Ordering;
 
 /// Compare two encoded streams element-by-element by semantic value.
 pub fn semantic_order(a: &[u8], b: &[u8]) -> Result<Ordering, Error> {
+    semantic_order_depth(a, b, 0)
+}
+
+fn semantic_order_depth(a: &[u8], b: &[u8], depth: usize) -> Result<Ordering, Error> {
+    // Bound recursion into nested containers so hostile deeply-nested input is
+    // rejected rather than overflowing the stack (Item 5).
+    if depth > MAX_DEPTH {
+        return Err(Error::NestingTooDeep);
+    }
     let mut ra = Reader::new(a);
     let mut rb = Reader::new(b);
     loop {
@@ -20,7 +29,7 @@ pub fn semantic_order(a: &[u8], b: &[u8]) -> Result<Ordering, Error> {
             (None, Some(_)) => return Ok(Ordering::Less),
             (Some(_), None) => return Ok(Ordering::Greater),
             (Some(x), Some(y)) => {
-                let c = compare_elements(x, y)?;
+                let c = compare_elements(x, y, depth)?;
                 if c != Ordering::Equal {
                     return Ok(c);
                 }
@@ -50,7 +59,7 @@ fn class_rank(e: &Element) -> u8 {
     }
 }
 
-fn compare_elements(a: &Element, b: &Element) -> Result<Ordering, Error> {
+fn compare_elements(a: &Element, b: &Element, depth: usize) -> Result<Ordering, Error> {
     let (ra, rb) = (class_rank(a), class_rank(b));
     if ra != rb {
         return Ok(ra.cmp(&rb));
@@ -64,7 +73,7 @@ fn compare_elements(a: &Element, b: &Element) -> Result<Ordering, Error> {
         (Element::Bytes(x), Element::Bytes(y)) => x.cmp(y),
         (Element::Array(x), Element::Array(y))
         | (Element::Set(x), Element::Set(y))
-        | (Element::Map(x), Element::Map(y)) => semantic_order(x, y)?,
+        | (Element::Map(x), Element::Map(y)) => semantic_order_depth(x, y, depth + 1)?,
         // remaining same-class case: numbers (Int / BigInt / F32 / F64)
         _ => compare_numbers(a, b),
     })

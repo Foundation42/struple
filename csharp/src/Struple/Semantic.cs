@@ -29,8 +29,13 @@ namespace Struple;
 public static class Semantic
 {
     /// <summary>Compare two encoded streams element-by-element by semantic value (-1/0/1).</summary>
-    public static int SemanticOrder(byte[] a, byte[] b)
+    public static int SemanticOrder(byte[] a, byte[] b) => SemanticOrderDepth(a, b, 0);
+
+    // depth = 0 at the top-level stream, +1 per container descent; reject past MaxDepth so a
+    // hostile deeply-nested encoding is rejected instead of overflowing the stack.
+    private static int SemanticOrderDepth(byte[] a, byte[] b, int depth)
     {
+        if (depth > Struple.MaxDepth) throw new Struple.StrupleException("nesting too deep");
         var ra = new Struple.Reader(a);
         var rb = new Struple.Reader(b);
         while (true)
@@ -40,7 +45,7 @@ public static class Semantic
             if (ea == null && eb == null) return 0;
             if (ea == null) return -1; // a is a prefix of b
             if (eb == null) return 1;
-            int c = CompareElements(ea, eb);
+            int c = CompareElements(ea, eb, depth);
             if (c != 0) return c;
         }
     }
@@ -71,7 +76,7 @@ public static class Semantic
         }
     }
 
-    private static int CompareElements(Struple.Element a, Struple.Element b)
+    private static int CompareElements(Struple.Element a, Struple.Element b, int depth)
     {
         int ra = ClassRank(a.Kind);
         int rb = ClassRank(b.Kind);
@@ -102,7 +107,7 @@ public static class Semantic
             case Struple.Kind.Map:
             case Struple.Kind.Set:
                 // a.Inner/b.Inner are already the un-escaped inner streams
-                return SemanticOrder(a.Inner, b.Inner);
+                return SemanticOrderDepth(a.Inner, b.Inner, depth + 1);
             default:
                 throw new InvalidOperationException();
         }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pack, encode, unpack, compare, Writer } from "../src/index.ts";
+import { pack, encode, unpack, compare, Writer, fromJson, toJson, semanticOrder } from "../src/index.ts";
 
 function hex(bytes: Uint8Array): string {
   let s = "";
@@ -112,4 +112,25 @@ test("float total ordering", () => {
     const [out] = unpack(floatBytes(f));
     assert.equal(out, f);
   }
+});
+
+test("depth cap: deeply nested input is rejected, not a stack overflow", () => {
+  // fromJson: a 1000-deep JSON array (> MAX_DEPTH) rejects on the pre-parse
+  // bracket scan with the port's OWN Error — never the native RangeError
+  // ("Maximum call stack size exceeded") that native JSON.parse would throw.
+  const deepJson = "[".repeat(1000) + "]".repeat(1000);
+  assert.throws(
+    () => fromJson(deepJson),
+    (err: unknown) =>
+      err instanceof Error && !(err instanceof RangeError) && /nesting too deep/.test((err as Error).message),
+    "fromJson of 1000-deep JSON must throw the port's nesting error, not a native RangeError",
+  );
+
+  // Build a ~300-deep nested array via the port's OWN encoder (wrap the prior
+  // bytes in an array 300×), then toJson / semanticOrder must reject it at the
+  // cap rather than recursing into a stack overflow.
+  let buf = encode(0n);
+  for (let d = 0; d < 300; d++) buf = new Writer().appendArray(buf).bytes();
+  assert.throws(() => toJson(buf), /nesting too deep/, "toJson must reject 300-deep nesting");
+  assert.throws(() => semanticOrder(buf, buf), /nesting too deep/, "semanticOrder must reject 300-deep nesting");
 });

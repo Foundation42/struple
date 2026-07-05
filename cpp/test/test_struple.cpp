@@ -1,5 +1,6 @@
 // Codec unit tests.
 #include "struple.hpp"
+#include "struple_json.hpp"
 
 #include <cstdio>
 #include <string>
@@ -301,6 +302,38 @@ int main() {
             IndexedMap im2 = m.indexed();
             CHECK(im2.count() == 8, "idx shortcut count");
         }
+    }
+
+    // depth cap: deeply nested input is rejected (struple::Error), not a crash.
+    // Mirrors src/tests.zig "depth cap".
+    {
+        // from_json: a 1000-deep bracket string (> MAX_DEPTH) must throw, not SIGSEGV.
+        std::string deep = std::string(1000, '[') + std::string(1000, ']');
+        bool threw = false;
+        try { from_json(deep); } catch (const Error&) { threw = true; }
+        CHECK(threw, "depth cap: from_json 1000-deep throws");
+
+        // Build a 300-deep nested array via the Writer (wrap the prior bytes 300x),
+        // then to_json / semanticOrder must reject at the cap rather than recurse
+        // to a stack overflow.
+        Bytes buf;
+        {
+            Writer inner;
+            inner.append_int(0);
+            buf = inner.take();
+        }
+        for (int d = 0; d < 300; d++) {
+            Writer p;
+            p.append_array(buf);
+            buf = p.take();
+        }
+        bool tj_threw = false;
+        try { to_json(buf); } catch (const Error&) { tj_threw = true; }
+        CHECK(tj_threw, "depth cap: to_json 300-deep throws");
+
+        bool so_threw = false;
+        try { semanticOrder(buf, buf); } catch (const Error&) { so_threw = true; }
+        CHECK(so_threw, "depth cap: semanticOrder 300-deep throws");
     }
 
     if (fails == 0)

@@ -79,7 +79,14 @@ public enum StrupleError: Error, Equatable {
     case invalidDecimal
     case invalidNumber
     case malformedMap
+    case nestingTooDeep
 }
+
+/// Maximum container/JSON nesting depth accepted by the recursive walks (JSON
+/// parse, JSON render, semantic compare). Bounds stack use so hostile deeply-
+/// nested input is rejected instead of overflowing the stack (Item 5). Shared
+/// across all 12 ports; no real value nests anywhere near this deep.
+let maxDepth = 256
 
 // MARK: - Decoded element view
 

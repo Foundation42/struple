@@ -42,6 +42,12 @@ const SIGN64 = 0x8000000000000000n;
 const I128_MAX = (1n << 127n) - 1n;
 const I128_MIN = -(1n << 127n);
 
+/** Maximum container/JSON nesting depth accepted by the recursive walks (JSON
+ *  parse, JSON render, semantic compare). Bounds stack use so hostile
+ *  deeply-nested input is rejected instead of overflowing the stack. Shared
+ *  across all 12 ports; no real value nests anywhere near this deep. */
+export const MAX_DEPTH = 256;
+
 export type Value =
   | null
   | undefined
@@ -693,6 +699,13 @@ export class IndexedMap {
  *  float64 compare by exact mathematical value, so `int 5 === float 5.0`. Returns
  *  <0, 0, or >0. NaN sorts greatest; -0 === 0; containers recurse. */
 export function semanticOrder(a: Uint8Array, b: Uint8Array): number {
+  return semanticOrderDepth(a, b, 0);
+}
+
+function semanticOrderDepth(a: Uint8Array, b: Uint8Array, depth: number): number {
+  // Bound recursion into nested containers so hostile deeply-nested input is
+  // rejected rather than overflowing the stack (Item 5).
+  if (depth > MAX_DEPTH) throw new Error("struple: nesting too deep");
   const ra = new Reader(a);
   const rb = new Reader(b);
   for (;;) {
@@ -701,7 +714,7 @@ export function semanticOrder(a: Uint8Array, b: Uint8Array): number {
     if (ea === null && eb === null) return 0;
     if (ea === null) return -1;
     if (eb === null) return 1;
-    const c = compareElements(ea, eb);
+    const c = compareElements(ea, eb, depth);
     if (c !== 0) return c;
   }
 }
@@ -719,7 +732,7 @@ function cmp3(a: number | bigint, b: number | bigint): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function compareElements(a: Element, b: Element): number {
+function compareElements(a: Element, b: Element, depth: number): number {
   const ra = CLASS_RANK[a.kind];
   const rb = CLASS_RANK[b.kind];
   if (ra !== rb) return cmp3(ra, rb);
@@ -745,7 +758,7 @@ function compareElements(a: Element, b: Element): number {
     case "array":
     case "map":
     case "set":
-      return semanticOrder(a.body, (b as { body: Uint8Array }).body);
+      return semanticOrderDepth(a.body, (b as { body: Uint8Array }).body, depth + 1);
   }
 }
 
