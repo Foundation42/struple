@@ -48,6 +48,17 @@ const json_inputs = [_][]const u8{
     "-170141183460469231731687303715884105728", // -2^127 (i128 min, widest fixed)
     "-170141183460469231731687303715884105729", // -2^127 - 1 (first big-int negative)
     "[1,18446744073709551616,-18446744073709551616]", // wide ints inside an array
+    // Integer band boundaries (Item 9 §3.5) — fill the empty fixed-slot bands.
+    "65535",               "65536",                            "65537",
+    "-257",                "16777215",                         "16777216",
+    "4294967296",          "1099511627776",                    "281474976710656",
+    "72057594037927936",   "9223372036854775808",              "18446744073709551615",
+    "1606938044258990275541962092341162602522202993782792835301376", // 2^200 (big-int)
+    // Non-ASCII (2/3/4-byte UTF-8) + an embedded NUL (Item 9 §3.4).
+    "\"café\"",       "\"日本\"",                 "\"😀\"",
+    "\"a\\u0000b\"", // embedded NUL: exercises the 0x00 escape through the string path
+    // Deeper nesting + map-in-map (Item 9 §3.6).
+    "[[[1,2],[3]],[]]",    "{\"a\":{\"b\":{\"c\":1}}}",
 };
 
 /// Op descriptors for the non-JSON types. Each is valid JSON, embedded verbatim.
@@ -92,6 +103,21 @@ const build_ops = [_][]const u8{
     "{\"decimal\":\"1.5e300\"}",
     "{\"decimal\":\"-9.99e-300\"}",
     "{\"array\":[{\"decimal\":\"1.5\"},{\"string\":\"x\"}]}",
+    // Item 9 §3 corpus growth: canonicalization + container/edge coverage.
+    // Out-of-order map keys (the top gap) — the encoder must sort to canonical form.
+    "{\"map\":[[{\"int\":\"3\"},{\"string\":\"c\"}],[{\"int\":\"1\"},{\"string\":\"a\"}],[{\"int\":\"2\"},{\"string\":\"b\"}]]}",
+    // Map with container keys out of order (canonical sort by encoded key bytes).
+    "{\"map\":[[{\"array\":[{\"int\":\"2\"}]},{\"string\":\"y\"}],[{\"array\":[{\"int\":\"1\"}]},{\"string\":\"x\"}]]}",
+    // Empty set; set of containers (sorted + deduped by encoded bytes).
+    "{\"set\":[]}",
+    "{\"set\":[{\"array\":[{\"int\":\"2\"}]},{\"array\":[{\"int\":\"1\"}]},{\"array\":[{\"int\":\"2\"}]}]}",
+    // Timestamp i64 extremes.
+    "{\"timestamp\":\"9223372036854775807\"}",
+    "{\"timestamp\":\"-9223372036854775808\"}",
+    // Decimal edges: multi-byte exponent, single digit, trailing-zero canonicalization.
+    "{\"decimal\":\"2e200\"}",
+    "{\"decimal\":\"7\"}",
+    "{\"decimal\":\"1.230\"}", // -> 1.23
 };
 
 pub fn main() !void {
@@ -206,6 +232,16 @@ fn sarr(a: std.mem.Allocator, elems: []const []const u8) []const u8 {
     p.appendArray(child.items) catch unreachable;
     return p.toOwnedSlice() catch unreachable;
 }
+fn sset(a: std.mem.Allocator, elems: []const []const u8) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendSet(elems) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
+fn smap(a: std.mem.Allocator, entries: []const [2][]const u8) []const u8 {
+    var p = struple.Packer.init(a);
+    p.appendMap(entries) catch unreachable;
+    return p.toOwnedSlice() catch unreachable;
+}
 
 fn emitSemantic(a: std.mem.Allocator) !void {
     const Pair = struct { x: []const u8, y: []const u8 };
@@ -284,6 +320,12 @@ fn emitSemantic(a: std.mem.Allocator) !void {
     }); // string < bytes
     // containers recurse by value
     P.add(&pairs, sarr(a, &.{sp(a, @as(i64, 5))}), sarr(a, &.{sf64(a, 5.0)})); // eq
+    // map / set semantic recursion (Item 9 §3.7 — semantic corpus had no 0x52/0x54)
+    P.add(&pairs, smap(a, &.{.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 5)) }}), smap(a, &.{.{ sp(a, @as(i64, 1)), sf64(a, 5.0) }})); // eq (map value int 5 == float 5.0)
+    P.add(&pairs, smap(a, &.{.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 5)) }}), smap(a, &.{.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 6)) }})); // lt (map value differs)
+    P.add(&pairs, sset(a, &.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 2)) }), sset(a, &.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 2)) })); // eq (identical sets)
+    P.add(&pairs, sset(a, &.{sp(a, @as(i64, 1))}), sset(a, &.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 2)) })); // lt (prefix: fewer elements)
+    P.add(&pairs, sset(a, &.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 2)) }), sset(a, &.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 3)) })); // lt (2 < 3)
     P.add(&pairs, sarr(a, &.{ sp(a, @as(i64, 1)), sp(a, @as(i64, 2)) }), sarr(a, &.{ sp(a, @as(i64, 1)), sf64(a, 2.5) })); // lt
     // prefix: shorter tuple sorts first
     P.add(&pairs, sp(a, @as(i64, 1)), blk: {

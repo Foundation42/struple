@@ -18,6 +18,7 @@ struct sj_value {
     bool bool_val;     /* SJ_BOOL */
     double float_val;  /* SJ_FLOAT */
     char *str;         /* SJ_STRING text, or SJ_INT decimal token (owned, NUL-terminated) */
+    size_t str_len;    /* SJ_STRING byte length (may contain embedded NULs) */
     sj_value *items;   /* SJ_ARRAY */
     size_t count;
     char **keys;       /* SJ_OBJECT keys (owned) */

@@ -70,7 +70,7 @@ static int utf8_encode(unsigned cp, char *out) {
     return 4;
 }
 
-static char *parse_string_raw(P *p) {
+static char *parse_string_raw(P *p, size_t *out_len) {
     p->i++; /* opening quote */
     char *buf = NULL;
     size_t len = 0, cap = 0;
@@ -87,6 +87,7 @@ static char *parse_string_raw(P *p) {
         if (c == '"') {
             ENSURE(1);
             buf[len] = 0;
+            if (out_len) *out_len = len; // byte length (embedded NULs preserved)
             return buf;
         }
         if (c == '\\') {
@@ -276,7 +277,7 @@ static int parse_object(P *p, sj_value *out, int depth) {
     for (;;) {
         skip_ws(p);
         if (p->i >= p->n || p->b[p->i] != '"') goto fail;
-        char *key = parse_string_raw(p);
+        char *key = parse_string_raw(p, NULL);
         if (!key) goto fail;
         /* A struple map is canonical and cannot hold two entries for one key.
          * Reject an object with a duplicate key at this nesting level (Item 4). */
@@ -334,10 +335,12 @@ static int parse_value(P *p, sj_value *out, int depth) {
     if (c == 't') return lit(p, "true") ? (out->kind = SJ_BOOL, out->bool_val = true, 0) : -1;
     if (c == 'f') return lit(p, "false") ? (out->kind = SJ_BOOL, out->bool_val = false, 0) : -1;
     if (c == '"') {
-        char *s = parse_string_raw(p);
+        size_t slen;
+        char *s = parse_string_raw(p, &slen);
         if (!s) return -1;
         out->kind = SJ_STRING;
         out->str = s;
+        out->str_len = slen;
         return 0;
     }
     /* Descending into a container: its nesting level is depth + 1. */
@@ -464,7 +467,7 @@ static void encode_json(struple_writer *w, const sj_value *v) {
         case SJ_BOOL: struple_append_bool(w, v->bool_val); break;
         case SJ_INT: encode_int_text(w, v->str); break;
         case SJ_FLOAT: struple_append_f64(w, v->float_val); break;
-        case SJ_STRING: struple_append_string(w, v->str, strlen(v->str)); break;
+        case SJ_STRING: struple_append_string(w, v->str, v->str_len); break;
         case SJ_ARRAY: {
             struple_writer child;
             struple_writer_init(&child);

@@ -246,7 +246,10 @@ void _renderMap(StringBuffer sb, Uint8List framed, int depth) {
 
 void _renderString(StringBuffer sb, String s) {
   sb.write('"');
-  for (final c in utf8.encode(s)) {
+  // Iterate code points, not UTF-8 bytes: escaping only touches sub-0x20 chars
+  // (all single-byte), and writeCharCode emits multi-byte / astral chars correctly
+  // instead of mojibaking each UTF-8 byte as a Latin-1 char code.
+  for (final c in s.runes) {
     switch (c) {
       case 0x22: // "
         sb.write('\\"');
