@@ -255,20 +255,59 @@ private fun base64(data: ByteArray): String {
 }
 
 /**
- * Shortest round-trip decimal text for a finite double, matching Python `repr`
- * and Zig `{d}`. Java's Double.toString already yields the shortest digit
- * sequence that round-trips, but uses `E` notation and a trailing `.0`; the
- * corpus floats are all simple non-integer decimals (1.5, -3.14159, 0.5, 87.5),
- * which Double.toString prints verbatim. We strip a `.0` suffix on integral
- * values to mirror the reference, leaving everything else as Java produces it.
+ * Shortest round-trip decimal text for a finite double, rendered per ECMAScript
+ * `Number::toString` (ECMA-262). Java's `Double.toString` already yields the
+ * shortest digit sequence that round-trips, but uses `E` notation and a trailing
+ * `.0` and picks fixed-vs-exponential on different thresholds; we keep its shortest
+ * DIGITS and re-notate them under the ECMA-262 fixed-vs-exponential rules so the
+ * toJson text matches the shared corpus (e.g. 1e20 -> "100000000000000000000",
+ * 1e21 -> "1e+21", 1e-7 -> "1e-7", 1e-6 -> "0.000001"). Mirrors the Java port's
+ * DoubleFormat and src/json.zig writeFloat/writeEcmaDigits. f32 is rendered by its
+ * exact f64 value (the caller promotes Float -> Double before calling here).
  */
 private fun shortestDouble(d: Double): String {
-    val s = java.lang.Double.toString(d)
-    // No exponent and ends in ".0" -> integral value: drop the fraction.
-    if (s.indexOf('E') < 0 && s.indexOf('e') < 0 && s.endsWith(".0")) {
-        return s.substring(0, s.length - 2)
+    if (d == 0.0) return "0" // also covers -0.0 (JS renders it as "0")
+    val neg = d < 0
+    val av = Math.abs(d)
+    // Double.toString is the shortest round-trip form; parse it exactly, then pull
+    // out the minimal significant digits + a base-10 exponent.
+    val stripped = BigDecimal(java.lang.Double.toString(av)).stripTrailingZeros()
+    val digits = stripped.unscaledValue().abs().toString()
+    val k = digits.length
+    val n = k - stripped.scale() // ECMA-262 n: integer-part digit count
+    val out = if (n in -5..21) plainDouble(digits, n) else expDouble(digits, n)
+    return if (neg) "-$out" else out
+}
+
+/** ECMA-262 fixed notation for digit string `digits` whose value is `digits * 10^(n-k)`. */
+private fun plainDouble(digits: String, n: Int): String {
+    val k = digits.length
+    return when {
+        n <= 0 -> {
+            val sb = StringBuilder("0.")
+            repeat(-n) { sb.append('0') }
+            sb.append(digits)
+            sb.toString()
+        }
+        n >= k -> {
+            val sb = StringBuilder(digits)
+            repeat(n - k) { sb.append('0') }
+            sb.toString()
+        }
+        else -> digits.substring(0, n) + "." + digits.substring(n)
     }
-    return s
+}
+
+/** ECMA-262 exponential notation: `d1[.d2..dk]e(+|-)abs(n-1)`. */
+private fun expDouble(digits: String, n: Int): String {
+    var e = n - 1
+    val sb = StringBuilder()
+    sb.append(digits[0])
+    if (digits.length > 1) { sb.append('.'); sb.append(digits, 1, digits.length) }
+    sb.append('e')
+    if (e >= 0) sb.append('+') else { sb.append('-'); e = -e }
+    sb.append(e)
+    return sb.toString()
 }
 
 // ---------------------------------------------------------------------------

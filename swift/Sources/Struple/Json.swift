@@ -128,11 +128,86 @@ func renderJSON(_ out: inout [UInt8], _ e: Element, _ depth: Int) throws {
     }
 }
 
+/// Render a float as ECMAScript `Number::toString` — the shortest decimal that
+/// round-trips to the same f64, formatted per the ECMA-262 fixed/exponential
+/// rules. This is the pinned cross-language float text format (Item 3). f32 is
+/// rendered by its exact f64 value: callers promote Float -> Double first.
 func renderFloat(_ out: inout [UInt8], _ f: Double) {
-    if f.isFinite {
-        out.append(contentsOf: Array(String(f).utf8))  // shortest round-trip
-    } else {
+    if !f.isFinite {
         out.append(contentsOf: Array("null".utf8))  // JSON has no inf/nan
+        return
+    }
+    if f == 0 {
+        out.append(UInt8(ascii: "0"))  // +0.0 and -0.0 both render "0"
+        return
+    }
+    // Swift's Double.description is the shortest round-trip decimal, but in Swift
+    // notation (`0.1`, `1e-07`, `1.0e+300`). Parse it into the shortest significant
+    // digits + the ECMA integer-part digit count `n`, then re-emit per ECMA-262.
+    var s = Substring(String(f))
+    if s.first == "-" {
+        out.append(UInt8(ascii: "-"))
+        s = s.dropFirst()
+    }
+    // Split off a scientific exponent, if any (`e±dd`).
+    var exp = 0
+    if let ePos = s.firstIndex(where: { $0 == "e" || $0 == "E" }) {
+        exp = Int(s[s.index(after: ePos)...]) ?? 0
+        s = s[..<ePos]
+    }
+    // Strip the decimal point, tracking the fractional digit count.
+    var fracCount = 0
+    var digits: [UInt8] = []
+    var sawPoint = false
+    for c in s.utf8 {
+        if c == UInt8(ascii: ".") {
+            sawPoint = true
+        } else {
+            digits.append(c)
+            if sawPoint { fracCount += 1 }
+        }
+    }
+    // value = digits(as integer) · 10^q. Normalize the digit string by dropping
+    // trailing zeros (each raises q) and then leading zeros (value unchanged); the
+    // ECMA integer-part count is then n = k + q.
+    var q = exp - fracCount
+    while digits.count > 1 && digits.last == UInt8(ascii: "0") {
+        digits.removeLast()
+        q += 1
+    }
+    var lead = 0
+    while lead < digits.count - 1 && digits[lead] == UInt8(ascii: "0") { lead += 1 }
+    if lead > 0 { digits.removeFirst(lead) }
+    writeEcmaDigits(&out, digits, digits.count + q)
+}
+
+/// Emit shortest significant `digits` as ECMAScript Number::toString, where `n` is
+/// the integer-part digit count (`10^(n-1) <= |value| < 10^n`).
+func writeEcmaDigits(_ out: inout [UInt8], _ digits: [UInt8], _ n: Int) {
+    let k = digits.count
+    if n >= 1 && n <= 21 {
+        if k <= n {  // integer with trailing zeros
+            out.append(contentsOf: digits)
+            for _ in 0..<(n - k) { out.append(UInt8(ascii: "0")) }
+        } else {  // decimal point inside the digits
+            out.append(contentsOf: digits[0..<n])
+            out.append(UInt8(ascii: "."))
+            out.append(contentsOf: digits[n...])
+        }
+    } else if n <= 0 && n > -6 {  // 0.00…digits
+        out.append(contentsOf: Array("0.".utf8))
+        for _ in 0..<(-n) { out.append(UInt8(ascii: "0")) }
+        out.append(contentsOf: digits)
+    } else {  // exponential: d[.ddd]e±(n-1)
+        out.append(digits[0])
+        if k > 1 {
+            out.append(UInt8(ascii: "."))
+            out.append(contentsOf: digits[1...])
+        }
+        out.append(UInt8(ascii: "e"))
+        let e = n - 1
+        out.append(e >= 0 ? UInt8(ascii: "+") : UInt8(ascii: "-"))
+        out.append(contentsOf: Array(String(abs(e)).utf8))
     }
 }
 

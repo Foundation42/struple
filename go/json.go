@@ -152,9 +152,9 @@ func renderJSON(sb *strings.Builder, e Element, depth int) error {
 	case KindInt, KindBigInt:
 		sb.WriteString(e.Int.String())
 	case KindFloat32:
-		renderFloat(sb, float64(e.Float32), 32)
+		renderFloat(sb, float64(e.Float32)) // render an f32 by its exact f64 value (cross-port)
 	case KindFloat64:
-		renderFloat(sb, e.Float64, 64)
+		renderFloat(sb, e.Float64)
 	case KindDecimal:
 		renderDecimal(sb, e.Decimal)
 	case KindTimestamp:
@@ -175,11 +175,77 @@ func renderJSON(sb *strings.Builder, e Element, depth int) error {
 	return nil
 }
 
-func renderFloat(sb *strings.Builder, f float64, bits int) {
-	if isFinite(f) {
-		sb.WriteString(strconv.FormatFloat(f, 'g', -1, bits))
-	} else {
+// renderFloat renders a float as ECMAScript Number::toString — the shortest
+// decimal that round-trips to the same f64, formatted per the ECMA-262
+// fixed/exponential notation rules. This is the pinned cross-language float text
+// format (Item 3). An f32 is rendered by its exact f64 value, so callers must
+// promote float32 -> float64 before calling.
+func renderFloat(sb *strings.Builder, f float64) {
+	if !isFinite(f) {
 		sb.WriteString("null") // JSON has no inf/nan (matches JSON.stringify)
+		return
+	}
+	if f == 0 {
+		sb.WriteByte('0') // +0.0 and -0.0 both render "0"
+		return
+	}
+	// FormatFloat(.., 'e', -1, 64) yields the shortest significant digits and the
+	// base-10 exponent of the most-significant digit: [-]d[.ddd]e±dd.
+	s := strconv.FormatFloat(f, 'e', -1, 64)
+	if s[0] == '-' {
+		sb.WriteByte('-')
+		s = s[1:]
+	}
+	epos := strings.IndexByte(s, 'e')
+	exp, _ := strconv.Atoi(s[epos+1:])
+	// Gather the significant digits (drop the '.').
+	digits := make([]byte, 0, epos)
+	for i := 0; i < epos; i++ {
+		if s[i] != '.' {
+			digits = append(digits, s[i])
+		}
+	}
+	writeEcmaDigits(sb, digits, exp+1)
+}
+
+// writeEcmaDigits emits shortest significant digits as ECMAScript
+// Number::toString, where n is the integer-part digit count
+// (10^(n-1) <= |value| < 10^n).
+func writeEcmaDigits(sb *strings.Builder, digits []byte, n int) {
+	k := len(digits)
+	switch {
+	case n >= 1 && n <= 21:
+		if k <= n { // integer with trailing zeros
+			sb.Write(digits)
+			for z := 0; z < n-k; z++ {
+				sb.WriteByte('0')
+			}
+		} else { // decimal point inside the digits
+			sb.Write(digits[:n])
+			sb.WriteByte('.')
+			sb.Write(digits[n:])
+		}
+	case n <= 0 && n > -6: // 0.00…digits
+		sb.WriteString("0.")
+		for z := 0; z < -n; z++ {
+			sb.WriteByte('0')
+		}
+		sb.Write(digits)
+	default: // exponential: d[.ddd]e±(n-1)
+		sb.WriteByte(digits[0])
+		if k > 1 {
+			sb.WriteByte('.')
+			sb.Write(digits[1:])
+		}
+		sb.WriteByte('e')
+		e := n - 1
+		if e >= 0 {
+			sb.WriteByte('+')
+		} else {
+			sb.WriteByte('-')
+			e = -e
+		}
+		sb.WriteString(strconv.Itoa(e))
 	}
 }
 

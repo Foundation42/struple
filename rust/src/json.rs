@@ -206,11 +206,80 @@ fn render_decimal(out: &mut String, d: &Decimal) {
     }
 }
 
+/// Render a float as JSON, pinned to ECMAScript `Number::toString` (the approved
+/// cross-port default). `{:e}` yields the shortest round-trip significant digits
+/// and the base-10 exponent of the most-significant digit (`[-]d[.ddd]e[-]E`, no
+/// `+`, no zero-padding); we extract those and reformat per ECMA-262. f32 is
+/// rendered by its exact f64 value (the caller widens it before this point).
 fn render_float(out: &mut String, f: f64) {
-    if f.is_finite() {
-        out.push_str(&format!("{f}"));
+    if !f.is_finite() {
+        out.push_str("null"); // JSON has no inf/nan (matches JSON.stringify)
+        return;
+    }
+    if f == 0.0 {
+        out.push('0'); // +0.0 and -0.0 both render "0"
+        return;
+    }
+    let sci = format!("{f:e}");
+    let s = match sci.strip_prefix('-') {
+        Some(rest) => {
+            out.push('-');
+            rest
+        }
+        None => sci.as_str(),
+    };
+    let epos = s.find('e').unwrap();
+    let exp: i32 = s[epos + 1..].parse().unwrap();
+    let mut digits: Vec<u8> = Vec::with_capacity(epos);
+    for c in s[..epos].bytes() {
+        if c != b'.' {
+            digits.push(c);
+        }
+    }
+    write_ecma_digits(out, &digits, exp + 1);
+}
+
+/// Emit `digits` per ECMA-262 `Number::toString`, given `n` = the count of
+/// integer-part digits (the power-of-ten of the MSD plus one).
+fn write_ecma_digits(out: &mut String, digits: &[u8], n: i32) {
+    let k = digits.len() as i32;
+    let push = |out: &mut String, bytes: &[u8]| {
+        for &c in bytes {
+            out.push(c as char);
+        }
+    };
+    if (1..=21).contains(&n) {
+        if k <= n {
+            // integer with trailing zeros
+            push(out, digits);
+            for _ in 0..(n - k) {
+                out.push('0');
+            }
+        } else {
+            // decimal point inside the digits
+            let np = n as usize;
+            push(out, &digits[..np]);
+            out.push('.');
+            push(out, &digits[np..]);
+        }
+    } else if n <= 0 && n > -6 {
+        // 0.00…digits
+        out.push_str("0.");
+        for _ in 0..(-n) {
+            out.push('0');
+        }
+        push(out, digits);
     } else {
-        out.push_str("null");
+        // exponential: d[.ddd]e±(n-1)
+        out.push(digits[0] as char);
+        if k > 1 {
+            out.push('.');
+            push(out, &digits[1..]);
+        }
+        out.push('e');
+        let e = n - 1;
+        out.push(if e >= 0 { '+' } else { '-' });
+        out.push_str(&e.unsigned_abs().to_string());
     }
 }
 

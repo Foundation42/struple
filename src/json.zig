@@ -147,7 +147,7 @@ fn writeValue(arena: std.mem.Allocator, writer: anytype, elem: struple.Element, 
         .boolean => |b| try writer.writeAll(if (b) "true" else "false"),
         .int => |i| try writer.print("{d}", .{i}),
         .big_int => |bi| try writeBigInt(arena, writer, bi),
-        .float32 => |f| try writeFloat(writer, f),
+        .float32 => |f| try writeFloat(writer, @as(f64, f)), // render an f32 by its exact f64 value (cross-port)
         .float64 => |f| try writeFloat(writer, f),
         .decimal => |d| try writeDecimal(arena, writer, d),
         .timestamp => |t| try writer.print("{d}", .{t}),
@@ -159,12 +159,69 @@ fn writeValue(arena: std.mem.Allocator, writer: anytype, elem: struple.Element, 
     }
 }
 
-fn writeFloat(writer: anytype, f: anytype) !void {
+/// Render a float as ECMAScript `Number::toString` — the shortest decimal that
+/// round-trips to the same f64, formatted per the ECMA-262 fixed/exponential rules.
+/// This is the pinned cross-language float text format (Item 3).
+fn writeFloat(writer: anytype, f: f64) !void {
     if (!std.math.isFinite(f)) {
         try writer.writeAll("null"); // JSON has no inf/nan (matches JSON.stringify)
         return;
     }
-    try writer.print("{d}", .{f});
+    if (f == 0) {
+        try writer.writeByte('0'); // +0.0 and -0.0 both render "0"
+        return;
+    }
+    // formatFloat(.scientific) yields the shortest significant digits and the
+    // base-10 exponent of the most-significant digit: `[-]d[.ddd]e[-]E`.
+    var buf: [512]u8 = undefined;
+    var s = std.fmt.formatFloat(&buf, f, .{ .mode = .scientific }) catch unreachable;
+    if (s[0] == '-') {
+        try writer.writeByte('-');
+        s = s[1..];
+    }
+    const epos = std.mem.indexOfScalar(u8, s, 'e').?;
+    const exp = std.fmt.parseInt(i32, s[epos + 1 ..], 10) catch unreachable;
+    var digbuf: [32]u8 = undefined;
+    var k: usize = 0;
+    for (s[0..epos]) |c| {
+        if (c != '.') {
+            digbuf[k] = c;
+            k += 1;
+        }
+    }
+    try writeEcmaDigits(writer, digbuf[0..k], exp + 1);
+}
+
+/// Emit shortest significant `digits` as ECMAScript Number::toString, where `n` is
+/// the integer-part digit count (`10^(n-1) <= |value| < 10^n`).
+fn writeEcmaDigits(writer: anytype, digits: []const u8, n: i32) !void {
+    const k: i32 = @intCast(digits.len);
+    if (n >= 1 and n <= 21) {
+        if (k <= n) { // integer with trailing zeros
+            try writer.writeAll(digits);
+            var z: i32 = 0;
+            while (z < n - k) : (z += 1) try writer.writeByte('0');
+        } else { // decimal point inside the digits
+            try writer.writeAll(digits[0..@intCast(n)]);
+            try writer.writeByte('.');
+            try writer.writeAll(digits[@intCast(n)..]);
+        }
+    } else if (n <= 0 and n > -6) { // 0.00…digits
+        try writer.writeAll("0.");
+        var z: i32 = 0;
+        while (z < -n) : (z += 1) try writer.writeByte('0');
+        try writer.writeAll(digits);
+    } else { // exponential: d[.ddd]e±(n-1)
+        try writer.writeByte(digits[0]);
+        if (k > 1) {
+            try writer.writeByte('.');
+            try writer.writeAll(digits[1..]);
+        }
+        try writer.writeByte('e');
+        const e = n - 1;
+        try writer.writeByte(if (e >= 0) '+' else '-');
+        try writer.print("{d}", .{@abs(e)});
+    }
 }
 
 fn writeArray(arena: std.mem.Allocator, writer: anytype, framed: []const u8, depth: usize) anyerror!void {

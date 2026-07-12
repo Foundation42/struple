@@ -762,6 +762,33 @@ test "decimal: exponent bounds, scientific render, DoS short-circuit (Item 2)" {
     }
 }
 
+test "toJson float format: ECMAScript Number::toString (Item 3)" {
+    const a = testing.allocator;
+    const cases = [_]struct { f: f64, j: []const u8 }{
+        .{ .f = 0.1, .j = "0.1" },
+        .{ .f = 1.5, .j = "1.5" },
+        .{ .f = 100.0, .j = "100" },
+        .{ .f = 1234.5678, .j = "1234.5678" },
+        .{ .f = 1e-6, .j = "0.000001" },
+        .{ .f = 1e-7, .j = "1e-7" }, // first exponential on the small side
+        .{ .f = 1e16, .j = "10000000000000000" },
+        .{ .f = 1e20, .j = "100000000000000000000" },
+        .{ .f = 1e21, .j = "1e+21" }, // first exponential on the large side
+        .{ .f = 5e-324, .j = "5e-324" }, // smallest subnormal
+        .{ .f = 1.7976931348623157e308, .j = "1.7976931348623157e+308" }, // max f64
+        .{ .f = -0.0, .j = "0" },
+        .{ .f = -2.5, .j = "-2.5" },
+    };
+    for (cases) |c| {
+        var p = struple.Packer.init(a);
+        defer p.deinit();
+        try p.appendF64(c.f);
+        const j = try struple.toJson(a, p.bytes());
+        defer a.free(j);
+        try testing.expectEqualStrings(c.j, j);
+    }
+}
+
 fn expectJsonRoundtrip(canonical: []const u8) !void {
     const a = testing.allocator;
     const encoded = try struple.fromJson(a, canonical);

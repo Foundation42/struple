@@ -28,7 +28,15 @@ const json_inputs = [_][]const u8{
     "12345",               "-42",                              "9223372036854775807",
     "-9223372036854775808", "100000000000000000000000000000",
     "-99999999999999999999999999999999",                      "1.5",
-    "-3.14159",            "0.5",                              "\"\"",
+    "-3.14159",            "0.5",
+    // Float text-format stressors (Item 3 — ECMAScript Number::toString edges).
+    // Non-integer values so struple keeps them as float64 (integer JSON -> int).
+    // (5e-324, the smallest subnormal, is intentionally excluded: native shortest
+    // formatters disagree on its *digits* — ECMAScript "5e-324" vs Java "4.9e-324" —
+    // and pinning it would force a full Ryū reimplementation per port. Notation
+    // edges below have unambiguous shortest digits.)
+    "1e-7",                "1e-6",                             "1.7976931348623157e308",
+    "\"\"",
     "\"app\"",             "\"apple\"",                        "\"hello world\"",
     "\"tab\\tnewline\\n\"", "[]",                              "[1,2,3]",
     "[null,true,\"x\",[1,2]]", "{}",                           "{\"a\":1,\"b\":2}",
@@ -46,6 +54,12 @@ const json_inputs = [_][]const u8{
 const build_ops = [_][]const u8{
     "{\"undef\":null}",
     "{\"float32\":1.5}",
+    // Integer-valued floats must be explicit float64 ops (integer JSON encodes as
+    // an int), plus a non-exact f32 — all pin the ECMAScript float text (Item 3).
+    "{\"float64\":1e16}",
+    "{\"float64\":1e21}",
+    "{\"float64\":1e20}",
+    "{\"float32\":0.1}",
     "{\"timestamp\":\"0\"}",
     "{\"timestamp\":\"1000000\"}",
     "{\"timestamp\":\"-1000000\"}",
@@ -116,7 +130,10 @@ pub fn main() !void {
         // cross-language contract. A distinct one-way field name ("to_json", not
         // "json") avoids the round-trip semantics: fromJson of this text would make
         // a float, not the decimal. Runners check toJson(bytes)==to_json when present.
-        if (std.mem.startsWith(u8, op_text, "{\"decimal\"")) {
+        if (std.mem.startsWith(u8, op_text, "{\"decimal\"") or
+            std.mem.startsWith(u8, op_text, "{\"float64\"") or
+            std.mem.startsWith(u8, op_text, "{\"float32\""))
+        {
             const j = try struple.toJson(a, p.bytes());
             try w.writeAll(", \"to_json\": ");
             try writeJsonStringLiteral(w, j);

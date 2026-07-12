@@ -513,18 +513,73 @@ static void render_string(struple_writer *out, const uint8_t *s, size_t len) {
     jc(out, '"');
 }
 
+/* Emit shortest significant `digits` (k of them) as ECMAScript Number::toString,
+ * where `n` is the integer-part digit count (10^(n-1) <= |value| < 10^n).
+ * Mirrors the Zig reference `writeEcmaDigits`. */
+static void write_ecma_digits(struple_writer *out, const char *digits, int k, int n) {
+    if (n >= 1 && n <= 21) {
+        if (k <= n) { /* integer with trailing zeros */
+            struple_writer_append(out, (const uint8_t *)digits, (size_t)k);
+            for (int z = 0; z < n - k; z++) jc(out, '0');
+        } else { /* decimal point inside the digits */
+            struple_writer_append(out, (const uint8_t *)digits, (size_t)n);
+            jc(out, '.');
+            struple_writer_append(out, (const uint8_t *)(digits + n), (size_t)(k - n));
+        }
+    } else if (n <= 0 && n > -6) { /* 0.00…digits */
+        jw(out, "0.");
+        for (int z = 0; z < -n; z++) jc(out, '0');
+        struple_writer_append(out, (const uint8_t *)digits, (size_t)k);
+    } else { /* exponential: d[.ddd]e±(n-1) */
+        jc(out, digits[0]);
+        if (k > 1) {
+            jc(out, '.');
+            struple_writer_append(out, (const uint8_t *)(digits + 1), (size_t)(k - 1));
+        }
+        jc(out, 'e');
+        int e = n - 1;
+        jc(out, e >= 0 ? '+' : '-');
+        char eb[16];
+        snprintf(eb, sizeof eb, "%d", e >= 0 ? e : -e);
+        jw(out, eb);
+    }
+}
+
+/* Render a float as ECMAScript `Number::toString`: the shortest decimal that
+ * round-trips to the same f64, formatted per the ECMA-262 fixed/exponential
+ * rules (Item 3). f32 values are widened to f64 by the caller before formatting.
+ * Mirrors the Zig reference `writeFloat`. */
 static void render_float(struple_writer *out, double f) {
     if (!isfinite(f)) {
-        jw(out, "null");
+        jw(out, "null"); /* JSON has no inf/nan (matches JSON.stringify) */
         return;
     }
-    char tmp[40];
-    /* shortest %g that round-trips */
-    for (int prec = 1; prec <= 17; prec++) {
-        snprintf(tmp, sizeof tmp, "%.*g", prec, f);
+    if (f == 0.0) {
+        jc(out, '0'); /* +0.0 and -0.0 both render "0" */
+        return;
+    }
+    /* Find the shortest scientific form that round-trips: [-]d[.ddd]e±XX. This
+     * yields the shortest significant digits and the base-10 exponent of the
+     * most-significant digit. */
+    char tmp[64];
+    for (int prec = 0; prec <= 17; prec++) {
+        snprintf(tmp, sizeof tmp, "%.*e", prec, f);
         if (strtod(tmp, NULL) == f) break;
     }
-    jw(out, tmp);
+    const char *s = tmp;
+    if (*s == '-') {
+        jc(out, '-');
+        s++;
+    }
+    const char *epos = strchr(s, 'e');
+    int exp = atoi(epos + 1);
+    /* Collect the significant digits (skip the '.'). */
+    char digits[32];
+    int k = 0;
+    for (const char *c = s; c < epos; c++) {
+        if (*c != '.') digits[k++] = *c;
+    }
+    write_ecma_digits(out, digits, k, exp + 1);
 }
 
 static char *base64(const uint8_t *data, size_t len) {

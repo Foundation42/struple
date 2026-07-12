@@ -333,11 +333,65 @@ inline void render_string(std::string& out, std::string_view s) {
     out += '"';
 }
 
+// Emit shortest significant `digits` (k of them) as ECMAScript Number::toString,
+// where `n` is the integer-part digit count (10^(n-1) <= |value| < 10^n).
+// Mirrors the Zig reference writeEcmaDigits (Item 3).
+inline void write_ecma_digits(std::string& out, const char* digits, int k, int n) {
+    if (n >= 1 && n <= 21) {
+        if (k <= n) {  // integer with trailing zeros
+            out.append(digits, size_t(k));
+            for (int z = 0; z < n - k; z++) out += '0';
+        } else {  // decimal point inside the digits
+            out.append(digits, size_t(n));
+            out += '.';
+            out.append(digits + n, size_t(k - n));
+        }
+    } else if (n <= 0 && n > -6) {  // 0.00…digits
+        out += "0.";
+        for (int z = 0; z < -n; z++) out += '0';
+        out.append(digits, size_t(k));
+    } else {  // exponential: d[.ddd]e±(n-1)
+        out += digits[0];
+        if (k > 1) {
+            out += '.';
+            out.append(digits + 1, size_t(k - 1));
+        }
+        out += 'e';
+        int e = n - 1;
+        out += (e >= 0) ? '+' : '-';
+        out += std::to_string(e >= 0 ? e : -e);
+    }
+}
+
+// Render a float as ECMAScript `Number::toString` — the shortest decimal that
+// round-trips to the same f64, formatted per the ECMA-262 fixed/exponential
+// rules. This is the pinned cross-language float text format (Item 3). Callers
+// promote f32 → f64 first, so an f32 renders by its exact f64 value.
 inline void render_float(std::string& out, double f) {
-    if (!std::isfinite(f)) { out += "null"; return; }
-    char buf[40];
-    auto r = std::to_chars(buf, buf + sizeof buf, f);  // shortest round-trip
-    out.append(buf, r.ptr);
+    if (!std::isfinite(f)) { out += "null"; return; }  // JSON has no inf/nan
+    if (f == 0) { out += '0'; return; }                // +0.0 and -0.0 → "0"
+
+    // Shortest scientific form yields the shortest significant digits and the
+    // base-10 exponent of the most-significant digit: `[-]d[.ddd]e±E`.
+    char buf[64];
+    auto r = std::to_chars(buf, buf + sizeof buf, f, std::chars_format::scientific);
+    const char* s = buf;
+    const char* end = r.ptr;
+    if (*s == '-') { out += '-'; s++; }
+
+    const char* ep = s;
+    while (ep < end && *ep != 'e') ep++;
+    const char* xp = ep + 1;
+    if (xp < end && *xp == '+') xp++;  // std::from_chars rejects a leading '+'
+    int exp = 0;
+    std::from_chars(xp, end, exp);  // handles a leading '-'
+
+    char digits[32];
+    int k = 0;
+    for (const char* c = s; c < ep; c++) {
+        if (*c != '.') digits[k++] = *c;
+    }
+    write_ecma_digits(out, digits, k, exp + 1);
 }
 
 inline std::string base64(const Bytes& data) {
