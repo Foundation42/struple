@@ -37,3 +37,7 @@ build/
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# Internal hardening handoff doc — kept local by choice (all its findings are
+# fixed; see the `hardening` commits). Remove this line to track it if desired.
+/HARDENING.md
