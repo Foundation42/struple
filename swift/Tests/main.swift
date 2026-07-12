@@ -90,6 +90,23 @@ func loadMalformedCases() -> [[String: Any]] {
     return cases
 }
 
+// json_reject.json is a top-level object `{ description, cases: [ {json, reason} ] }`
+// listing JSON texts that fromJson MUST reject cleanly (Item 4).
+func loadJsonRejectCases() -> [[String: Any]] {
+    let path = "../conformance/json_reject.json"
+    guard let data = FileManager.default.contents(atPath: path) else {
+        print("FATAL: cannot read \(path)")
+        exit(2)
+    }
+    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let cases = obj["cases"] as? [[String: Any]]
+    else {
+        print("FATAL: cannot parse \(path)")
+        exit(2)
+    }
+    return cases
+}
+
 // MARK: - Build-op interpreter (mirrors src/gen_vectors.zig buildInto)
 
 func buildInto(_ w: inout Writer, _ op: [String: Any]) throws {
@@ -555,6 +572,42 @@ func runDecimalBounds() {
     print("  decimal bounds: encode reject + semantic short-circuit (no hang)")
 }
 
+// MARK: - Phase 7: JSON grammar-edge rejection (Item 4)
+
+// Every JSON text in json_reject.json is a grammar edge where hand-rolled and
+// library parsers historically diverged (duplicate keys, lone/unpaired
+// surrogates, out-of-range floats, sign-only, non-JSON tokens). fromJson MUST
+// reject each with the port's own StrupleError — never a crash, silent
+// acceptance, or coerced value. A VALID surrogate pair still round-trips.
+func runJsonReject() {
+    let cases = loadJsonRejectCases()
+    check(!cases.isEmpty, "json_reject corpus is non-empty")
+    var rejected = 0
+    for c in cases {
+        let json = c["json"] as! String
+        let reason = c["reason"] as? String ?? ""
+        do {
+            let got = try fromJson(json)
+            check(false, "json_reject \(json) was ACCEPTED -> \(toHex(got)) (\(reason))")
+        } catch is StrupleError {
+            rejected += 1
+        } catch {
+            check(false, "json_reject \(json) threw non-StrupleError \(error) (\(reason))")
+        }
+    }
+    check(rejected == cases.count, "json_reject: \(rejected)/\(cases.count) rejected")
+    print("  json_reject: \(rejected)/\(cases.count) rejected")
+
+    // Guard the converse: a VALID surrogate pair (😀 = U+1F600) must still be
+    // accepted and encoded as its UTF-8 (Item 4: don't break valid input).
+    do {
+        let got = try fromJson("\"\\ud83d\\ude00\"")
+        check(toHex(got) == "48f09f988000", "valid surrogate pair \"😀\" accepted (got \(toHex(got)))")
+    } catch {
+        check(false, "valid surrogate pair \"😀\" was REJECTED \(error)")
+    }
+}
+
 // MARK: - main
 
 print("struple Swift conformance + behavior tests")
@@ -570,6 +623,8 @@ print("Phase 5: recursion depth caps")
 runDepthCap()
 print("Phase 6: decimal exponent bounds & DoS short-circuit (Item 2)")
 runDecimalBounds()
+print("Phase 7: JSON grammar-edge rejection (Item 4)")
+runJsonReject()
 
 print("")
 print("passed \(passed), failed \(failed)")

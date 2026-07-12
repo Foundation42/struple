@@ -23,6 +23,7 @@ public static class Program
     {
         Conformance();
         Malformed();
+        JsonReject();
         Behavioral();
 
         Console.WriteLine($"TOTAL: {s_checks} checks | {s_failures} failures");
@@ -155,6 +156,71 @@ public static class Program
         }
 
         Console.WriteLine($"Malformed: {rejected}/{total} rejected | {s_failures} failures");
+    }
+
+    // =======================================================================
+    // JSON grammar-edge reject corpus (HARDENING Item 4) — every JSON text in
+    // conformance/json_reject.json MUST be rejected by FromJson with the port's
+    // own StrupleException (duplicate keys, lone/unpaired surrogates, ±inf
+    // floats, non-JSON tokens). A non-throw, or any other exception type, is a
+    // hardening FAILURE. A VALID surrogate pair ("😀") must still be accepted.
+    // =======================================================================
+
+    private static void JsonReject()
+    {
+        string corpus = File.ReadAllText("../conformance/json_reject.json");
+        var doc = (Json.JsonObject)Json.Parse(corpus)!;
+        var cases = (List<object?>)doc.Get("cases")!;
+
+        int total = cases.Count;
+        int rejected = 0;
+        foreach (var o in cases)
+        {
+            var c = (Json.JsonObject)o!;
+            string json = (string)c.Get("json")!;
+            string reason = (string)c.Get("reason")!;
+
+            s_checks++;
+            bool ok = false;
+            try
+            {
+                Json.FromJson(json);
+                Console.Error.WriteLine($"JSON-REJECT FAIL [{json}]: parsed without error (want StrupleException) — {reason}");
+            }
+            catch (Struple.StrupleException)
+            {
+                ok = true;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"JSON-REJECT FAIL [{json}]: threw {ex.GetType().Name}, want StrupleException — {reason}");
+            }
+
+            if (ok) rejected++;
+            else s_failures++;
+        }
+
+        // Guard the flip side: a VALID surrogate pair must still be ACCEPTED and encoded as its
+        // UTF-8 (spec §4). The emoji 😀 as a literal char and as an escaped 😀 pair must
+        // both parse and encode to identical bytes.
+        s_checks++;
+        try
+        {
+            byte[] literal = Json.FromJson("\"\U0001F600\"");
+            byte[] escaped = Json.FromJson("\"\\uD83D\\uDE00\"");
+            if (!Struple.BytesEqual(literal, escaped))
+            {
+                Console.Error.WriteLine("JSON-REJECT FAIL: valid \"😀\" literal vs escaped surrogate pair encode differently");
+                s_failures++;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("JSON-REJECT FAIL: valid \"😀\" rejected — " + ex.GetType().Name);
+            s_failures++;
+        }
+
+        Console.WriteLine($"json_reject: {rejected}/{total} rejected | {s_failures} failures");
     }
 
     // -----------------------------------------------------------------------

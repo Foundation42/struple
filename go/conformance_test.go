@@ -438,6 +438,86 @@ func TestDecimalItem2(t *testing.T) {
 	}
 }
 
+// loadJSONReject reads conformance/json_reject.json — the shared corpus of JSON
+// texts every port's fromJson MUST reject (HARDENING.md Item 4). Its top level is
+// an object { "description", "cases": [ { "json", "reason" }, ... ] }, so (like
+// loadMalformed) it pulls out the "cases" array.
+func loadJSONReject(t *testing.T) []jsonValue {
+	t.Helper()
+	text, err := os.ReadFile("../conformance/json_reject.json")
+	if err != nil {
+		t.Fatalf("read json_reject.json: %v", err)
+	}
+	v, err := parseJSON(string(text))
+	if err != nil {
+		t.Fatalf("parse json_reject.json: %v", err)
+	}
+	cases, ok := field(v, "cases")
+	if !ok || cases.kind != jArray {
+		t.Fatalf("json_reject.json: missing \"cases\" array")
+	}
+	return cases.arr
+}
+
+// fromJSONSafe runs FromJson under a recover guard so a parser panic on hostile
+// input is reported as a FAILURE rather than crashing the test binary — the
+// Item 4 fix must reject cleanly with an error, never panic.
+func fromJSONSafe(text string) (err error, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	_, err = FromJson(text)
+	return err, false
+}
+
+// TestJSONRejectCorpus asserts every JSON text in json_reject.json is rejected by
+// FromJson with a clean, non-nil parse error — never a panic, crash, or silently
+// accepted value (Item 4: duplicate keys, lone/unpaired surrogates, out-of-range
+// floats, sign-with-no-digits, non-JSON tokens). Logs "json_reject: N/N rejected"
+// and fails the run if any case slips through. Valid inputs (an astral emoji as
+// raw UTF-8 and as a \uXXXX surrogate pair) are spot-checked to stay accepted so
+// the surrogate fix does not over-reject.
+func TestJSONRejectCorpus(t *testing.T) {
+	cases := loadJSONReject(t)
+	if len(cases) == 0 {
+		t.Fatal("json_reject corpus is empty")
+	}
+	rejected := 0
+	for _, c := range cases {
+		jf, _ := field(c, "json")
+		jsonText := asStr(t, jf)
+		reason := ""
+		if rf, ok := field(c, "reason"); ok && rf.kind == jStr {
+			reason = rf.str
+		}
+		err, panicked := fromJSONSafe(jsonText)
+		if panicked {
+			t.Errorf("json_reject %q: PANICKED (must reject cleanly) — %s", jsonText, reason)
+			continue
+		}
+		if err == nil {
+			t.Errorf("json_reject %q: accepted as valid (want a parse error) — %s", jsonText, reason)
+			continue
+		}
+		rejected++
+	}
+	t.Logf("json_reject: %d/%d rejected", rejected, len(cases))
+	if rejected != len(cases) {
+		t.Fatalf("json_reject corpus: only %d of %d cases rejected cleanly", rejected, len(cases))
+	}
+
+	// Guard against over-rejection: a VALID astral code point must still be
+	// accepted, both as raw UTF-8 and as a \uXXXX surrogate PAIR.
+	for _, good := range []string{`"😀"`, `"\ud83d\ude00"`} {
+		if _, err := FromJson(good); err != nil {
+			t.Errorf("FromJson(%s): valid input rejected: %v", good, err)
+		}
+	}
+}
+
 func TestSemanticCorpus(t *testing.T) {
 	for _, pr := range loadCorpus(t, "semantic_vectors.json") {
 		aField, _ := field(pr, "a")

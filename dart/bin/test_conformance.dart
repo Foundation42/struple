@@ -42,6 +42,17 @@ List<dynamic> _loadMalformed() {
   return v['cases'] as List;
 }
 
+// The JSON reject corpus is an object { description, cases: [ {json, reason} ] }
+// (like malformed.json), listing JSON texts that fromJson MUST reject.
+List<dynamic> _loadJsonReject() {
+  final text = File('../conformance/json_reject.json').readAsStringSync();
+  final v = jsonDecode(text);
+  if (v is! Map || v['cases'] is! List) {
+    throw StateError('json_reject.json is not an object with a cases array');
+  }
+  return v['cases'] as List;
+}
+
 String _toHex(Uint8List b) {
   final sb = StringBuffer();
   for (final x in b) {
@@ -232,6 +243,29 @@ void main() {
   }
   stdout.writeln(
       'conformance: malformed: $malformedRejected/${malformed.length} rejected');
+
+  // 7. JSON reject corpus: every grammar-edge JSON text must be rejected by
+  //    fromJson with the port's own clean parse error (StrupleException) — never
+  //    a native crash, silent acceptance, or a coerced value (Item 4).
+  final jsonReject = _loadJsonReject();
+  var jsonRejected = 0;
+  for (final raw in jsonReject) {
+    final c = (raw as Map).cast<String, dynamic>();
+    final json = c['json'] as String;
+    final reason = c['reason'] as String? ?? '';
+    var rejected = false;
+    try {
+      fromJson(json);
+    } on StrupleException {
+      rejected = true; // the port's own clean parse error — the required outcome
+    } catch (_) {
+      rejected = false; // any other exception type is a hard failure
+    }
+    _check(rejected, 'json_reject [$json] ($reason) rejected with StrupleException');
+    if (rejected) jsonRejected++;
+  }
+  stdout.writeln(
+      'json_reject: $jsonRejected/${jsonReject.length} rejected');
 
   stdout.writeln('conformance: $jsonCount json vectors (both directions), '
       '$buildCount build vectors (both directions), '

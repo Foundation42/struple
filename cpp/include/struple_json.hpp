@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 namespace struple {
 
@@ -97,13 +98,21 @@ inline std::string parse_string(P& p) {
                 case 'u': {
                     unsigned cp = hex4(p);
                     if (cp >= 0xd800 && cp <= 0xdbff) {
-                        if (p.i + 1 < p.n && p.b[p.i] == '\\' && p.b[p.i + 1] == 'u') {
-                            p.i += 2;
-                            unsigned lo = hex4(p);
-                            cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
-                        } else {
-                            throw Error("json: lone surrogate");
-                        }
+                        // High surrogate: it MUST be immediately followed by a
+                        // \uXXXX escape whose value is a low surrogate. A high
+                        // surrogate at end-of-string, followed by anything other
+                        // than \u, or followed by a non-low-surrogate escape is
+                        // unpaired and rejected.
+                        if (!(p.i + 1 < p.n && p.b[p.i] == '\\' && p.b[p.i + 1] == 'u'))
+                            throw Error("json: unpaired high surrogate");
+                        p.i += 2;
+                        unsigned lo = hex4(p);
+                        if (lo < 0xdc00 || lo > 0xdfff)
+                            throw Error("json: high surrogate not followed by low surrogate");
+                        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+                        // Low surrogate with no preceding high surrogate.
+                        throw Error("json: lone low surrogate");
                     }
                     utf8_append(s, cp);
                     break;
@@ -122,24 +131,35 @@ inline Json parse_value(P& p, size_t depth);
 inline Json parse_number(P& p) {
     size_t start = p.i;
     if (p.b[p.i] == '-') p.i++;
-    while (p.i < p.n && p.b[p.i] >= '0' && p.b[p.i] <= '9') p.i++;
+    // The integer part must have at least one digit: a bare "-" (or "-Infinity")
+    // is not a number. Without this, "-" would silently coerce to a value.
+    size_t int_digits = 0;
+    while (p.i < p.n && p.b[p.i] >= '0' && p.b[p.i] <= '9') { p.i++; int_digits++; }
+    if (int_digits == 0) throw Error("json: number has no digits");
     bool is_float = false;
     if (p.i < p.n && p.b[p.i] == '.') {
         is_float = true;
         p.i++;
-        while (p.i < p.n && p.b[p.i] >= '0' && p.b[p.i] <= '9') p.i++;
+        size_t frac_digits = 0;
+        while (p.i < p.n && p.b[p.i] >= '0' && p.b[p.i] <= '9') { p.i++; frac_digits++; }
+        if (frac_digits == 0) throw Error("json: number has no fraction digits");
     }
     if (p.i < p.n && (p.b[p.i] == 'e' || p.b[p.i] == 'E')) {
         is_float = true;
         p.i++;
         if (p.i < p.n && (p.b[p.i] == '+' || p.b[p.i] == '-')) p.i++;
-        while (p.i < p.n && p.b[p.i] >= '0' && p.b[p.i] <= '9') p.i++;
+        size_t exp_digits = 0;
+        while (p.i < p.n && p.b[p.i] >= '0' && p.b[p.i] <= '9') { p.i++; exp_digits++; }
+        if (exp_digits == 0) throw Error("json: number has no exponent digits");
     }
     std::string tok(p.b + start, p.i - start);
     Json j;
     if (is_float) {
         j.kind = Json::Kind::Float;
         j.f = std::strtod(tok.c_str(), nullptr);
+        // A number that overflows f64 (e.g. 1e999 -> ±inf) is rejected, not
+        // encoded as an infinity. Underflow to 0 stays valid.
+        if (!std::isfinite(j.f)) throw Error("json: float out of range");
     } else {
         j.kind = Json::Kind::Int;
         j.text = std::move(tok);
@@ -171,10 +191,14 @@ inline Json parse_object(P& p, size_t depth) {
     j.kind = Json::Kind::Object;
     ws(p);
     if (p.i < p.n && p.b[p.i] == '}') { p.i++; return j; }
+    // A struple map is canonical and cannot hold two entries for one key, so a
+    // duplicate object key is rejected (even if the values are equal).
+    std::set<std::string> seen;
     for (;;) {
         ws(p);
         if (p.i >= p.n || p.b[p.i] != '"') throw Error("json: key");
         std::string k = parse_string(p);
+        if (!seen.insert(k).second) throw Error("json: duplicate object key");
         ws(p);
         if (p.i >= p.n || p.b[p.i] != ':') throw Error("json: colon");
         p.i++;

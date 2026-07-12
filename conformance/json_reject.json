@@ -1,0 +1,16 @@
+{
+  "description": "JSON texts that every port's fromJson MUST reject with its own clean parse error — never a crash, panic, silent acceptance, or a coerced value. These are the grammar edges where hand-rolled and library parsers historically diverged (HARDENING.md Item 4). One policy per edge (§4): duplicate keys, lone/unpaired surrogates, out-of-range floats, and non-JSON tokens are all rejected. Each port's conformance runner loads this list and asserts fromJson(text) fails.",
+  "cases": [
+    { "json": "{\"k\":1,\"k\":2}", "reason": "duplicate object key (canonicality: a struple map can't hold two 'k' entries)" },
+    { "json": "{\"a\":1,\"a\":1}", "reason": "duplicate key even with equal values" },
+    { "json": "\"\\ud800\"", "reason": "lone high surrogate — not valid Unicode" },
+    { "json": "\"\\udc00\"", "reason": "lone low surrogate — not valid Unicode" },
+    { "json": "\"\\ud800x\"", "reason": "high surrogate not followed by a low surrogate" },
+    { "json": "1e999", "reason": "number out of f64 range (parses to +inf)" },
+    { "json": "-1e999", "reason": "number out of f64 range (parses to -inf)" },
+    { "json": "-", "reason": "sign with no digits" },
+    { "json": "NaN", "reason": "not a JSON token" },
+    { "json": "Infinity", "reason": "not a JSON token" },
+    { "json": "-Infinity", "reason": "not a JSON token" }
+  ]
+}

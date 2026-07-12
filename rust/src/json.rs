@@ -489,16 +489,25 @@ impl Parser<'_> {
                         b'u' => {
                             let cp = self.hex4()?;
                             let ch = if (0xd800..=0xdbff).contains(&cp) {
+                                // A high surrogate must be immediately followed by a
+                                // `\uXXXX` low surrogate (0xdc00..=0xdfff). Validate the
+                                // low half's range *before* the arithmetic, otherwise
+                                // `lo - 0xdc00` underflows and panics (subtract overflow).
                                 if self.b.get(self.i) == Some(&b'\\') && self.b.get(self.i + 1) == Some(&b'u') {
                                     self.i += 2;
                                     let lo = self.hex4()?;
+                                    if !(0xdc00..=0xdfff).contains(&lo) {
+                                        return Err("high surrogate not followed by a low surrogate".into());
+                                    }
                                     char::from_u32(0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00))
                                         .ok_or("bad surrogate pair")?
                                 } else {
                                     return Err("lone surrogate".into());
                                 }
                             } else {
-                                char::from_u32(cp).ok_or("bad code point")?
+                                // A lone low surrogate (0xdc00..=0xdfff) is not a scalar
+                                // value; `char::from_u32` returns None -> reject.
+                                char::from_u32(cp).ok_or("lone surrogate")?
                             };
                             let mut buf = [0u8; 4];
                             out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
@@ -524,8 +533,15 @@ impl Parser<'_> {
         if self.peek() == Some(b'-') {
             self.i += 1;
         }
+        // The integer part must have at least one digit. A sign with no digits
+        // (`-`, `-Infinity`, …) is rejected here rather than silently coerced to 0
+        // (the old i128->BigInt fallback swallowed the parse failure).
+        let int_start = self.i;
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.i += 1;
+        }
+        if self.i == int_start {
+            return Err("number has no digits".into());
         }
         let mut is_float = false;
         if self.peek() == Some(b'.') {
@@ -547,7 +563,13 @@ impl Parser<'_> {
         }
         let tok = std::str::from_utf8(&self.b[start..self.i]).unwrap();
         if is_float {
-            tok.parse::<f64>().map(Json::Float).map_err(|_| "bad float".to_string())
+            // Reject a number that parses to ±inf (e.g. `1e999`): JSON has no
+            // infinity, so it must not be silently encoded as one.
+            let f = tok.parse::<f64>().map_err(|_| "bad float".to_string())?;
+            if !f.is_finite() {
+                return Err("number out of range (not finite)".into());
+            }
+            Ok(Json::Float(f))
         } else {
             // Fall back to arbitrary precision when the value exceeds i128.
             Ok(tok.parse::<i128>().map(Json::Int).unwrap_or_else(|_| Json::BigInt(tok.to_string())))
@@ -591,6 +613,12 @@ impl Parser<'_> {
                 return Err("expected object key".into());
             }
             let key = self.string()?;
+            // A struple map is canonical and cannot hold two entries for one key;
+            // reject a duplicate key seen at this object level (fail fast, before
+            // parsing the value).
+            if entries.iter().any(|(k, _)| k == &key) {
+                return Err("duplicate object key".into());
+            }
             self.ws();
             if self.peek() != Some(b':') {
                 return Err("expected `:`".into());

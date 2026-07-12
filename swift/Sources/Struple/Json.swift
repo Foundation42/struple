@@ -514,15 +514,24 @@ struct JSONParser {
                 case UInt8(ascii: "u"):
                     var cp = try hex4()
                     if cp >= 0xD800 && cp <= 0xDBFF {
+                        // High surrogate: MUST be immediately followed by a \uXXXX
+                        // low surrogate (0xDC00–0xDFFF). A lone high surrogate, or a
+                        // high paired with a non-low escape, is rejected (Item 4).
                         if i + 1 < b.count && b[i] == UInt8(ascii: "\\")
                             && b[i + 1] == UInt8(ascii: "u")
                         {
                             i += 2
                             let lo = try hex4()
+                            guard lo >= 0xDC00 && lo <= 0xDFFF else {
+                                throw StrupleError.invalidNumber
+                            }
                             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
                         } else {
                             throw StrupleError.invalidNumber
                         }
+                    } else if cp >= 0xDC00 && cp <= 0xDFFF {
+                        // Lone low surrogate with no preceding high: not valid Unicode.
+                        throw StrupleError.invalidNumber
                     }
                     appendRune(&out, cp)
                 default:
@@ -555,7 +564,11 @@ struct JSONParser {
     mutating func number() throws -> JSONValue {
         let start = i
         if let c = peek(), c == UInt8(ascii: "-") { i += 1 }
+        // The integer part must have at least one digit — a bare sign like `-`
+        // (or `-Infinity`, whose `-` starts a number) is rejected (Item 4).
+        let intStart = i
         while let c = peek(), c >= UInt8(ascii: "0") && c <= UInt8(ascii: "9") { i += 1 }
+        if i == intStart { throw StrupleError.invalidNumber }
         var isFloat = false
         if let c = peek(), c == UInt8(ascii: ".") {
             isFloat = true
@@ -570,7 +583,9 @@ struct JSONParser {
         }
         let tok = String(decoding: b[start..<i], as: UTF8.self)
         if isFloat {
-            guard let f = Double(tok) else { throw StrupleError.invalidNumber }
+            // A JSON number that parses to ±infinity (e.g. `1e999`) is out of f64
+            // range and rejected, never encoded as an infinity (Item 4).
+            guard let f = Double(tok), f.isFinite else { throw StrupleError.invalidNumber }
             return .float(f)
         }
         // Fall back to arbitrary precision when the value exceeds Int64.
@@ -608,6 +623,10 @@ struct JSONParser {
     mutating func object(_ depth: Int) throws -> JSONValue {
         i += 1  // {
         var members: [(String, JSONValue)] = []
+        // A struple map is canonical and can't hold two entries for one key, so a
+        // repeated key at this object level is rejected rather than silently kept
+        // (Item 4). Track the keys seen at this level.
+        var seen = Set<String>()
         skipWS()
         if let c = peek(), c == UInt8(ascii: "}") {
             i += 1
@@ -617,6 +636,7 @@ struct JSONParser {
             skipWS()
             guard let c = peek(), c == UInt8(ascii: "\"") else { throw StrupleError.invalidNumber }
             let key = try string()
+            if !seen.insert(key).inserted { throw StrupleError.malformedMap }  // duplicate key
             skipWS()
             guard let colon = peek(), colon == UInt8(ascii: ":") else {
                 throw StrupleError.invalidNumber

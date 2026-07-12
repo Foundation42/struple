@@ -171,7 +171,50 @@ int main() {
         fails++;
     }
 
-    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d to_json %d | semantic %d | malformed %d/%d rejected | %d failures\n",
-                je, jd, be, bt, tj, sem, mal_ok, mal_tot, fails);
+    // json_reject corpus: JSON grammar edges every port's from_json MUST reject
+    // with a clean struple::Error — never a crash, panic, silent acceptance, or a
+    // coerced value (HARDENING.md Item 4). Duplicate keys, lone/unpaired
+    // surrogates, out-of-range floats, sign-with-no-digits, and non-JSON tokens.
+    int jr_ok = 0, jr_tot = 0;
+    Json jrroot = json_parse(read_file("../conformance/json_reject.json"));
+    const Json* jr_cases = obj_get(jrroot, "cases");
+    if (jr_cases) {
+        for (auto& c : jr_cases->items) {
+            const std::string& js = obj_get(c, "json")->text;
+            jr_tot++;
+            try {
+                from_json(js);
+                std::fprintf(stderr, "JSON_REJECT FAIL %s: from_json accepted it\n", js.c_str());
+                fails++;
+            } catch (const struple::Error&) {
+                jr_ok++;
+            } catch (const std::exception& ex) {
+                std::fprintf(stderr, "JSON_REJECT FAIL %s: wrong exception type: %s\n", js.c_str(), ex.what());
+                fails++;
+            }
+        }
+    } else {
+        std::fprintf(stderr, "could not parse json_reject corpus\n");
+        fails++;
+    }
+    std::printf("json_reject: %d/%d rejected\n", jr_ok, jr_tot);
+
+    // A VALID astral character (😀 = U+1F600) must still be ACCEPTED and encode
+    // identically whether written as a literal UTF-8 string or a \uXXXX surrogate
+    // pair — the surrogate hardening must not break valid Unicode.
+    try {
+        Bytes lit = from_json("\"\xf0\x9f\x98\x80\"");   // literal UTF-8 😀
+        Bytes esc = from_json("\"\\ud83d\\ude00\"");     // escaped surrogate pair
+        if (lit != esc) {
+            std::fprintf(stderr, "JSON_REJECT FAIL: valid emoji surrogate pair did not match its literal UTF-8\n");
+            fails++;
+        }
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "JSON_REJECT FAIL: valid emoji rejected: %s\n", ex.what());
+        fails++;
+    }
+
+    std::printf("test_conformance: json encode %d decode %d | build %d transcode %d to_json %d | semantic %d | malformed %d/%d rejected | json_reject %d/%d rejected | %d failures\n",
+                je, jd, be, bt, tj, sem, mal_ok, mal_tot, jr_ok, jr_tot, fails);
     return fails ? 1 : 0;
 }

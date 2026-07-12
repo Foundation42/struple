@@ -16,9 +16,84 @@ export function fromJson(text: string): Uint8Array {
   // exceeded") on deep input. This linear bracket-depth pre-scan bounds both
   // that recursion and encodeJson below, surfacing the port's own Error (Item 5).
   checkJsonDepth(text);
+  // Reject duplicate object keys before parsing. JSON.parse silently keeps the
+  // last of a repeated pair, but a struple map is canonical and cannot hold two
+  // entries for one key, so we scan the text ourselves (Item 4, grammar edge 1).
+  checkDuplicateKeys(text);
   const w = new Writer();
+  // Note: JSON.parse already rejects the other grammar edges' bare tokens (`-`,
+  // `NaN`, `Infinity`, `-Infinity`). The two edges JSON.parse would silently
+  // wave through — out-of-range floats (parse to ±inf) and unpaired surrogates
+  // (would become U+FFFD on encode) — are caught in encodeJson (Item 4).
   encodeJson(w, parseJsonPreservingBigInts(text), 0);
   return w.bytes();
+}
+
+/** Reject an object that repeats a key (grammar edge 1). A small tokenizer
+ *  tracks object vs. array nesting; within each object it remembers the keys
+ *  seen and rejects a repeat. Keys are compared by their DECODED value, so
+ *  `"a"` and `"a"` collide the same way they would in the canonical map.
+ *  Only strings in key position count — a string in value or array position is
+ *  skipped — and string escapes (incl. `\"`) are respected so an escaped quote
+ *  never ends a string early. */
+function checkDuplicateKeys(text: string): void {
+  interface Frame {
+    object: boolean;
+    keys: Set<string>;
+    expectKey: boolean;
+  }
+  const stack: Frame[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "{") {
+      stack.push({ object: true, keys: new Set(), expectKey: true });
+    } else if (c === "[") {
+      stack.push({ object: false, keys: new Set(), expectKey: false });
+    } else if (c === "}" || c === "]") {
+      stack.pop();
+    } else if (c === ",") {
+      const top = stack[stack.length - 1];
+      if (top && top.object) top.expectKey = true;
+    } else if (c === '"') {
+      const start = i; // walk to the matching close quote, respecting escapes
+      i++;
+      while (i < text.length) {
+        const d = text[i];
+        if (d === "\\") i += 2;
+        else if (d === '"') break;
+        else i++;
+      }
+      const top = stack[stack.length - 1];
+      if (top && top.object && top.expectKey) {
+        const key = JSON.parse(text.slice(start, i + 1)) as string;
+        if (top.keys.has(key)) {
+          throw new Error(`struple/json: duplicate object key ${JSON.stringify(key)}`);
+        }
+        top.keys.add(key);
+        top.expectKey = false; // now a value follows, not another key
+      }
+      // i points at the closing quote; the loop's i++ steps past it.
+    }
+  }
+}
+
+/** True if `s` holds an unpaired UTF-16 surrogate: a high surrogate
+ *  (0xD800–0xDBFF) not immediately followed by a low surrogate, or a low
+ *  surrogate (0xDC00–0xDFFF) with no high before it (grammar edge 2). A valid
+ *  pair (e.g. "😀") returns false. JSON.parse yields such lone surrogates from
+ *  `"\ud800"`; TextEncoder would silently emit U+FFFD, so we reject here first. */
+function hasUnpairedSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (next < 0xdc00 || next > 0xdfff) return true; // high with no low
+      i++; // consume the paired low surrogate
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true; // low with no preceding high
+    }
+  }
+  return false;
 }
 
 /** Scan JSON text and reject if `[`/`{` nesting exceeds MAX_DEPTH. Brackets
@@ -78,9 +153,16 @@ function encodeJson(w: Writer, value: unknown, depth: number): void {
       w.appendInt(value); // integer tokens
       return;
     case "number":
+      // A JSON number that overflows f64 parses to ±inf; reject it rather than
+      // encode an infinity (grammar edge 3). (NaN can't reach here — JSON.parse
+      // rejects the bare NaN/Infinity tokens — but isFinite guards it anyway.)
+      if (!Number.isFinite(value)) throw new Error("struple/json: number out of range");
       w.appendFloat64(value); // fractional/exponent tokens
       return;
     case "string":
+      // Reject a string carrying an unpaired surrogate (grammar edge 2) before
+      // TextEncoder can silently replace it with U+FFFD.
+      if (hasUnpairedSurrogate(value)) throw new Error("struple/json: unpaired surrogate in string");
       w.appendString(value);
       return;
     case "object": {

@@ -26,6 +26,10 @@ const malformedPath = join(here, "..", "..", "conformance", "malformed.json");
 type MalformedCase = { hex: string; item: number; note: string };
 const malformed = (JSON.parse(readFileSync(malformedPath, "utf8")) as { cases: MalformedCase[] }).cases;
 
+const jsonRejectPath = join(here, "..", "..", "conformance", "json_reject.json");
+type JsonRejectCase = { json: string; reason: string };
+const jsonReject = (JSON.parse(readFileSync(jsonRejectPath, "utf8")) as { cases: JsonRejectCase[] }).cases;
+
 function toHex(bytes: Uint8Array): string {
   let s = "";
   for (const b of bytes) s += b.toString(16).padStart(2, "0");
@@ -145,4 +149,44 @@ test("malformed: all hostile inputs cleanly rejected", () => {
   }
   console.log(`malformed: ${rejected}/${malformed.length} rejected`);
   assert.equal(rejected, malformed.length);
+});
+
+// JSON grammar edges: every text in json_reject.json must be REJECTED by
+// fromJson with the port's own clean Error — never a crash, silent acceptance,
+// or coerced value (Item 4). Duplicate keys, unpaired surrogates, out-of-range
+// floats, and non-JSON tokens all reject here.
+test("json_reject corpus is non-empty", () => assert.ok(jsonReject.length > 0));
+
+for (const c of jsonReject) {
+  test(`json_reject ${JSON.stringify(c.json)} — ${c.reason}`, () => {
+    assert.throws(
+      () => fromJson(c.json),
+      (err: unknown) => err instanceof Error,
+      `expected ${JSON.stringify(c.json)} to be cleanly rejected`,
+    );
+  });
+}
+
+test("json_reject: all grammar-edge inputs rejected", () => {
+  let rejected = 0;
+  for (const c of jsonReject) {
+    let threw: unknown = null;
+    try {
+      fromJson(c.json);
+    } catch (err) {
+      threw = err;
+    }
+    assert.ok(threw !== null, `case ${JSON.stringify(c.json)} (${c.reason}) was ACCEPTED — must reject`);
+    assert.ok(threw instanceof Error, `case ${JSON.stringify(c.json)} threw a non-Error: ${String(threw)}`);
+    rejected++;
+  }
+  console.log(`json_reject: ${rejected}/${jsonReject.length} rejected`);
+  assert.equal(rejected, jsonReject.length);
+});
+
+// A VALID surrogate pair (😀 = U+1F600) must still be accepted and encode as
+// its UTF-8 bytes — the surrogate check must not over-reject (Item 4).
+test("json_reject: valid surrogate pair 😀 still accepted", () => {
+  const bytes = fromJson('"😀"');
+  assert.equal(toHex(bytes), "48f09f988000");
 });

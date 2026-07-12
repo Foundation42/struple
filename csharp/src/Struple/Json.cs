@@ -409,6 +409,10 @@ public static class Json
         private JsonObject ParseObject(int depth)
         {
             var obj = new JsonObject();
+            // A struple map is canonical and cannot hold two entries for one key. Track the keys
+            // seen at THIS object level and reject a repeat while parsing (rather than let the
+            // later canonical sort silently drop or reorder a duplicate) — HARDENING Item 4.
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             _i++; // '{'
             SkipWs();
             if (_i < _s.Length && _s[_i] == '}')
@@ -421,6 +425,7 @@ public static class Json
                 SkipWs();
                 if (_i >= _s.Length || _s[_i] != '"') throw new Struple.StrupleException("expected object key");
                 string key = ParseString();
+                if (!seen.Add(key)) throw new Struple.StrupleException("duplicate object key");
                 SkipWs();
                 if (_i >= _s.Length || _s[_i] != ':') throw new Struple.StrupleException("expected ':'");
                 _i++;
@@ -481,11 +486,32 @@ public static class Json
                         case 'r': sb.Append('\r'); break;
                         case 't': sb.Append('\t'); break;
                         case 'u':
-                            if (_i + 4 > _s.Length) throw new Struple.StrupleException("bad unicode escape");
-                            int cp = Convert.ToInt32(_s.Substring(_i, 4), 16);
-                            _i += 4;
-                            sb.Append((char)cp);
+                        {
+                            int cp = ParseHex4();
+                            if (cp >= 0xD800 && cp <= 0xDBFF)
+                            {
+                                // A high surrogate MUST be immediately followed by a \uXXXX low
+                                // surrogate; a lone high (end of string or any other char) is rejected.
+                                if (_i + 1 >= _s.Length || _s[_i] != '\\' || _s[_i + 1] != 'u')
+                                    throw new Struple.StrupleException("unpaired high surrogate");
+                                _i += 2; // consume the following "\u"
+                                int lo = ParseHex4();
+                                if (lo < 0xDC00 || lo > 0xDFFF)
+                                    throw new Struple.StrupleException("invalid low surrogate");
+                                sb.Append((char)cp);
+                                sb.Append((char)lo);
+                            }
+                            else if (cp >= 0xDC00 && cp <= 0xDFFF)
+                            {
+                                // A low surrogate with no preceding high surrogate is not valid Unicode.
+                                throw new Struple.StrupleException("unpaired low surrogate");
+                            }
+                            else
+                            {
+                                sb.Append((char)cp);
+                            }
                             break;
+                        }
                         default:
                             throw new Struple.StrupleException("bad string escape");
                     }
@@ -496,6 +522,29 @@ public static class Json
                 }
             }
             throw new Struple.StrupleException("unterminated string");
+        }
+
+        /// <summary>
+        /// Read exactly 4 strict hex digits (0-9 a-f A-F) of a <c>\uXXXX</c> escape and return the
+        /// UTF-16 code unit. Unlike <c>Convert.ToInt32(_,16)</c> — which also accepts a <c>0x</c>
+        /// prefix, sign, and whitespace (so <c>\u0x1A</c> slipped through) — anything but four bare
+        /// hex digits is rejected.
+        /// </summary>
+        private int ParseHex4()
+        {
+            if (_i + 4 > _s.Length) throw new Struple.StrupleException("bad unicode escape");
+            int cp = 0;
+            for (int j = 0; j < 4; j++)
+            {
+                char h = _s[_i++];
+                int d;
+                if (h >= '0' && h <= '9') d = h - '0';
+                else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+                else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+                else throw new Struple.StrupleException("bad unicode escape");
+                cp = (cp << 4) | d;
+            }
+            return cp;
         }
 
         /// <summary>Parse a number token: integer-valued -&gt; BigInteger; fractional/exponent -&gt; double.</summary>
@@ -522,7 +571,11 @@ public static class Json
             if (tok.Length == 0 || tok == "-") throw new Struple.StrupleException("invalid number");
             if (isFloat)
             {
-                return double.Parse(tok, System.Globalization.CultureInfo.InvariantCulture);
+                double val = double.Parse(tok, System.Globalization.CultureInfo.InvariantCulture);
+                // A token like 1e999 / -1e999 overflows f64 to ±inf; JSON has no infinity, so reject
+                // rather than encode an infinity (HARDENING Item 4).
+                if (!double.IsFinite(val)) throw new Struple.StrupleException("float out of range");
+                return val;
             }
             return BigInteger.Parse(tok, System.Globalization.CultureInfo.InvariantCulture);
         }

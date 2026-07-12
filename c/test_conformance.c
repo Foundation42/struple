@@ -292,7 +292,39 @@ int main(void) {
     struple_json_free(mroot);
     free(mtext);
 
-    printf("test_conformance: json encode %d decode %d | build %d transcode %d to_json %d | semantic %d | malformed %d/%d rejected | %d failures\n",
-           json_enc, json_dec, build_enc, build_trc, build_json, sem_ok, malformed_ok, malformed_total, failures);
+    /* json-reject corpus: JSON grammar edges (duplicate keys, lone/unpaired
+     * surrogates, out-of-range floats, non-JSON tokens) that fromJson MUST
+     * reject cleanly — struple_from_json returns non-zero, never accepts,
+     * never crashes (Item 4). */
+    int reject_ok = 0, reject_total = 0;
+    size_t rlen;
+    char *rtext = read_file("../conformance/json_reject.json", &rlen);
+    sj_value *rroot = struple_json_parse(rtext, rlen);
+    const sj_value *rcases = rroot ? obj_get(rroot, "cases") : NULL;
+    if (rcases && rcases->kind == SJ_ARRAY) {
+        for (size_t i = 0; i < rcases->count; i++) {
+            const sj_value *json = obj_get(&rcases->items[i], "json");
+            struple_writer w;
+            struple_writer_init(&w);
+            int rc = struple_from_json(json->str, strlen(json->str), &w);
+            if (rc == 0) { /* accepted a case it must reject — a parser bug */
+                fprintf(stderr, "JSON_REJECT FAIL %s: from_json accepted it\n", json->str);
+                failures++;
+            } else {
+                reject_ok++;
+            }
+            reject_total++;
+            struple_writer_free(&w);
+        }
+    } else {
+        fprintf(stderr, "could not parse json_reject corpus\n");
+        failures++;
+    }
+    struple_json_free(rroot);
+    free(rtext);
+    printf("json_reject: %d/%d rejected\n", reject_ok, reject_total);
+
+    printf("test_conformance: json encode %d decode %d | build %d transcode %d to_json %d | semantic %d | malformed %d/%d rejected | json_reject %d/%d rejected | %d failures\n",
+           json_enc, json_dec, build_enc, build_trc, build_json, sem_ok, malformed_ok, malformed_total, reject_ok, reject_total, failures);
     return failures ? 1 : 0;
 }

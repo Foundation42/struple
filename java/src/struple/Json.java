@@ -461,6 +461,12 @@ public final class Json {
                 }
                 i++;
                 Object value = parseValue(depth + 1);
+                // A struple map is canonical and cannot hold two entries for one key. Reject a
+                // duplicate at this object level rather than emit a non-canonical two-key map
+                // (HARDENING.md Item 4, §4).
+                if (obj.has(key)) {
+                    throw new Struple.StrupleException("duplicate object key");
+                }
                 obj.keys.add(key);
                 obj.values.add(value);
                 skipWs();
@@ -541,14 +547,33 @@ public final class Json {
                         case 't':
                             sb.append('\t');
                             break;
-                        case 'u':
-                            if (i + 4 > s.length()) {
-                                throw new Struple.StrupleException("bad unicode escape");
+                        case 'u': {
+                            int cp = parseHex4();
+                            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                                // High surrogate: MUST be immediately followed by a low-surrogate
+                                // escape (0xDC00-0xDFFF). Anything else is unpaired — reject
+                                // rather than silently coerce to U+FFFD (HARDENING.md Item 4, §4).
+                                if (i + 1 >= s.length() || s.charAt(i) != '\\'
+                                        || s.charAt(i + 1) != 'u') {
+                                    throw new Struple.StrupleException(
+                                            "unpaired high surrogate");
+                                }
+                                i += 2; // consume the backslash-u of the low-surrogate escape
+                                int lo = parseHex4();
+                                if (lo < 0xDC00 || lo > 0xDFFF) {
+                                    throw new Struple.StrupleException(
+                                            "high surrogate not followed by low surrogate");
+                                }
+                                sb.append((char) cp);
+                                sb.append((char) lo);
+                            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                                // Low surrogate with no preceding high surrogate.
+                                throw new Struple.StrupleException("lone low surrogate");
+                            } else {
+                                sb.append((char) cp);
                             }
-                            int cp = Integer.parseInt(s.substring(i, i + 4), 16);
-                            i += 4;
-                            sb.append((char) cp);
                             break;
+                        }
                         default:
                             throw new Struple.StrupleException("bad string escape");
                     }
@@ -557,6 +582,30 @@ public final class Json {
                 }
             }
             throw new Struple.StrupleException("unterminated string");
+        }
+
+        /** Read exactly four hex digits of a {@code \\uXXXX} escape; reject non-hex or a short tail. */
+        private int parseHex4() {
+            if (i + 4 > s.length()) {
+                throw new Struple.StrupleException("bad unicode escape");
+            }
+            int cp = 0;
+            for (int j = 0; j < 4; j++) {
+                char h = s.charAt(i + j);
+                int d;
+                if (h >= '0' && h <= '9') {
+                    d = h - '0';
+                } else if (h >= 'a' && h <= 'f') {
+                    d = h - 'a' + 10;
+                } else if (h >= 'A' && h <= 'F') {
+                    d = h - 'A' + 10;
+                } else {
+                    throw new Struple.StrupleException("bad unicode escape");
+                }
+                cp = (cp << 4) | d;
+            }
+            i += 4;
+            return cp;
         }
 
         /** Parse a number token: integer-valued -> BigInteger; fractional/exponent -> Double. */
@@ -591,7 +640,13 @@ public final class Json {
                 throw new Struple.StrupleException("invalid number");
             }
             if (isFloat) {
-                return Double.valueOf(Double.parseDouble(tok));
+                double d = Double.parseDouble(tok);
+                // A JSON number that overflows f64 to ±infinity must be rejected, not encoded as
+                // an infinity (HARDENING.md Item 4, §4).
+                if (!Double.isFinite(d)) {
+                    throw new Struple.StrupleException("number out of range");
+                }
+                return Double.valueOf(d);
             }
             return new BigInteger(tok);
         }

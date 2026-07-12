@@ -112,10 +112,18 @@ static char *parse_string_raw(P *p) {
                         return NULL;
                     }
                     if (cp >= 0xd800 && cp <= 0xdbff) {
+                        /* High surrogate: MUST be immediately followed by a
+                         * \uXXXX low surrogate (0xdc00–0xdfff). A high with no
+                         * following escape, or one whose escape is not a low
+                         * surrogate, is invalid Unicode — reject (Item 4). */
                         if (p->i + 1 < p->n && p->b[p->i] == '\\' && p->b[p->i + 1] == 'u') {
                             p->i += 2;
                             unsigned lo;
                             if (hex4(p, &lo) != 0) {
+                                free(buf);
+                                return NULL;
+                            }
+                            if (lo < 0xdc00 || lo > 0xdfff) {
                                 free(buf);
                                 return NULL;
                             }
@@ -124,6 +132,11 @@ static char *parse_string_raw(P *p) {
                             free(buf);
                             return NULL;
                         }
+                    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+                        /* Lone low surrogate with no preceding high — invalid
+                         * Unicode; reject (Item 4). */
+                        free(buf);
+                        return NULL;
                     }
                     char u8[4];
                     int ul = utf8_encode(cp, u8);
@@ -173,7 +186,12 @@ static void free_internals(sj_value *v) {
 static int parse_number(P *p, sj_value *out) {
     size_t start = p->i;
     if (p->b[p->i] == '-') p->i++;
+    size_t int_start = p->i;
     while (p->i < p->n && p->b[p->i] >= '0' && p->b[p->i] <= '9') p->i++;
+    /* A JSON number must have at least one integer digit; a bare sign ("-") or
+     * a sign followed by a non-digit token (e.g. "-Infinity") is rejected here
+     * rather than coerced to 0 (Item 4). */
+    if (p->i == int_start) return -1;
     bool is_float = false;
     if (p->i < p->n && p->b[p->i] == '.') {
         is_float = true;
@@ -191,9 +209,13 @@ static int parse_number(P *p, sj_value *out) {
     memcpy(tok, p->b + start, tlen);
     tok[tlen] = 0;
     if (is_float) {
-        out->kind = SJ_FLOAT;
-        out->float_val = strtod(tok, NULL);
+        double d = strtod(tok, NULL);
         free(tok);
+        /* A number that overflows f64 to ±infinity (e.g. 1e999) must be
+         * rejected, not encoded as an infinity (Item 4). */
+        if (!isfinite(d)) return -1;
+        out->kind = SJ_FLOAT;
+        out->float_val = d;
     } else {
         out->kind = SJ_INT;
         out->str = tok;
@@ -256,6 +278,14 @@ static int parse_object(P *p, sj_value *out, int depth) {
         if (p->i >= p->n || p->b[p->i] != '"') goto fail;
         char *key = parse_string_raw(p);
         if (!key) goto fail;
+        /* A struple map is canonical and cannot hold two entries for one key.
+         * Reject an object with a duplicate key at this nesting level (Item 4). */
+        for (size_t k = 0; k < count; k++) {
+            if (strcmp(keys[k], key) == 0) {
+                free(key);
+                goto fail;
+            }
+        }
         skip_ws(p);
         if (p->i >= p->n || p->b[p->i] != ':') {
             free(key);

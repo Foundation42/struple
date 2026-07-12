@@ -233,6 +233,38 @@ fn malformed_rejected() {
     assert_eq!(rejected, total, "some malformed cases were not cleanly rejected");
 }
 
+/// Item 4: grammar-edge JSON texts that `from_json` MUST reject with a clean
+/// parse error — never a panic, an OOB read, or a coerced `Ok(value)`. Loads
+/// conformance/json_reject.json and asserts each `from_json(case.json)` is `Err`.
+/// Mirrors the malformed-corpus loader above.
+#[test]
+fn json_reject_rejected() {
+    let path = format!("{}/../conformance/json_reject.json", env!("CARGO_MANIFEST_DIR"));
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let doc = parse(&text).expect("parse json_reject corpus");
+    let cases = match field(&doc, "cases") {
+        Some(Json::Array(v)) => v,
+        _ => panic!("json_reject corpus has no `cases` array"),
+    };
+    assert!(!cases.is_empty(), "json_reject corpus is empty");
+
+    let total = cases.len();
+    let mut rejected = 0usize;
+    for c in cases {
+        let json = as_str(field(c, "json").unwrap());
+        let reason = field(c, "reason").map(as_str).unwrap_or("");
+        let got = from_json(json);
+        assert!(got.is_err(), "NOT rejected: json={json:?} reason=\"{reason}\" got={got:?}");
+        rejected += 1;
+    }
+    println!("json_reject: {rejected}/{total} rejected");
+    assert_eq!(rejected, total, "some json_reject cases were not cleanly rejected");
+
+    // Guard the other direction: a VALID surrogate pair (😀 = U+1F600) must still
+    // be accepted and encoded (Item 4 must not over-reject).
+    assert!(from_json("\"\\ud83d\\ude00\"").is_ok(), "valid surrogate pair must still be accepted");
+}
+
 #[test]
 fn semantic_corpus() {
     use std::cmp::Ordering;

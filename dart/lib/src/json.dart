@@ -117,7 +117,13 @@ void _encodeJson(Writer w, JsonValue v) {
         final mag = BigInt.parse(digits);
         w.appendBigInt(negative, _magBytes(mag));
       } else {
-        w.appendF64(double.parse(v.numberText));
+        // A JSON number that overflows f64 (e.g. 1e999) parses to ±infinity;
+        // reject it rather than encoding an infinity (Item 4).
+        final f = double.parse(v.numberText);
+        if (!f.isFinite) {
+          throw const StrupleException('number out of range');
+        }
+        w.appendF64(f);
       }
     case JsonKind.string_:
       w.appendString(utf8.encode(v.str));
@@ -562,15 +568,27 @@ class _JsonParser {
           case 0x75:
             var cp = _hex4();
             if (cp >= 0xD800 && cp <= 0xDBFF) {
+              // High surrogate: must be immediately followed by a \uXXXX low
+              // surrogate (0xDC00–0xDFFF). Anything else — end of string, a
+              // plain char, or a second high surrogate — is an unpaired high
+              // surrogate and is rejected (Item 4).
               if (i + 1 < b.length &&
                   b.codeUnitAt(i) == 0x5C &&
                   b.codeUnitAt(i + 1) == 0x75) {
                 i += 2;
                 final lo = _hex4();
+                if (lo < 0xDC00 || lo > 0xDFFF) {
+                  throw const StrupleException('unpaired high surrogate');
+                }
                 cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
               } else {
                 throw const StrupleException('lone surrogate');
               }
+            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+              // Low surrogate with no preceding high surrogate — not valid
+              // Unicode (Item 4). (A valid low surrogate is only ever consumed
+              // above as the second half of a pair, so reaching here is lone.)
+              throw const StrupleException('lone low surrogate');
             }
             out.writeCharCode(cp);
           default:
@@ -654,6 +672,10 @@ class _JsonParser {
   JsonValue _object(int depth) {
     i++; // {
     final members = <JsonMember>[];
+    // A struple map is canonical and can hold only one entry per key, so a
+    // duplicate key at this object level is rejected (Item 4). Track the keys
+    // already seen and reject on a repeat.
+    final seen = <String>{};
     ws();
     if (_peek() == 0x7D /* } */) {
       i++;
@@ -665,6 +687,9 @@ class _JsonParser {
         throw const StrupleException('expected object key');
       }
       final key = _string();
+      if (!seen.add(key)) {
+        throw const StrupleException('duplicate object key');
+      }
       ws();
       if (_peek() != 0x3A /* : */) {
         throw const StrupleException('expected :');

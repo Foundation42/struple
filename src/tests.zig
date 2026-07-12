@@ -762,6 +762,26 @@ test "decimal: exponent bounds, scientific render, DoS short-circuit (Item 2)" {
     }
 }
 
+test "fromJson rejects grammar-edge inputs (Item 4)" {
+    const a = testing.allocator;
+    const reject = [_][]const u8{
+        "{\"k\":1,\"k\":2}", // duplicate key
+        "\"\\ud800\"", // lone high surrogate
+        "\"\\udc00\"", // lone low surrogate
+        "1e999", // float overflow
+        "-", // sign only
+        "NaN", // not JSON
+        "Infinity", // not JSON
+        "-Infinity", // not JSON
+    };
+    for (reject) |c| {
+        try testing.expect(std.meta.isError(struple.fromJson(a, c)));
+    }
+    // A valid surrogate pair (astral char) is accepted.
+    const ok = try struple.fromJson(a, "\"\\ud83d\\ude00\"");
+    a.free(ok);
+}
+
 test "toJson float format: ECMAScript Number::toString (Item 3)" {
     const a = testing.allocator;
     const cases = [_]struct { f: f64, j: []const u8 }{

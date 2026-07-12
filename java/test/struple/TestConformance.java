@@ -125,6 +125,50 @@ public final class TestConformance {
             }
         }
 
+        // JSON grammar-edge reject corpus (Item 4) — every text must be rejected by fromJson with
+        // the port's own clean parse error (StrupleException). Silent acceptance, a coerced value,
+        // or a wrong exception type is a hardening FAILURE.
+        int rejectTotal = 0;
+        int rejectRejected = 0;
+        String rejCorpus = read("../conformance/json_reject.json");
+        JsonObject rejRoot = (JsonObject) Json.parse(rejCorpus);
+        @SuppressWarnings("unchecked")
+        List<Object> rejCases = (List<Object>) rejRoot.get("cases");
+        for (Object o : rejCases) {
+            JsonObject c = (JsonObject) o;
+            String json = (String) c.get("json");
+            rejectTotal++;
+            try {
+                Json.fromJson(json);
+                System.err.println("JSON-REJECT FAIL [" + json + "]: accepted, should reject — "
+                        + c.get("reason"));
+                failures++;
+            } catch (Struple.StrupleException ok) {
+                rejectRejected++; // the port's clean parse error — the only acceptable outcome
+            } catch (RuntimeException wrong) {
+                System.err.println("JSON-REJECT FAIL [" + json + "]: wrong exception type "
+                        + wrong.getClass().getName() + ": " + wrong.getMessage());
+                failures++;
+            }
+        }
+        // A VALID astral-plane pair must still be ACCEPTED, whether written raw (UTF-8) or as a
+        // surrogate-pair escape, and both forms must encode to the same bytes.
+        int surrogateOk = 0;
+        {
+            String raw = "\"😀\""; // JSON text: "😀"
+            String esc = "\"\\uD83D\\uDE00\""; // JSON text: "😀"
+            try {
+                String rawHex = hexEncode(Json.fromJson(raw));
+                String escHex = hexEncode(Json.fromJson(esc));
+                expectEq("emoji raw==escaped bytes", escHex, rawHex);
+                expectEq("emoji encodes to UTF-8", rawHex, "48f09f988000");
+                surrogateOk = 1;
+            } catch (RuntimeException e) {
+                System.err.println("JSON-ACCEPT FAIL valid emoji pair: " + e);
+                failures++;
+            }
+        }
+
         // DoS short-circuit guard (Item 2): semanticOrder of a huge-exponent decimal vs an int and
         // vs a float must return PROMPTLY — the magnitude short-circuit avoids any scaling
         // proportional to the i32 exponent. A regressed short-circuit would hang here.
@@ -148,9 +192,10 @@ public final class TestConformance {
 
         System.out.printf(
                 "TestConformance: json encode %d decode %d | build %d transcode %d to_json %d "
-                        + "| semantic %d | malformed %d/%d rejected | dos %d/4 | %d failures%n",
+                        + "| semantic %d | malformed %d/%d rejected | json_reject %d/%d rejected "
+                        + "| surrogate_ok %d/1 | dos %d/4 | %d failures%n",
                 jsonEnc, jsonDec, buildEnc, buildTrc, buildJson, semOk, malformedRejected,
-                malformedTotal, dosOk, failures);
+                malformedTotal, rejectRejected, rejectTotal, surrogateOk, dosOk, failures);
         if (failures != 0) {
             System.exit(1);
         }

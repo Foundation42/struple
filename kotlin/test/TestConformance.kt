@@ -301,6 +301,40 @@ fun main() {
     }
     println("  malformed: $mfRejected/${cases.size} rejected")
 
+    // -----------------------------------------------------------------------
+    // JSON grammar edges (../conformance/json_reject.json). Each listed JSON text
+    // MUST be rejected by fromJson with the port's own clean StrupleException —
+    // never a crash, silent acceptance, or a coerced value. HARDENING item 4:
+    // duplicate keys, lone/unpaired surrogates, out-of-range floats, bare sign,
+    // and non-JSON tokens (NaN / Infinity).
+    val rejectText = File("../conformance/json_reject.json").readText()
+    val rejectTop = CorpusJson(rejectText).parseTop() as J.O
+    val rejectCases = (rejectTop.members.toMap()["cases"] as J.A).items
+    var jrRejected = 0
+    for (c in rejectCases) {
+        c as J.O
+        val byKey = c.members.toMap()
+        val jsonStr = (byKey["json"] as J.S).v
+        val reason = (byKey["reason"] as? J.S)?.v ?: ""
+        var rejected = false
+        try {
+            fromJson(jsonStr)
+        } catch (e: StrupleException) {
+            rejected = true
+        } catch (e: Throwable) {
+            // Any other throwable (StackOverflow, NumberFormat, AIOOBE, …) is a
+            // FAILURE: the port must surface its own parse error, not a native crash.
+            rejected = false
+        }
+        check("json_reject $jsonStr", rejected, "expected StrupleException; $reason")
+        if (rejected) jrRejected++
+    }
+    // A VALID astral-plane string ("😀" = U+1F600, a legitimate surrogate pair) must
+    // still be ACCEPTED and round-trip — the surrogate hardening must not over-reject.
+    val emojiJson = "\"😀\""
+    check("json_accept valid pair $emojiJson", runCatching { toJson(fromJson(emojiJson)) == emojiJson }.getOrDefault(false))
+    println("  json_reject: $jrRejected/${rejectCases.size} rejected")
+
     println("conformance: $jsonCount json vectors (x2), $buildCount build vectors (x2), $semCount semantic pairs")
     println("  passed=$pass failed=$fail")
     if (fail != 0) {

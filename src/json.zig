@@ -97,7 +97,10 @@ fn encodeValue(arena: std.mem.Allocator, out: *struple.Packer, value: std.json.V
         .null => try out.appendNil(),
         .bool => |b| try out.appendBool(b),
         .integer => |i| try out.appendInt(i),
-        .float => |f| try out.appendF64(f),
+        .float => |f| {
+            if (!std.math.isFinite(f)) return error.NonFiniteNumber;
+            try out.appendF64(f);
+        },
         .number_string => |s| try encodeNumberString(arena, out, s),
         .string => |s| try out.appendString(s),
         .array => |arr| {
@@ -123,7 +126,11 @@ fn encodeValue(arena: std.mem.Allocator, out: *struple.Packer, value: std.json.V
 fn encodeNumberString(arena: std.mem.Allocator, out: *struple.Packer, s: []const u8) !void {
     // A fractional/exponent number is a float; otherwise an arbitrary-precision int.
     if (std.mem.indexOfAny(u8, s, ".eE") != null) {
-        try out.appendF64(try std.fmt.parseFloat(f64, s));
+        const f = try std.fmt.parseFloat(f64, s);
+        // A JSON number out of f64 range (e.g. 1e999) parses to ±inf; reject it
+        // rather than silently encoding an infinity (Item 4).
+        if (!std.math.isFinite(f)) return error.NonFiniteNumber;
+        try out.appendF64(f);
         return;
     }
     var digits = s;

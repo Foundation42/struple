@@ -26,6 +26,10 @@ _MALFORMED = os.path.join(os.path.dirname(__file__), "..", "..", "conformance", 
 with open(_MALFORMED, encoding="utf-8") as _f:
     MALFORMED = json.load(_f)["cases"]
 
+_JSON_REJECT = os.path.join(os.path.dirname(__file__), "..", "..", "conformance", "json_reject.json")
+with open(_JSON_REJECT, encoding="utf-8") as _f:
+    JSON_REJECT = json.load(_f)["cases"]
+
 
 def build_bytes(op):
     w = Writer()
@@ -141,6 +145,31 @@ class Malformed(unittest.TestCase):
             rejected += 1
         self.assertEqual(rejected, len(MALFORMED))
         print(f"malformed: {rejected}/{len(MALFORMED)} rejected")
+
+
+class JsonReject(unittest.TestCase):
+    """JSON grammar edges that from_json MUST reject with the port's clean
+    ValueError — never a crash, panic, silent acceptance, or coerced value.
+    Shared reject corpus (conformance/json_reject.json), HARDENING.md Item 4:
+    duplicate object keys, lone/unpaired UTF-16 surrogates, floats out of f64
+    range (±inf), a bare sign, and the non-JSON tokens NaN/Infinity/-Infinity.
+    """
+
+    def test_all_rejected(self):
+        rejected = 0
+        for case in JSON_REJECT:
+            with self.subTest(json=case["json"], reason=case.get("reason", "")):
+                with self.assertRaises(ValueError):
+                    from_json(case["json"])
+            rejected += 1
+        self.assertEqual(rejected, len(JSON_REJECT))
+        print(f"json_reject: {rejected}/{len(JSON_REJECT)} rejected")
+
+    def test_valid_surrogate_pair_still_accepted(self):
+        # The negative counterpart to the lone-surrogate rejects: a VALID UTF-16
+        # escape pair must still parse and encode as its UTF-8 (U+1F600 '😀').
+        self.assertEqual(from_json('"\\ud83d\\ude00"'), from_json('"\U0001f600"'))
+        self.assertEqual(to_json(from_json('"\\ud83d\\ude00"')), '"😀"')
 
 
 class DecimalUnit(unittest.TestCase):

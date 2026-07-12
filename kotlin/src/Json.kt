@@ -354,12 +354,16 @@ private class JsonParser(private val s: String) {
         if (d > MAX_DEPTH) throw StrupleException("struple/json: nesting too deep")
         i++ // '{'
         val members = ArrayList<Pair<String, JsonValue>>()
+        val seen = HashSet<String>()
         skipWs()
         if (i < s.length && s[i] == '}') { i++; return JsonValue.Obj(members) }
         while (true) {
             skipWs()
             if (i >= s.length || s[i] != '"') throw StrupleException("struple/json: expected key string")
             val key = parseString()
+            // A struple map is canonical and cannot hold two entries for one key;
+            // reject duplicate keys while parsing rather than emit a two-key map (Item 4).
+            if (!seen.add(key)) throw StrupleException("struple/json: duplicate object key")
             skipWs()
             if (i >= s.length || s[i] != ':') throw StrupleException("struple/json: expected ':'")
             i++
@@ -418,10 +422,27 @@ private class JsonParser(private val s: String) {
                         'r' -> sb.append('\r')
                         't' -> sb.append('\t')
                         'u' -> {
-                            if (i + 4 >= s.length) throw StrupleException("struple/json: bad \\u")
-                            val hex = s.substring(i + 1, i + 5)
-                            sb.append(hex.toInt(16).toChar())
-                            i += 4
+                            // Decode \uXXXX. A high surrogate (D800..DBFF) MUST be
+                            // immediately followed by a \uXXXX low surrogate (DC00..DFFF);
+                            // a lone/unpaired surrogate is not valid Unicode and is
+                            // rejected (Item 4) rather than silently corrupted to '?' by
+                            // the UTF-8 encoder. A valid pair (e.g. "😀" = 😀)
+                            // is kept as its two UTF-16 code units and encodes fine.
+                            val cu = parseHex4() // i left at the last hex digit
+                            when {
+                                cu in 0xD800..0xDBFF -> {
+                                    if (i + 2 >= s.length || s[i + 1] != '\\' || s[i + 2] != 'u')
+                                        throw StrupleException("struple/json: unpaired high surrogate")
+                                    i += 2 // advance onto the 'u' of the second escape
+                                    val lo = parseHex4()
+                                    if (lo !in 0xDC00..0xDFFF)
+                                        throw StrupleException("struple/json: high surrogate not followed by low surrogate")
+                                    sb.append(cu.toChar()); sb.append(lo.toChar())
+                                }
+                                cu in 0xDC00..0xDFFF ->
+                                    throw StrupleException("struple/json: lone low surrogate")
+                                else -> sb.append(cu.toChar())
+                            }
                         }
                         else -> throw StrupleException("struple/json: bad escape \\${s[i]}")
                     }
@@ -431,6 +452,26 @@ private class JsonParser(private val s: String) {
             }
         }
         throw StrupleException("struple/json: unterminated string")
+    }
+
+    // i points at the 'u' of a \uXXXX escape. Read exactly 4 hex digits (rejecting
+    // any non-hex char, e.g. a lenient "\u+41A"), leaving i on the last hex digit
+    // so the caller's trailing i++ steps past it. Returns the 16-bit code unit.
+    private fun parseHex4(): Int {
+        if (i + 4 >= s.length) throw StrupleException("struple/json: bad \\u escape")
+        var v = 0
+        for (j in 1..4) {
+            val c = s[i + j]
+            val d = when (c) {
+                in '0'..'9' -> c - '0'
+                in 'a'..'f' -> c - 'a' + 10
+                in 'A'..'F' -> c - 'A' + 10
+                else -> throw StrupleException("struple/json: bad \\u escape (non-hex digit)")
+            }
+            v = (v shl 4) or d
+        }
+        i += 4
+        return v
     }
 
     private fun parseBool(): JsonValue {
@@ -446,7 +487,7 @@ private class JsonParser(private val s: String) {
 
     private fun parseNumber(): JsonValue {
         val start = i
-        if (i < s.length && (s[i] == '-' || s[i] == '+')) i++
+        if (i < s.length && s[i] == '-') i++ // JSON allows a leading '-' only, never '+'
         var isFloat = false
         while (i < s.length) {
             val c = s[i]
@@ -458,8 +499,15 @@ private class JsonParser(private val s: String) {
             }
         }
         val token = s.substring(start, i)
-        if (token.isEmpty() || token == "-" || token == "+") throw StrupleException("struple/json: invalid number")
-        return if (isFloat) JsonValue.Floating(token.toDouble())
-        else JsonValue.Integer(BigInteger(token))
+        // Reject empty ("NaN"/"Infinity" route here and consume nothing), a bare sign
+        // ("-"), and a leading '+' (JSON has no unary plus, e.g. "+5"). (Item 4)
+        if (token.isEmpty() || token == "-" || token[0] == '+') throw StrupleException("struple/json: invalid number")
+        return if (isFloat) {
+            val d = token.toDouble()
+            // A number that overflows f64 to ±infinity (e.g. 1e999) is out of range
+            // and must be rejected, not encoded as an infinity. (Item 4)
+            if (!d.isFinite()) throw StrupleException("struple/json: number out of range")
+            JsonValue.Floating(d)
+        } else JsonValue.Integer(BigInteger(token))
     }
 }

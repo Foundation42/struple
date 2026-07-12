@@ -26,9 +26,51 @@ def from_json(text: str) -> bytes:
     # a native RecursionError) and the _encode_json_value walk below. Mirrors the
     # Zig reference (src/json.zig: `checkJsonDepth`).
     _check_json_depth(text)
+    # HARDENING.md Item 4 — reject the JSON grammar edges json.loads accepts by
+    # default so they surface as the port's clean ValueError, never a coerced value
+    # or crash. Handled here at parse time: duplicate object keys (object_pairs_hook,
+    # since json.loads otherwise keeps only the last dup) and the non-JSON constant
+    # tokens NaN / Infinity / -Infinity (parse_constant). The remaining edges — a
+    # number overflowing to ±inf (1e999) and unpaired UTF-16 surrogates in a string
+    # — are values json.loads produces silently, so they are rejected in
+    # _encode_json_value below. (A bare `-` already raises json.JSONDecodeError, a
+    # ValueError subclass.)
+    parsed = _json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_constant,
+    )
     out = bytearray()
-    _encode_json_value(out, _json.loads(text), 0)
+    _encode_json_value(out, parsed, 0)
     return bytes(out)
+
+
+def _reject_duplicate_keys(pairs):
+    """``object_pairs_hook`` for ``json.loads``: a struple map is canonical and can't
+    hold two entries for one key, so a repeated key at the same object level is
+    rejected instead of silently collapsed to the last occurrence. Mirrors the Zig
+    reference (src/json.zig: duplicate-key detection). (Item 4)"""
+    seen = set()
+    for k, _v in pairs:
+        if k in seen:
+            raise ValueError(f"struple/json: duplicate object key {k!r}")
+        seen.add(k)
+    return dict(pairs)
+
+
+def _reject_constant(name: str):
+    """``parse_constant`` for ``json.loads``: NaN / Infinity / -Infinity are not
+    JSON tokens (json.loads accepts them by default), so reject them. (Item 4)"""
+    raise ValueError(f"struple/json: {name} is not a valid JSON token")
+
+
+def _has_unpaired_surrogate(s: str) -> bool:
+    """True if ``s`` holds a UTF-16 surrogate code point (U+D800–U+DFFF). json.loads
+    already fuses a valid ``\\uD83D\\uDE00`` escape pair into the real character
+    (U+1F600 '😀'), so any surrogate still present is genuinely unpaired and not
+    encodable as UTF-8 — reject it rather than emit U+FFFD or a surrogate byte.
+    (Item 4)"""
+    return any(0xD800 <= ord(c) <= 0xDFFF for c in s)
 
 
 def _check_json_depth(text: str) -> None:
@@ -81,6 +123,14 @@ def _encode_json_value(out: bytearray, value, depth: int) -> None:
             entries.append((bytes(kb), bytes(vb)))
         _append_map(out, entries)
     else:  # scalar leaf (null / bool / int / float / string) — reuse the core codec
+        # Item 4 — reject the two grammar edges json.loads yields as silent values:
+        # a number that overflowed to ±inf (e.g. 1e999), and a string carrying an
+        # unpaired UTF-16 surrogate. Both would otherwise be encoded (a non-finite
+        # float, or a lone surrogate that fails UTF-8) instead of cleanly rejected.
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("struple/json: number out of range (parses to inf/nan)")
+        if isinstance(value, str) and _has_unpaired_surrogate(value):
+            raise ValueError("struple/json: string contains an unpaired surrogate")
         _append_value(out, value)
 
 

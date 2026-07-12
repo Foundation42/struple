@@ -105,7 +105,13 @@ func encodeJSON(w *Writer, v jsonValue) {
 		} else if strings.HasPrefix(digits, "+") {
 			digits = digits[1:]
 		}
-		mag, _ := new(big.Int).SetString(digits, 10)
+		// number() guarantees digits is a non-empty run of [0-9] here, so SetString
+		// always succeeds; check ok anyway so a would-be empty magnitude can never
+		// nil-panic on .Bytes() (Item 4, sign-with-no-digits edge, defence-in-depth).
+		mag, ok := new(big.Int).SetString(digits, 10)
+		if !ok {
+			mag = new(big.Int)
+		}
 		w.AppendBigInt(negative, mag.Bytes())
 	case jFloat:
 		w.AppendF64(v.floatV)
@@ -608,17 +614,27 @@ func (p *jsonParser) string() (string, error) {
 				if err != nil {
 					return "", err
 				}
-				if cp >= 0xD800 && cp <= 0xDBFF {
-					if p.i+1 < len(p.b) && p.b[p.i] == '\\' && p.b[p.i+1] == 'u' {
-						p.i += 2
-						lo, err := p.hex4()
-						if err != nil {
-							return "", err
-						}
-						cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
-					} else {
-						return "", errors.New("struple: lone surrogate")
+				switch {
+				case cp >= 0xD800 && cp <= 0xDBFF:
+					// High surrogate: MUST be immediately followed by a \uXXXX low
+					// surrogate (0xDC00–0xDFFF). A high with no following escape, or
+					// followed by a non-low code unit, is unpaired — reject rather
+					// than emit U+FFFD or a bogus code point (Item 4, surrogate edge).
+					if !(p.i+1 < len(p.b) && p.b[p.i] == '\\' && p.b[p.i+1] == 'u') {
+						return "", errors.New("struple: unpaired high surrogate")
 					}
+					p.i += 2
+					lo, err := p.hex4()
+					if err != nil {
+						return "", err
+					}
+					if lo < 0xDC00 || lo > 0xDFFF {
+						return "", errors.New("struple: high surrogate not followed by low surrogate")
+					}
+					cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+				case cp >= 0xDC00 && cp <= 0xDFFF:
+					// Low surrogate with no preceding high surrogate — reject.
+					return "", errors.New("struple: unpaired low surrogate")
 				}
 				out = appendRune(out, cp)
 			default:
@@ -647,12 +663,21 @@ func (p *jsonParser) number() (jsonValue, error) {
 	if c, ok := p.peek(); ok && c == '-' {
 		p.i++
 	}
+	intDigits := 0
 	for {
 		c, ok := p.peek()
 		if !ok || c < '0' || c > '9' {
 			break
 		}
 		p.i++
+		intDigits++
+	}
+	// JSON requires at least one integer digit; a bare sign like "-" (or the
+	// "-" left when "-Infinity" is rejected) is not a number. Reject here rather
+	// than fall through to an empty big-int, whose SetString("") returns nil and
+	// then nil-panics on .Bytes() (Item 4, sign-with-no-digits edge).
+	if intDigits == 0 {
+		return jsonValue{}, errors.New("struple: number has no digits")
 	}
 	isFloat := false
 	if c, ok := p.peek(); ok && c == '.' {
@@ -683,8 +708,11 @@ func (p *jsonParser) number() (jsonValue, error) {
 	tok := string(p.b[start:p.i])
 	if isFloat {
 		f, err := strconv.ParseFloat(tok, 64)
-		if err != nil {
-			return jsonValue{}, errors.New("struple: bad float")
+		// ParseFloat flags an out-of-range magnitude (e.g. 1e999 -> ±Inf) via err;
+		// the explicit isFinite guard makes the "no infinities" rule (Item 4,
+		// float-out-of-range edge) hold regardless of the strconv error contract.
+		if err != nil || !isFinite(f) {
+			return jsonValue{}, errors.New("struple: float out of range")
 		}
 		return jsonValue{kind: jFloat, floatV: f}, nil
 	}
@@ -730,6 +758,7 @@ func (p *jsonParser) array(depth int) (jsonValue, error) {
 func (p *jsonParser) object(depth int) (jsonValue, error) {
 	p.i++ // {
 	var members []jsonMember
+	seen := make(map[string]struct{})
 	p.ws()
 	if c, ok := p.peek(); ok && c == '}' {
 		p.i++
@@ -744,6 +773,13 @@ func (p *jsonParser) object(depth int) (jsonValue, error) {
 		if err != nil {
 			return jsonValue{}, err
 		}
+		// A struple map is canonical and cannot hold two entries for one key, so a
+		// repeated key is not representable — reject rather than silently keep one
+		// (Item 4, duplicate-object-key edge).
+		if _, dup := seen[key]; dup {
+			return jsonValue{}, errors.New("struple: duplicate object key")
+		}
+		seen[key] = struct{}{}
 		p.ws()
 		if c, ok := p.peek(); !ok || c != ':' {
 			return jsonValue{}, errors.New("struple: expected :")
