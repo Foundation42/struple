@@ -243,7 +243,11 @@ export const hex = (bytes) => bytes.map((b) => b.toString(16).padStart(2, "0")).
 
 // ---- drift guard: a few golden vectors from the conformance corpus ----
 const GOLDEN = { '"app"': "4861707000", "12345": "223039", "-42": "1fd6", "true": "06", "null": "01", "256": "220100", "18446744073709551616": "29010000000000000000" };
+let __drift = false;
 for (const [t, want] of Object.entries(GOLDEN)) {
   const got = analyze(parseTuple(t)).bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
-  if (got !== want) console.error(`struple demo drift: ${t} -> ${got}, expected ${want}`);
+  if (got !== want) { __drift = true; console.error(`struple demo drift: ${t} -> ${got}, expected ${want}`); }
 }
+// Under Node (CI: `node docs/struple.js`) fail the build on drift; a no-op in the
+// browser, where `process` is undefined.
+if (__drift && typeof process !== "undefined") process.exitCode = 1;

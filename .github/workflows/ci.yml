@@ -30,6 +30,8 @@ jobs:
           node-version: "24"
       - run: npm test
         working-directory: js
+      - name: Demo drift guard (docs/struple.js golden self-check)
+        run: node docs/struple.js
 
   python:
     name: Python
