@@ -66,5 +66,43 @@ class Codec(unittest.TestCase):
             self.assertEqual(unpack(fb(f))[0], f)
 
 
+class DecodeHygiene(unittest.TestCase):
+    """Item 6/8 — clean error types, hashable set/map-key decode, raw-µs timestamps."""
+
+    def test_timestamp_raw_micros(self):
+        import datetime as dt
+        from struple import to_datetime
+
+        micros = 1_700_000_000_123_456
+        self.assertEqual(unpack(Writer().append_timestamp(micros).bytes())[0], micros)
+        # native conversion is explicit opt-in, and lossless for the µs
+        self.assertEqual(to_datetime(micros),
+                         dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(microseconds=micros))
+        # a timestamp far outside datetime's range still decodes losslessly as µs
+        self.assertEqual(unpack(Writer().append_timestamp(-(1 << 62)).bytes())[0], -(1 << 62))
+        # encoding a datetime is still accepted (convenience)
+        self.assertEqual(unpack(encode(dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)))[0],
+                         1_577_836_800_000_000)
+
+    def test_hashable_container_in_set(self):
+        # pack({(1, 2)}) must round-trip through unpack, not raise unhashable-type
+        s = {(1, 2), (3, 4)}
+        self.assertEqual(unpack(pack(s))[0], s)
+        # set of frozensets (nested container as a set element)
+        nested = {frozenset({1, 2})}
+        self.assertEqual(unpack(pack(nested))[0], nested)
+
+    def test_hashable_container_map_key(self):
+        # a container (array) map key decodes to a hashable tuple key
+        self.assertEqual(unpack(pack({(1, 2): "v"}))[0], {(1, 2): "v"})
+
+    def test_odd_entry_map_rejected(self):
+        # a map framed body with an odd element count is a clean ValueError, not a TypeError
+        body = Writer().append_int(1).bytes()  # one element = a key with no value
+        odd_map = bytes([0x52]) + body + bytes([0x00])
+        with self.assertRaises(ValueError):
+            unpack(odd_map)
+
+
 if __name__ == "__main__":
     unittest.main()

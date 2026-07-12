@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pack, encode, unpack, compare, Writer, fromJson, toJson, semanticOrder } from "../src/index.ts";
+import { pack, encode, unpack, compare, Writer, fromJson, toJson, semanticOrder, toDate } from "../src/index.ts";
 
 function hex(bytes: Uint8Array): string {
   let s = "";
@@ -133,4 +133,14 @@ test("depth cap: deeply nested input is rejected, not a stack overflow", () => {
   for (let d = 0; d < 300; d++) buf = new Writer().appendArray(buf).bytes();
   assert.throws(() => toJson(buf), /nesting too deep/, "toJson must reject 300-deep nesting");
   assert.throws(() => semanticOrder(buf, buf), /nesting too deep/, "semanticOrder must reject 300-deep nesting");
+});
+
+test("timestamp decodes to raw microseconds (bigint); toDate is opt-in", () => {
+  const micros = 1_700_000_000_123_456n;
+  assert.strictEqual(unpack(new Writer().appendTimestamp(micros).bytes())[0], micros);
+  // a timestamp far outside Date's range still decodes losslessly as µs
+  const huge = -(1n << 62n);
+  assert.strictEqual(unpack(new Writer().appendTimestamp(huge).bytes())[0], huge);
+  // opt-in native Date is ms-precision (truncates the sub-ms remainder)
+  assert.strictEqual(toDate(micros).getTime(), Number(micros / 1000n));
 });

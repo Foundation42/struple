@@ -455,7 +455,10 @@ function elementToValue(e: Element): Value {
       // No native decimal in the Value model — surface the exact decimal literal.
       return decimalToPlainString(e);
     case "timestamp":
-      return new Date(Number(e.micros / 1000n));
+      // Raw signed microseconds since the epoch — lossless (Date is only
+      // millisecond-precision and caps at ±8.64e15 ms) and consistent with the
+      // other ports. Use toDate() for a native (bounded, ms) Date.
+      return e.micros;
     case "uuid":
       return e.value;
     case "string":
@@ -1162,6 +1165,14 @@ function decimalToPlainString(d: { negative: boolean; digits: number[]; exp: num
 function appendTimestampInto(buf: number[], micros: bigint): void {
   buf.push(T.timestamp);
   pushBigEndian(buf, BigInt.asUintN(64, micros) ^ SIGN64, 8);
+}
+
+/** Convert raw timestamp microseconds (as returned by `unpack`) to a native `Date`.
+ *  Explicit opt-in: `Date` is millisecond-precision and caps at ±8.64e15 ms, while
+ *  the wire value is a full signed i64 µs — so this truncates sub-millisecond
+ *  precision and yields an `Invalid Date` beyond that range. */
+export function toDate(micros: bigint): Date {
+  return new Date(Number(micros / 1000n));
 }
 
 function appendUuidInto(buf: number[], u: Uint8Array): void {

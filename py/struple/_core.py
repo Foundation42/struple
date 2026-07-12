@@ -430,6 +430,14 @@ def _datetime_to_micros(dt: _dt.datetime) -> int:
     return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
 
 
+def to_datetime(micros: int) -> _dt.datetime:
+    """Convert raw timestamp microseconds (as returned by ``unpack``) to a native
+    UTC ``datetime``. Explicit opt-in because the wire timestamp is a full signed
+    i64 µs (±292,000 years) while ``datetime`` only spans years 1–9999; this raises
+    ``OverflowError`` outside that range rather than silently clamping."""
+    return _EPOCH + _dt.timedelta(microseconds=micros)
+
+
 # ---------------------------------------------------------------------------
 # Decoding
 # ---------------------------------------------------------------------------
@@ -681,6 +689,21 @@ def unpack(data: bytes) -> list:
     return out
 
 
+def _to_hashable(v: Any) -> Any:
+    """Convert a decoded value to a hashable form so it can be a set element or a
+    map key. struple's set/map-key positions accept any value (including nested
+    containers), but Python's list/dict/set are unhashable — mirror them onto
+    tuple/frozenset so ``pack({(1, 2)})`` and container keys round-trip through
+    ``unpack`` instead of raising ``TypeError: unhashable type``."""
+    if isinstance(v, list):
+        return tuple(_to_hashable(x) for x in v)
+    if isinstance(v, dict):
+        return frozenset((_to_hashable(k), _to_hashable(val)) for k, val in v.items())
+    if isinstance(v, (set, frozenset)):
+        return frozenset(_to_hashable(x) for x in v)
+    return v
+
+
 def _element_to_value(e: Element) -> Any:
     kind, val = e
     if kind == "nil" or kind == "undef":
@@ -690,7 +713,9 @@ def _element_to_value(e: Element) -> Any:
     if kind == "decimal":
         return val
     if kind == "timestamp":
-        return _EPOCH + _dt.timedelta(microseconds=val)
+        # Raw signed microseconds since the epoch — lossless and consistent with the
+        # other ports. Use to_datetime() for a native (bounded) datetime.
+        return val
     if kind == "uuid":
         return _uuid.UUID(bytes=val)
     if kind == "string" or kind == "bytes":
@@ -698,13 +723,15 @@ def _element_to_value(e: Element) -> Any:
     if kind == "array":
         return unpack(val)
     if kind == "set":
-        return set(unpack(val))
+        return {_to_hashable(el) for el in unpack(val)}
     if kind == "map":
         r = Reader(val)
         d = {}
         while (k := r.next()) is not None:
             v = r.next()
-            d[_element_to_value(k)] = _element_to_value(v)
+            if v is None:
+                raise ValueError("struple: map has an odd number of elements")
+            d[_to_hashable(_element_to_value(k))] = _element_to_value(v)
         return d
     raise ValueError(f"struple: unknown element kind {kind!r}")
 
