@@ -141,6 +141,21 @@ static bool fits_fixed(bool negative, const uint8_t *mag, size_t mag_len) {
     return true;
 }
 
+/* `fits_fixed` over a big-int's *stored* magnitude bytes (bit-complemented when
+ * negative), so strict decode can reject a big-int whose value fits a fixed slot
+ * (Item 7). Mirrors the Zig `fitsFixedStored` reference. */
+static bool fits_fixed_stored(bool negative, const uint8_t *stored, size_t len) {
+    if (len < 16) return true;
+    if (len > 16) return false;
+    uint8_t b0 = negative ? (uint8_t)~stored[0] : stored[0];
+    if (b0 < 0x80) return true;
+    if (!negative) return false;
+    if (b0 != 0x80) return false;
+    for (size_t i = 1; i < len; i++)
+        if ((negative ? (uint8_t)~stored[i] : stored[i]) != 0) return false;
+    return true;
+}
+
 /* mag: normalized big-endian magnitude (non-empty, no leading zeros). */
 static void append_magnitude(struple_writer *w, bool negative, const uint8_t *mag, size_t mag_len) {
     /* The fixed slots span the whole i128 range (1–16 byte magnitudes). */
@@ -499,6 +514,16 @@ static int read_fixed_int(struple_reader *r, uint8_t t, struple_element *out) {
     size_t n = positive ? (size_t)(t - INT_ZERO) : (size_t)(INT_ZERO - t);
     const uint8_t *p = take(r, n);
     if (!p) return -1;
+    /* Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+     * magnitude never carries a leading zero byte; a negative excess-form payload
+     * only leads with 0xFF for the single-byte -1, so any wider 0xFF-lead is a
+     * non-minimal encoding. (For negatives payload[0]==0x00 IS canonical, e.g.
+     * -256 = 1f00, so it must not be rejected.) */
+    if (positive) {
+        if (p[0] == 0x00) return -1;
+    } else if (p[0] == 0xFF && n > 1) {
+        return -1;
+    }
     /* The widest (16-byte) slots can address values outside i128; a canonical
      * encoder uses the big-int codes for those, so reject them here. */
     if (n == 16 && ((positive && p[0] >= 0x80) || (!positive && p[0] < 0x80))) return -1;
@@ -594,6 +619,16 @@ static int read_big_int(struple_reader *r, uint8_t t, struple_element *out) {
     }
     const uint8_t *mag = take(r, n);
     if (!mag && n) return -1;
+    /* Strict decode — a big-int must be canonical (Item 7): a nonempty,
+     * leading-zero-free magnitude, a minimal length header, and a value that
+     * genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+     * accepting it would also break memcmp ordering, as all big-int type codes
+     * sort after all fixed-int codes). The stored magnitude is bit-complemented
+     * for negatives, so un-complement the leading byte before the checks. */
+    if (n == 0) return -1;                                        /* empty magnitude */
+    if (m != byte_len((uint64_t)n)) return -1;                   /* non-minimal length header */
+    if ((negative ? (uint8_t)~mag[0] : mag[0]) == 0) return -1;  /* leading-zero magnitude */
+    if (fits_fixed_stored(negative, mag, n)) return -1;          /* belongs in a fixed slot */
     out->kind = STRUPLE_BIGINT;
     out->big_negative = negative;
     if (negative) {

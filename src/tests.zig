@@ -643,6 +643,21 @@ test "decode: truncated and invalid input" {
         var r = struple.reader(&.{ 0x31, 0x01 });
         try testing.expectError(error.Truncated, r.next());
     }
+    {
+        // Item 7 — strict decode rejects non-canonical forms.
+        const cases = [_][]const u8{
+            &.{ 0x22, 0x00, 0x05 }, // fixed int: leading-zero positive (5 in 2 bytes)
+            &.{ 0x1e, 0xff, 0x00 }, // fixed int: non-minimal negative (-256 in 2 bytes)
+            &.{ 0x31, 0x00 }, // big-int: empty magnitude (zero-magnitude intSign bug)
+            &.{ 0x31, 0x01, 0x01, 0x05 }, // big-int: value fits the fixed range
+            // big-int with a non-minimal length header (m=2 for n=17):
+            &.{ 0x31, 0x02, 0x00, 0x11, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+        };
+        for (cases) |c| {
+            var r = struple.reader(c);
+            try testing.expectError(error.InvalidType, r.next());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

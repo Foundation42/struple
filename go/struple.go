@@ -611,6 +611,18 @@ func (r *Reader) Next() (e Element, ok bool, err error) {
 		if err != nil {
 			return Element{}, false, err
 		}
+		// Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+		// magnitude never carries a leading zero byte; a negative excess-form
+		// payload only leads with 0xFF for the single-byte -1, so any wider
+		// 0xFF-lead is a non-minimal encoding of the value. (For negatives a
+		// leading 0x00 IS canonical — e.g. -256 = 1f00 — so it is not rejected.)
+		if positive {
+			if payload[0] == 0x00 {
+				return Element{}, false, ErrInvalidType
+			}
+		} else if payload[0] == 0xFF && n > 1 {
+			return Element{}, false, ErrInvalidType
+		}
 		// A canonical encoder uses the big-int codes for 16-byte values outside
 		// the i128 range, so such a fixed payload is malformed.
 		if n == 16 && ((positive && payload[0] >= 0x80) || (!positive && payload[0] < 0x80)) {
@@ -644,7 +656,26 @@ func (r *Reader) Next() (e Element, ok bool, err error) {
 		if err != nil {
 			return Element{}, false, err
 		}
-		return Element{Kind: KindBigInt, Int: bigIntFromStored(negative, mag)}, true, nil
+		// Strict decode — a big-int must be canonical (Item 7): a nonempty,
+		// leading-zero-free magnitude, a minimal length header, and a value that
+		// genuinely escapes the i128 fixed range (else it belongs in a fixed slot,
+		// and accepting it here would also break memcmp ordering).
+		if n == 0 { // empty magnitude — zero must be int_zero (fixes the intSign bug)
+			return Element{}, false, ErrInvalidType
+		}
+		if m != minimalByteLength(n) { // non-minimal length-of-length header
+			return Element{}, false, ErrInvalidType
+		}
+		if decodeByte(mag[0], negative) == 0 { // leading-zero (un-complemented) magnitude
+			return Element{}, false, ErrInvalidType
+		}
+		value := bigIntFromStored(negative, mag)
+		// A big-int code for an i128-range value is non-canonical (the encoder uses a
+		// fixed slot for it); reuses the encoder's fixed-vs-big boundary.
+		if value.Cmp(i128Min) >= 0 && value.Cmp(i128Max) <= 0 {
+			return Element{}, false, ErrInvalidType
+		}
+		return Element{Kind: KindBigInt, Int: value}, true, nil
 	case tc == tcFloat32:
 		p, err := r.take(4)
 		if err != nil {
@@ -1062,6 +1093,20 @@ func bigIntFromStored(negative bool, magStored []byte) *big.Int {
 		v.Neg(v)
 	}
 	return v
+}
+
+// minimalByteLength returns the fewest bytes needed to represent n (>0): 1 for
+// 1..255, 2 for 256..65535, and so on. It mirrors the encoder's choice of the
+// big-int length-of-length byte m (= len(bigEndianBytes(n))), so strict decode
+// can reject a non-minimal length header. The empty-magnitude case (n == 0) is
+// rejected upstream, so this returns 0 there and never matches a valid m.
+func minimalByteLength(n int) int {
+	c := 0
+	for n > 0 {
+		c++
+		n >>= 8
+	}
+	return c
 }
 
 func bigEndianBytes(n int) []byte {

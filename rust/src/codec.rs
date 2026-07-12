@@ -708,6 +708,18 @@ impl<'a> Reader<'a> {
         let positive = t > INT_ZERO;
         let n = if positive { (t - INT_ZERO) as usize } else { (INT_ZERO - t) as usize };
         let payload = self.take(n)?;
+        // Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+        // magnitude never carries a leading zero byte; a negative excess-form
+        // payload only leads with 0xFF for the single-byte -1, so any wider
+        // 0xFF-lead is a non-minimal encoding of the value. (For negatives a
+        // leading 0x00 IS canonical, e.g. -256 = `1f00`, so it is not rejected.)
+        if positive {
+            if payload[0] == 0x00 {
+                return Err(Error::InvalidType(t));
+            }
+        } else if payload[0] == 0xFF && n > 1 {
+            return Err(Error::InvalidType(t));
+        }
         // The widest (16-byte) slots can address values outside i128; a canonical
         // encoder uses the big-int codes for those, so reject them here.
         if n == 16 && ((positive && payload[0] >= 0x80) || (!positive && payload[0] < 0x80)) {
@@ -739,6 +751,25 @@ impl<'a> Reader<'a> {
             n = (n << 8) | comp(b) as usize;
         }
         let magnitude: Vec<u8> = self.take(n)?.iter().map(|&b| comp(b)).collect();
+        // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+        // leading-zero-free magnitude, a minimal length header, and a value that
+        // genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+        // accepting it would also break memcmp ordering, since every big-int type
+        // code sorts after every fixed-int code). `magnitude` is already
+        // un-complemented, so `fits_fixed` (over the true magnitude) mirrors Zig's
+        // `fitsFixedStored`; a nonzero leading byte means it is already trimmed.
+        if n == 0 {
+            return Err(Error::InvalidType(t)); // empty magnitude (zero is int_zero 0x20)
+        }
+        if m != byte_len(n as u128) {
+            return Err(Error::InvalidType(t)); // non-minimal length header
+        }
+        if magnitude[0] == 0 {
+            return Err(Error::InvalidType(t)); // leading-zero magnitude
+        }
+        if fits_fixed(negative, &magnitude) {
+            return Err(Error::InvalidType(t)); // value fits the fixed range
+        }
         Ok(Element::BigInt { negative, magnitude })
     }
 

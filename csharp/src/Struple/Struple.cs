@@ -459,6 +459,27 @@ public static class Struple
         }
     }
 
+    /// <summary>
+    /// Does this value (sign + un-complemented, leading-zero-trimmed big-endian magnitude) fit the
+    /// fixed i128 range <c>[-2^127, 2^127-1]</c>? Below 16 bytes always fits; at 16 bytes the top byte
+    /// decides (positives &lt; 2^127, and -2^127 = magnitude 2^127 still fits). Mirrors the Zig
+    /// reference's <c>fitsFixed</c>/<c>fitsFixedStored</c> — used by strict big-int decode (Item 7) to
+    /// reject a big-int whose value belongs in a fixed slot.
+    /// </summary>
+    private static bool FitsFixed(bool negative, byte[] mag)
+    {
+        if (mag.Length < 16) return true;
+        if (mag.Length > 16) return false;
+        if ((mag[0] & 0xFF) < 0x80) return true;   // |value| < 2^127
+        if (!negative) return false;               // positive >= 2^127 -> big-int
+        if ((mag[0] & 0xFF) != 0x80) return false; // magnitude > 2^127 -> big-int
+        for (int i = 1; i < mag.Length; i++)
+        {
+            if (mag[i] != 0) return false;         // only exactly -2^127 fits
+        }
+        return true;
+    }
+
     // -----------------------------------------------------------------------
     // Reader factory
     // -----------------------------------------------------------------------
@@ -947,6 +968,19 @@ public static class Struple
             bool positive = type > IntZero;
             int n = positive ? type - IntZero : IntZero - type;
             byte[] payload = Take(n);
+            // Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+            // magnitude never carries a leading zero byte; a negative excess-form payload
+            // only leads with 0xFF for the single-byte -1, so any wider 0xFF-lead is a
+            // non-minimal encoding. (For negatives payload[0] == 0x00 IS canonical, e.g.
+            // -256 = 1f00, so that is not rejected.)
+            if (positive)
+            {
+                if ((payload[0] & 0xFF) == 0x00) throw new StrupleException("non-canonical fixed integer");
+            }
+            else if ((payload[0] & 0xFF) == 0xFF && n > 1)
+            {
+                throw new StrupleException("non-canonical fixed integer");
+            }
             // The widest (16-byte) slots can address values outside i128; reject non-canonical.
             if (n == 16 && ((positive && (payload[0] & 0xFF) >= 0x80)
                 || (!positive && (payload[0] & 0xFF) < 0x80)))
@@ -986,6 +1020,15 @@ public static class Struple
             {
                 mag[i] = (byte)DecByte(stored[i], negative);
             }
+            // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+            // leading-zero-free magnitude, a minimal length header, and a value that
+            // genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+            // accepting it would also break memcmp ordering, since all big-int type codes
+            // sort after all fixed-int codes).
+            if (nn == 0) throw new StrupleException("non-canonical big-int (empty magnitude)");
+            if (m != ByteLenUlong(n)) throw new StrupleException("non-canonical big-int (non-minimal length header)");
+            if ((mag[0] & 0xFF) == 0) throw new StrupleException("non-canonical big-int (leading-zero magnitude)");
+            if (FitsFixed(negative, mag)) throw new StrupleException("non-canonical big-int (value fits fixed range)");
             return Element.MakeBigInt(new BigIntValue(negative, mag));
         }
 

@@ -563,6 +563,16 @@ public struct Reader {
             let positive = typeCode > TypeCode.intZero
             let n = positive ? Int(typeCode - TypeCode.intZero) : Int(TypeCode.intZero - typeCode)
             let payload = try take(n)
+            // Strict decode — reject non-minimal fixed-int slots (Item 7). A
+            // positive magnitude never carries a leading zero byte; a negative
+            // excess-form payload only leads with 0xFF for the single-byte -1,
+            // so any wider 0xFF-lead is a non-minimal encoding of the value.
+            // (For negatives payload[0] == 0x00 is canonical, e.g. -256 = 1f00.)
+            if positive {
+                if payload.first! == 0x00 { throw StrupleError.invalidType }
+            } else if payload.first! == 0xFF && n > 1 {
+                throw StrupleError.invalidType
+            }
             // The widest (16-byte) slots can address values outside i128; a
             // canonical encoder uses the big-int codes for those, so a fixed
             // 16-byte payload whose value escapes i128 is malformed.
@@ -586,6 +596,16 @@ public struct Reader {
             for b in try take(m) { n = (n << 8) | UInt64(decodeByte(b, negative)) }
             if n > UInt64(buf.count - pos) { throw StrupleError.truncated }
             let mag = try take(Int(n))
+            // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+            // leading-zero-free magnitude, a minimal length header, and a value
+            // that genuinely escapes the i128 fixed range (else it belongs in a
+            // fixed slot; accepting it would also break memcmp ordering). The
+            // n == 0 guard also fixes the zero-magnitude intSign bug (zero must
+            // be int_zero, never a big-int code).
+            if n == 0 { throw StrupleError.invalidType }
+            if m != byteLenInt(Int(n)) { throw StrupleError.invalidType }
+            if (negative ? ~mag.first! : mag.first!) == 0 { throw StrupleError.invalidType }
+            if fitsFixedStored(negative: negative, stored: mag) { throw StrupleError.invalidType }
             return .bigInt(BigInt(negative: negative, magStored: Array(mag)))
         case TypeCode.float32:
             return .float32(decodeF32(try take(4)))
@@ -771,6 +791,19 @@ func fitsFixed(negative: Bool, mag: ArraySlice<UInt8>) -> Bool {
     if !negative { return false }  // positive >= 2^127 -> big-int
     if top != 0x80 { return false }  // magnitude > 2^127 -> big-int
     for b in mag.dropFirst() where b != 0 { return false }  // only exactly 2^127 (-2^127) fits
+    return true
+}
+
+/// `fitsFixed` over a big-int's *stored* magnitude bytes (bit-complemented when
+/// negative), so strict decode can reject a big-int whose value fits a fixed slot.
+func fitsFixedStored(negative: Bool, stored: ArraySlice<UInt8>) -> Bool {
+    if stored.count < 16 { return true }
+    if stored.count > 16 { return false }
+    let b0 = negative ? ~stored.first! : stored.first!
+    if b0 < 0x80 { return true }
+    if !negative { return false }
+    if b0 != 0x80 { return false }
+    for sb in stored.dropFirst() where (negative ? ~sb : sb) != 0 { return false }
     return true
 }
 

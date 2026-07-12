@@ -217,6 +217,11 @@ fn emitSemantic(a: std.mem.Allocator) !void {
     P.add(&pairs, sf64(a, -2.5), sp(a, @as(i64, -2))); // lt
     P.add(&pairs, sf32(a, 1.5), sf64(a, 1.5)); // eq
     P.add(&pairs, sp(a, @as(i64, 0)), sf64(a, -0.0)); // eq
+    // Raw -0.0 wire forms (the encoder normalizes -0.0 -> +0.0, so these hand-built
+    // bytes are the only way a distinct -0.0 reaches the comparator): they must still
+    // compare NUMERICALLY equal to +0.0, not by a signed-zero total order.
+    P.add(&pairs, &[_]u8{ 0x35, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, sf64(a, 0.0)); // f64 -0.0 == f64 0.0
+    P.add(&pairs, &[_]u8{ 0x34, 0x7f, 0xff, 0xff, 0xff }, sf64(a, 0.0)); // f32 -0.0 == f64 0.0
     // the 2^53 boundary
     P.add(&pairs, sp(a, @as(i64, 1) << 53), sf64(a, f53)); // eq
     P.add(&pairs, sp(a, (@as(i64, 1) << 53) + 1), sf64(a, f53)); // gt

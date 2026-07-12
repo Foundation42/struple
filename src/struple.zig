@@ -597,6 +597,15 @@ pub const Reader = struct {
                 const positive = type_code > tc.int_zero;
                 const n: usize = if (positive) type_code - tc.int_zero else tc.int_zero - type_code;
                 const payload = try self.take(n);
+                // Strict decode — reject non-minimal fixed-int slots (Item 7). A
+                // positive magnitude never carries a leading zero byte; a negative
+                // excess-form payload only leads with 0xFF for the single-byte -1,
+                // so any wider 0xFF-lead is a non-minimal encoding of the value.
+                if (positive) {
+                    if (payload[0] == 0x00) return error.InvalidType;
+                } else if (payload[0] == 0xFF and n > 1) {
+                    return error.InvalidType;
+                }
                 // The widest (16-byte) slots can address values outside i128; a
                 // canonical encoder uses the big-int codes for those, so a fixed
                 // 16-byte payload whose value escapes i128 is malformed.
@@ -615,6 +624,14 @@ pub const Reader = struct {
                 var n: usize = 0;
                 for (try self.take(m)) |b| n = (n << 8) | decodeByte(b, negative);
                 const mag = try self.take(n);
+                // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+                // leading-zero-free magnitude, a minimal length header, and a value
+                // that genuinely escapes the i128 fixed range (else it belongs in a
+                // fixed slot; accepting it would also break memcmp ordering).
+                if (n == 0) return error.InvalidType;
+                if (m != byteLen(n)) return error.InvalidType;
+                if ((if (negative) ~mag[0] else mag[0]) == 0) return error.InvalidType;
+                if (fitsFixedStored(negative, mag)) return error.InvalidType;
                 return .{ .big_int = .{ .negative = negative, .mag_stored = mag } };
             },
             tc.float32 => return .{ .float32 = decodeF32((try self.take(4))[0..4]) },
@@ -826,6 +843,19 @@ fn fitsFixed(negative: bool, mag: []const u8) bool {
     if (!negative) return false; // positive >= 2^127 -> big-int
     if (mag[0] != 0x80) return false; // magnitude > 2^127 -> big-int
     for (mag[1..]) |b| if (b != 0) return false; // only exactly 2^127 (i.e. -2^127) fits
+    return true;
+}
+
+/// `fitsFixed` over a big-int's *stored* magnitude bytes (bit-complemented when
+/// negative), so strict decode can reject a big-int whose value fits a fixed slot.
+fn fitsFixedStored(negative: bool, stored: []const u8) bool {
+    if (stored.len < 16) return true;
+    if (stored.len > 16) return false;
+    const b0: u8 = if (negative) ~stored[0] else stored[0];
+    if (b0 < 0x80) return true;
+    if (!negative) return false;
+    if (b0 != 0x80) return false;
+    for (stored[1..]) |sb| if ((if (negative) ~sb else sb) != 0) return false;
     return true;
 }
 

@@ -577,6 +577,16 @@ class Reader {
       final positive = tc > TypeCode.intZero;
       final n = positive ? tc - TypeCode.intZero : TypeCode.intZero - tc;
       final payload = _take(n);
+      // Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+      // magnitude never carries a leading zero byte; a negative excess-form
+      // payload only leads with 0xFF for the single-byte -1, so any wider
+      // 0xFF-lead is a non-minimal encoding. (For negatives a leading 0x00 IS
+      // canonical, e.g. -256 = 1f00, so it must NOT be rejected.)
+      if (positive) {
+        if (payload[0] == 0x00) throw const StrupleException('invalid type code');
+      } else if (payload[0] == 0xFF && n > 1) {
+        throw const StrupleException('invalid type code');
+      }
       // A canonical encoder uses the big-int codes for 16-byte values outside
       // the i128 range, so such a fixed payload is malformed.
       if (n == 16 &&
@@ -600,6 +610,21 @@ class Reader {
         n = (n << 8) | _decodeByte(b, negative);
       }
       final mag = _take(n);
+      // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+      // leading-zero-free magnitude, a minimal length header, and a value that
+      // genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+      // accepting it would also break memcmp ordering). For negatives the stored
+      // magnitude is bit-complemented, so un-complement before the byte checks.
+      if (n == 0) throw const StrupleException('invalid type code');
+      if (m != _minimalByteLength(n)) {
+        throw const StrupleException('invalid type code');
+      }
+      if ((negative ? (~mag[0]) & 0xFF : mag[0]) == 0) {
+        throw const StrupleException('invalid type code');
+      }
+      if (_fitsFixedStored(negative, mag)) {
+        throw const StrupleException('invalid type code');
+      }
       return Element.bigInt(_bigIntFromStored(negative, mag));
     }
     if (tc == TypeCode.float32) return Element.float32(_decodeF32(_take(4)));
@@ -900,6 +925,36 @@ bool _fitsFixed(bool negative, List<int> mag) {
     if (mag[i] != 0) return false;
   }
   return true; // exactly -2^127
+}
+
+/// [_fitsFixed] over a big-int's *stored* magnitude bytes (bit-complemented when
+/// negative), so strict decode can reject a big-int whose value fits a fixed
+/// slot. Mirrors the Zig reference's `fitsFixedStored`.
+bool _fitsFixedStored(bool negative, List<int> stored) {
+  if (stored.length < 16) return true;
+  if (stored.length > 16) return false;
+  final b0 = negative ? (~stored[0]) & 0xFF : stored[0];
+  if (b0 < 0x80) return true;
+  if (!negative) return false;
+  if (b0 != 0x80) return false;
+  for (var i = 1; i < stored.length; i++) {
+    final sb = negative ? (~stored[i]) & 0xFF : stored[i];
+    if (sb != 0) return false;
+  }
+  return true;
+}
+
+/// Fewest bytes that can hold [x] (1 for 1..255, 2 for 256..65535, …), i.e. the
+/// minimal length-of-length a canonical big-int header must carry. Zero for
+/// x == 0. Mirrors the Zig reference's `byteLen`.
+int _minimalByteLength(int x) {
+  var n = 0;
+  var v = x;
+  while (v > 0) {
+    n++;
+    v >>= 8;
+  }
+  return n;
 }
 
 BigInt _bigIntFromStored(bool negative, List<int> magStored) {

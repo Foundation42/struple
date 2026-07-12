@@ -586,6 +586,16 @@ private:
         bool positive = t > tc::INT_ZERO;
         size_t n = positive ? size_t(t - tc::INT_ZERO) : size_t(tc::INT_ZERO - t);
         const uint8_t* p = take(n);
+        // Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+        // magnitude never carries a leading zero byte; a negative excess-form
+        // payload only leads with 0xFF for the single-byte -1, so any wider
+        // 0xFF-lead is a non-minimal encoding of the value. (For negatives a
+        // leading 0x00 IS canonical, e.g. -256 = 1f00, so it is not rejected.)
+        if (positive) {
+            if (p[0] == 0x00) throw Error("struple: non-canonical fixed int (leading zero)");
+        } else if (p[0] == 0xFF && n > 1) {
+            throw Error("struple: non-canonical fixed int (non-minimal negative)");
+        }
         // The widest (16-byte) slots can address values outside i128; a canonical
         // encoder uses the big-int codes for those, so reject them here.
         if (n == 16 && ((positive && p[0] >= 0x80) || (!positive && p[0] < 0x80)))
@@ -643,7 +653,18 @@ private:
         e.kind = Kind::BigInt;
         e.big_negative = neg;
         e.data.resize(n);
-        for (size_t i = 0; i < n; i++) e.data[i] = comp(mag[i]);
+        for (size_t i = 0; i < n; i++) e.data[i] = comp(mag[i]);  // un-complemented magnitude
+        // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+        // leading-zero-free magnitude, a minimal length header, and a value that
+        // genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+        // accepting it would also break memcmp ordering). Checks run over the
+        // un-complemented magnitude (e.data), mirroring Zig's fitsFixedStored.
+        if (n == 0) throw Error("struple: non-canonical big-int (empty magnitude)");
+        if (m != detail::byte_len(uint64_t(n)))
+            throw Error("struple: non-canonical big-int (non-minimal length header)");
+        if (e.data[0] == 0) throw Error("struple: non-canonical big-int (leading-zero magnitude)");
+        if (detail::fits_fixed(neg, e.data.data(), e.data.size()))
+            throw Error("struple: non-canonical big-int (fits fixed range)");
     }
 
     // Read the embedded exponent (a struple integer), un-complementing each byte

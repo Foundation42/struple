@@ -109,8 +109,15 @@ private fun compareNumbers(a: Element, b: Element): Int {
     val cb = numClass(b)
     if (ca != cb) return sign(ca - cb)
     if (ca != 1) return 0 // both -inf, both +inf, or both NaN
-    // Both finite. If both are plain floats, compare as doubles (covers ±0 too).
-    if (!isExact(a) && !isExact(b)) return floatOf(a).compareTo(floatOf(b))
+    // Both finite. If both are plain floats, compare NUMERICALLY as doubles so signed
+    // zero collapses: -0.0 == 0.0 (Item 7). The `<`/`>` operators use IEEE 754
+    // semantics (unlike compareTo / Double.compare, whose total order splits ±0.0);
+    // NaN can't reach here (filtered by numClass above), so this stays a total order.
+    if (!isExact(a) && !isExact(b)) {
+        val fa = floatOf(a)
+        val fb = floatOf(b)
+        return if (fa < fb) -1 else if (fa > fb) 1 else 0
+    }
     // At least one exact operand. Compare via exact BigDecimals, but short-circuit
     // on base-10 order of magnitude FIRST so a decimal with a ~2e9 exponent never
     // drives BigDecimal.compareTo to align scales / materialize billions of digits

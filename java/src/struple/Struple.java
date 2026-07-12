@@ -616,6 +616,18 @@ public final class Struple {
             boolean positive = type > INT_ZERO;
             int n = positive ? type - INT_ZERO : INT_ZERO - type;
             byte[] payload = take(n);
+            // Strict decode — reject non-minimal fixed-int slots (Item 7). A positive magnitude
+            // never carries a leading zero byte; a negative excess-form payload only leads with
+            // 0xFF for the single-byte -1, so any wider 0xFF-lead is a non-minimal encoding of the
+            // value. (For negatives payload[0] == 0x00 IS canonical, e.g. -256 = 1f00.) Mirrors
+            // src/struple.zig.
+            if (positive) {
+                if ((payload[0] & 0xFF) == 0x00) {
+                    throw new StrupleException("non-canonical fixed int (leading zero)");
+                }
+            } else if ((payload[0] & 0xFF) == 0xFF && n > 1) {
+                throw new StrupleException("non-canonical fixed int (non-minimal negative)");
+            }
             // The widest (16-byte) slots can address values outside i128; reject non-canonical.
             if (n == 16 && ((positive && (payload[0] & 0xFF) >= 0x80)
                     || (!positive && (payload[0] & 0xFF) < 0x80))) {
@@ -649,6 +661,30 @@ public final class Struple {
             byte[] mag = new byte[stored.length];
             for (int i = 0; i < mag.length; i++) {
                 mag[i] = (byte) decByte(stored[i], negative);
+            }
+            // Strict decode — a big-int must be canonical (Item 7): a nonempty, leading-zero-free
+            // magnitude, a minimal length header, and a value that genuinely escapes the i128 fixed
+            // range (else it belongs in a fixed slot; accepting it would also break memcmp
+            // ordering, since all big-int codes sort after all fixed-int codes). `mag` is already
+            // un-complemented. Mirrors src/struple.zig.
+            if (n == 0) {
+                throw new StrupleException("non-canonical big-int (empty magnitude)");
+            }
+            if (m != byteLenLong(n)) {
+                throw new StrupleException("non-canonical big-int (non-minimal length header)");
+            }
+            if ((mag[0] & 0xFF) == 0) {
+                throw new StrupleException("non-canonical big-int (leading-zero magnitude)");
+            }
+            // Reuse the encoder's fits-fixed logic: the decoded value must be OUTSIDE the i128
+            // fixed range [I128_MIN, I128_MAX] (that's exactly the range appendInteger routes to the
+            // fixed slots), otherwise the big-int code is non-canonical.
+            BigInteger value = new BigInteger(1, mag);
+            if (negative) {
+                value = value.negate();
+            }
+            if (value.compareTo(I128_MIN) >= 0 && value.compareTo(I128_MAX) <= 0) {
+                throw new StrupleException("non-canonical big-int (value fits fixed range)");
             }
             return Element.ofBigInt(new BigInt(negative, mag));
         }

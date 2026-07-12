@@ -10,6 +10,11 @@
     { "hex": "10", "item": 1, "note": "truncated fixed int: 0x10 declares a 16-byte negative payload that is absent" },
     { "hex": "3803", "item": 2, "note": "truncated decimal: sign=pos but the adjusted-exponent byte is missing" },
     { "hex": "380324800000000b00", "item": 2, "note": "decimal adjusted exponent 2^31 exceeds the i32 bound (coefficient 1); must be rejected on decode" },
-    { "hex": "44", "item": 1, "note": "truncated uuid: type code with fewer than 16 payload bytes" }
+    { "hex": "44", "item": 1, "note": "truncated uuid: type code with fewer than 16 payload bytes" },
+    { "hex": "220005", "item": 7, "note": "non-canonical fixed int: value 5 in a 2-byte positive slot (leading zero); canonical is 2105" },
+    { "hex": "1eff00", "item": 7, "note": "non-canonical fixed int: -256 in a 2-byte negative slot (leading 0xFF); canonical is 1f00" },
+    { "hex": "3100", "item": 7, "note": "non-canonical big-int: empty magnitude (zero must be int_zero 0x20) — the zero-magnitude intSign bug" },
+    { "hex": "31010105", "item": 7, "note": "non-canonical big-int: value 5 fits the fixed range, so the big-int code is wrong (and would break memcmp ordering)" },
+    { "hex": "310200118000000000000000000000000000000000", "item": 7, "note": "non-canonical big-int: non-minimal length header (m=2 for n=17, which fits 1 byte); magnitude 0x80 followed by 16 zero bytes so the length check — not truncation — fires" }
   ]
 }

@@ -194,7 +194,12 @@ public final class Semantic {
         boolean ai = isExact(a);
         boolean bi = isExact(b);
         if (!ai && !bi) {
-            return Double.compare(floatVal(a), floatVal(b)); // both finite floats
+            // Both finite floats — compare NUMERICALLY so signed zero is unified: -0.0 == 0.0.
+            // (Double.compare imposes a total order that splits signed zero, ordering -0.0 < 0.0;
+            // here both operands are finite, so a plain numeric compare is well-defined.) Item 7.
+            double fa = floatVal(a);
+            double fb = floatVal(b);
+            return fa < fb ? -1 : (fa > fb ? 1 : 0);
         }
         // At least one operand is exact (int/big-int/decimal). Decide by base-10 order of
         // magnitude first (Item 2): the exact BigDecimal comparison below aligns scales, which for

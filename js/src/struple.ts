@@ -302,6 +302,16 @@ export class Reader {
     const positive = t > T.intZero;
     const n = positive ? t - T.intZero : T.intZero - t;
     const payload = this.take(n);
+    // Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+    // magnitude never carries a leading zero byte; a negative excess-form payload
+    // only leads with 0xFF for the single-byte -1, so any wider 0xFF-lead is a
+    // non-minimal encoding. A leading 0x00 IS canonical for negatives (e.g.
+    // -256 = 1f00), so that is deliberately not rejected.
+    if (positive) {
+      if (payload[0] === 0x00) throw new Error("struple: non-canonical fixed integer");
+    } else if (payload[0] === 0xff && n > 1) {
+      throw new Error("struple: non-canonical fixed integer");
+    }
     // The widest (16-byte) slots can address values outside i128; a canonical
     // encoder uses the big-int codes for those, so reject them here.
     if (n === 16 && ((positive && payload[0] >= 0x80) || (!positive && payload[0] < 0x80)))
@@ -326,9 +336,29 @@ export class Reader {
     // Reject an out-of-range magnitude length before narrowing to a Number: a 2^64
     // length must throw "truncated", never wrap or read past the buffer.
     if (n > BigInt(this.buf.length - this.pos)) throw new Error("struple: truncated");
+    const nNum = Number(n);
     let mag = 0n;
-    for (const b of this.take(Number(n))) mag = (mag << 8n) | BigInt(comp(b));
-    return { kind: "int", value: negative ? -mag : mag };
+    let firstByte = 0;
+    let i = 0;
+    for (const b of this.take(nNum)) {
+      const u = comp(b);
+      if (i++ === 0) firstByte = u;
+      mag = (mag << 8n) | BigInt(u);
+    }
+    const value = negative ? -mag : mag;
+    // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+    // leading-zero-free magnitude, a minimal length header, and a value that
+    // genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+    // accepting it would also break memcmp ordering, since all big-int codes sort
+    // after all fixed-int codes). The un-complement is already folded into `comp`,
+    // so `firstByte`/`value` are the true (positive-magnitude) quantities.
+    if (n === 0n) throw new Error("struple: non-canonical big-int (empty magnitude)");
+    if (m !== byteLenNum(nNum))
+      throw new Error("struple: non-canonical big-int (non-minimal length header)");
+    if (firstByte === 0) throw new Error("struple: non-canonical big-int (leading-zero magnitude)");
+    if (value >= I128_MIN && value <= I128_MAX)
+      throw new Error("struple: non-canonical big-int (value fits fixed range)");
+    return { kind: "int", value };
   }
 
   readTimestamp(): Element {

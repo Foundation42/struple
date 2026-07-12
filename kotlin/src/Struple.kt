@@ -66,6 +66,17 @@ private val I128_MIN: BigInteger = BigInteger.ONE.shiftLeft(127).negate()
 private val MASK64: BigInteger = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE)
 private val SIGN64: BigInteger = BigInteger.ONE.shiftLeft(63)
 
+/** Does an integer value fall inside the i128 fixed-slot range [-2^127, 2^127-1]?
+ *  Shared by the encoder (which routes fixed vs big-int on it) and by strict decode
+ *  (Item 7), which rejects a big-int code whose value would fit a fixed slot. */
+internal fun fitsFixed(value: BigInteger): Boolean = value >= I128_MIN && value <= I128_MAX
+
+/** Fewest bytes needed to hold a nonnegative length (0->0, 1..255->1, 256..->2, …).
+ *  This is the canonical big-int length-of-length; strict decode (Item 7) rejects a
+ *  wider header. Mirrors byteLen() in src/struple.zig. */
+private fun minimalByteLength(x: Long): Int =
+    if (x == 0L) 0 else (64 - java.lang.Long.numberOfLeadingZeros(x) + 7) / 8
+
 class StrupleException(message: String) : RuntimeException(message)
 
 // ---------------------------------------------------------------------------
@@ -273,7 +284,7 @@ private fun appendInteger(out: java.io.ByteArrayOutputStream, value: BigInteger)
     if (value.signum() == 0) { out.write(Tc.INT_ZERO); return }
     val negative = value.signum() < 0
     val mag = value.abs()
-    if (value >= I128_MIN && value <= I128_MAX) {
+    if (fitsFixed(value)) {
         // Fixed slots span the whole i128 range (1-16 byte magnitudes).
         if (negative) {
             val posVal = mag.subtract(BigInteger.ONE)
@@ -556,7 +567,19 @@ class Reader(val buf: ByteArray, var pos: Int = 0) {
     private fun readFixedInt(t: Int): BigInteger {
         val positive = t > Tc.INT_ZERO
         val n = if (positive) t - Tc.INT_ZERO else Tc.INT_ZERO - t
-        val payload = take(n)
+        val payload = take(n) // n is 1..16, so payload is never empty
+        // Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+        // magnitude never carries a leading zero byte; a negative excess-form payload
+        // only leads with 0xFF for the single-byte -1, so any wider 0xFF-lead is a
+        // non-minimal encoding. (For negatives payload[0]==0x00 IS canonical, e.g.
+        // -256 = 1f00, so it must NOT be rejected.) Mirrors the fixed-int arm in
+        // src/struple.zig.
+        val p0 = payload[0].toInt() and 0xFF
+        if (positive) {
+            if (p0 == 0x00) throw StrupleException("struple: non-canonical fixed int (leading zero)")
+        } else if (p0 == 0xFF && n > 1) {
+            throw StrupleException("struple: non-canonical fixed int (non-minimal negative)")
+        }
         // The widest (16-byte) slots can address values outside i128; a canonical
         // encoder uses the big-int codes for those, so reject them here.
         if (n == 16 && ((positive && (payload[0].toInt() and 0xFF) >= 0x80) ||
@@ -584,8 +607,19 @@ class Reader(val buf: ByteArray, var pos: Int = 0) {
         if (n < 0L || n > (buf.size - pos).toLong()) throw StrupleException("struple: truncated")
         val magBytes = take(n.toInt())
         val mag = ByteArray(magBytes.size) { comp(magBytes[it].toInt() and 0xFF).toByte() }
+        // Strict decode — a big-int must be canonical (Item 7): a nonempty,
+        // leading-zero-free magnitude, a minimal length header, and a value that
+        // genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+        // accepting it would also break memcmp ordering, since every big-int type
+        // code sorts after every fixed-int code). `mag` is already un-complemented,
+        // so the leading-byte check is direct. Mirrors the big-int arm in src/struple.zig.
+        if (n == 0L) throw StrupleException("struple: non-canonical big-int (empty magnitude)")
+        if (m != minimalByteLength(n)) throw StrupleException("struple: non-canonical big-int (non-minimal length header)")
+        if ((mag[0].toInt() and 0xFF) == 0) throw StrupleException("struple: non-canonical big-int (leading zero magnitude)")
         val v = BigInteger(1, mag)
-        return if (negative) v.negate() else v
+        val value = if (negative) v.negate() else v
+        if (fitsFixed(value)) throw StrupleException("struple: non-canonical big-int (value fits fixed range)")
+        return value
     }
 
     private fun readF64(): Double {

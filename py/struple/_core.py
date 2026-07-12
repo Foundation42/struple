@@ -542,6 +542,16 @@ class Reader:
         positive = t > INT_ZERO
         n = (t - INT_ZERO) if positive else (INT_ZERO - t)
         payload = self._take(n)
+        # Strict decode — reject non-minimal fixed-int slots (Item 7). A positive
+        # magnitude never carries a leading zero byte; a negative excess-form
+        # payload only leads with 0xFF for the single-byte -1, so any wider
+        # 0xFF-lead is a non-minimal encoding of the value. (For negatives a
+        # leading 0x00 IS canonical, e.g. -256 = 1f00, so it is not rejected.)
+        if positive:
+            if payload[0] == 0x00:
+                raise ValueError("struple: non-canonical fixed integer")
+        elif payload[0] == 0xFF and n > 1:
+            raise ValueError("struple: non-canonical fixed integer")
         # The widest (16-byte) slots can address values outside i128; a canonical
         # encoder uses the big-int codes for those, so reject them here.
         if n == 16 and ((positive and payload[0] >= 0x80) or (not positive and payload[0] < 0x80)):
@@ -564,10 +574,29 @@ class Reader:
         n = 0
         for b in self._take(m):
             n = (n << 8) | comp(b)
+        stored = self._take(n)
+        # Strict decode — a big-int must be canonical (Item 7): a nonempty,
+        # leading-zero-free magnitude, a minimal length header, and a value that
+        # genuinely escapes the i128 fixed range (else it belongs in a fixed slot;
+        # accepting it would also break memcmp ordering, since every big-int type
+        # code sorts after every fixed-int code).
+        if n == 0:  # empty magnitude — zero must be the int_zero code (fixes the intSign bug)
+            raise ValueError("struple: non-canonical big-int (empty magnitude)")
+        if m != (n.bit_length() + 7) // 8:  # non-minimal length-of-length header
+            raise ValueError("struple: non-canonical big-int (non-minimal length header)")
+        # `stored` is bit-complemented for negatives; the un-complemented
+        # most-significant magnitude byte must be nonzero.
+        if ((stored[0] ^ 0xFF) if negative else stored[0]) == 0:
+            raise ValueError("struple: non-canonical big-int (leading-zero magnitude)")
         mag = 0
-        for b in self._take(n):
+        for b in stored:
             mag = (mag << 8) | comp(b)
-        return ("int", -mag if negative else mag)
+        value = -mag if negative else mag
+        # A value inside the signed 128-bit range belongs in a fixed slot — reuse
+        # the encoder's fits-fixed bound. A big-int code for it is non-canonical.
+        if _I128_MIN <= value <= _I128_MAX:
+            raise ValueError("struple: non-canonical big-int (value fits fixed range)")
+        return ("int", value)
 
     def _read_decimal(self) -> _decimal.Decimal:
         sign = self._take(1)[0]
